@@ -47,3 +47,5 @@ Format — one entry per decision under its category, newest last, ids never reu
   Src: /product init answer · Code: .product/config.md plan_gate
 - **D-005** 2026-11-08 · founder · active — merge_policy is merge-when-green to local main; never push. Why: chosen over branch-only at init.
   Src: /product init answer · Code: .product/config.md merge_policy
+- **D-006** 2026-11-08 · founder · active — main is the default branch and is published as the public GitHub repo jadd0/llm-gateway; the founder pushes or asks for a push, the loop still never pushes on its own. The brief PDF stays out of git. Why: the repo is the public proof for the CV.
+  Src: founder in chat: "make main the main git branch and set up a public github repo for it" · Code: .gitignore
