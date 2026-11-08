@@ -41,7 +41,7 @@ Format — one entry per decision under its category, newest last, ids never reu
   Src: founder in chat: "lets go with fastify then." · Code: packages/gateway/package.json
 
 ## Loop & process
-- **D-003** 2026-11-08 · founder · active — The rate limiter (Redis Lua token bucket) and circuit breaker are written by the founder by hand; agents write only interfaces, wiring and failing tests for them. Why: every line must be explainable in an interview.
+- **D-003** 2026-11-08 · founder · superseded by D-007 — The rate limiter (Redis Lua token bucket) and circuit breaker are written by the founder by hand; agents write only interfaces, wiring and failing tests for them. Why: every line must be explainable in an interview.
   Src: LLM_Gateway_Brief.pdf, Traps to avoid
 - **D-004** 2026-11-08 · founder · active — plan_gate is human: every PR plan is approved by the founder before a build. Why: founder in chat: "i want to plan this myself with you".
   Src: /product init answer · Code: .product/config.md plan_gate
@@ -49,3 +49,5 @@ Format — one entry per decision under its category, newest last, ids never reu
   Src: /product init answer · Code: .product/config.md merge_policy
 - **D-006** 2026-11-08 · founder · active — main is the default branch and is published as the public GitHub repo jadd0/llm-gateway; the founder pushes or asks for a push, the loop still never pushes on its own. The brief PDF stays out of git. Why: the repo is the public proof for the CV.
   Src: founder in chat: "make main the main git branch and set up a public github repo for it" · Code: .gitignore
+- **D-007** 2026-11-08 · founder · active — Agents write all the code, including the rate limiter and circuit breaker; each PR ships a plain-language explanation the founder can defend in an interview. Why: founder in chat: "im not writing any code, no point."
+  Src: chat 2026-11-08 · Code: none
