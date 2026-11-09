@@ -50,7 +50,8 @@ class Slow extends Error {
   override name = 'SemanticQueryTimeout';
 }
 
-const errInfo = (err: unknown) => ({ errClass: (err as Error)?.name, code: (err as { code?: string })?.code });
+// Drizzle wraps a driver error and keeps the Postgres code on its cause.
+const errInfo = (err: unknown) => ({ errClass: (err as Error)?.name, code: (err as { code?: string })?.code ?? (err as { cause?: { code?: string } })?.cause?.code });
 
 export function createSemanticLookup(opts: SemanticLookupOptions): SemanticLookup {
   const now = opts.clock ?? Date.now;

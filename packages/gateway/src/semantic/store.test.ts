@@ -124,7 +124,8 @@ describe('semantic store on a private table', () => {
   // A vector index scan that stops after 100 tuples and does not continue (at the defaults it is 20000 tuples,
   // which a table shared by many tenants exceeds the same way).
   const stingy = ['-c hnsw.max_scan_tuples=100', '-c hnsw.iterative_scan=off'];
-  // And a planner that has no other way to order by distance than the vector index.
+  // And a planner for which the vector index is the only way to order by distance (no sort), as it can be on a
+  // large table; with statistics it would read a few qualifying rows through the btree index and sort them.
   const adverse = [...stingy, '-c enable_seqscan=off', '-c enable_bitmapscan=off'];
   const url = (options: string[]) => `${config.databaseUrl}${config.databaseUrl.includes('?') ? '&' : '?'}options=${encodeURIComponent([`-c search_path=${schema},public`, ...options].join(' '))}`;
   const ownDb = (options: string[] = []) => createDb({ databaseUrl: url(options), poolSize: 4 });
@@ -137,8 +138,7 @@ describe('semantic store on a private table', () => {
 
   beforeAll(async () => {
     await handle.db.execute(sql.raw(`CREATE SCHEMA ${schema}`));
-    await handle.db.execute(sql.raw(`CREATE TABLE ${schema}.semantic_cache (LIKE public.semantic_cache INCLUDING ALL)`));
-  });
+    await handle.db.execute(sql.raw(`CREATE TABLE ${schema}.semantic_cache (LIKE public.semantic_cache INCLUDING ALL)`));  });
   afterAll(async () => {
     for (const h of made) await h.close();
     await handle.db.execute(sql.raw(`DROP SCHEMA ${schema} CASCADE`));
@@ -193,7 +193,7 @@ describe('semantic store on a private table', () => {
   for (const iterativeScan of [true, false]) {
     it(`a scope and context with many rows is searched exactly (${iterativeScan ? 'pgvector 0.8 iterative scan' : 'before 0.8: index off, exact sort'})`, async () => {
       // exactMax 3: the 6 rows below take the second path.
-      const { store: own } = open(iterativeScan ? adverse : [...stingy, '-c enable_seqscan=off'], { exactMax: 3, pgvector: { version: iterativeScan ? '0.8.7' : '0.7.4', iterativeScan } });
+      const { store: own } = open([...stingy, '-c enable_sort=off'], { exactMax: 3, pgvector: { version: iterativeScan ? '0.8.7' : '0.7.4', iterativeScan } });
       await crowd(own, 1500);
       const scoped = `${iterativeScan}`;
       for (const [i, deg] of [90, 85, 75, 60, 55, 50].entries()) await own.upsert(row(`many-${scoped}`, 'm', `m${i}`, angle(deg)));

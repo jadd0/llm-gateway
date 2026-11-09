@@ -47,7 +47,8 @@ export interface SemanticFillOptions {
   log?: { warn(obj: object, msg: string): void };
 }
 
-const errInfo = (err: unknown) => ({ errClass: (err as Error)?.name, code: (err as { code?: string })?.code });
+// Drizzle wraps a driver error and keeps the Postgres code on its cause.
+const errInfo = (err: unknown) => ({ errClass: (err as Error)?.name, code: (err as { code?: string })?.code ?? (err as { cause?: { code?: string } })?.cause?.code });
 
 /**
  * Embeds and stores prompts off the request path. A bounded in-memory queue: when it is full the new job is
