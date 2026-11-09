@@ -488,7 +488,7 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     const hitOn = async (model: string) => {
       const noted: Array<Record<string, unknown>> = [];
       const request = { reqlog: { note: (n: Record<string, unknown>) => void noted.push(n) } } as unknown as NonNullable<CacheHit['request']>;
-      await app.recordCacheHit!({ request, tenantId: s.tenantId, model, usage });
+      await app.recordCacheHit!({ request, tenantId: s.tenantId, model, usage, kind: 'exact' });
       return noted;
     };
     // Unpriced: nothing to say about tokens (the cache plugin already noted the real ones) and no saving.

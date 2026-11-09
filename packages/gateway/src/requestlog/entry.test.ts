@@ -34,7 +34,7 @@ describe('stream entries', () => {
     const names = fields.filter((_, i) => i % 2 === 0);
     expect(names.sort()).toEqual(['an', 'at', 'ch', 'co', 'ct', 'ec', 'fb', 'id', 'k', 'ky', 'md', 'ms', 'pt', 'pv', 'sm', 'sr', 'st', 'sv', 'tf', 'tn', 'up', 'v']);
     const spendNames = toSpendFields(spend()).filter((_, i) => i % 2 === 0);
-    expect(spendNames.sort()).toEqual(['co', 'ct', 'es', 'id', 'k', 'md', 'pe', 'pt', 'sk', 'sv', 'tn', 'v']);
+    expect(spendNames.sort()).toEqual(['ck', 'co', 'ct', 'es', 'id', 'k', 'md', 'pe', 'pt', 'sk', 'sv', 'tn', 'v']);
     // A value that looks like a key or a message cannot ride in an id or counter field: it does not parse.
     const withKey = toLogFields(log());
     withKey[withKey.indexOf('id') + 1] = 'gw_secretkeysecretkey';
@@ -42,6 +42,16 @@ describe('stream entries', () => {
     const withText = toLogFields(log());
     withText[withText.indexOf('pt') + 1] = 'hello, what is the capital of France';
     expect(() => fromStreamFields(withText)).toThrow();
+  });
+
+  it('a hit carries which cache served it, and a value that names no cache is refused', () => {
+    for (const cacheKind of ['exact', 'semantic'] as const) {
+      const hit = spend({ kind: 'hit', cacheKind });
+      expect(fromStreamFields(toSpendFields(hit))).toEqual({ kind: 'spend', entry: hit });
+    }
+    const bad = toSpendFields(spend({ kind: 'hit', cacheKind: 'semantic' }));
+    bad[bad.indexOf('ck') + 1] = 'fuzzy';
+    expect(() => fromStreamFields(bad)).toThrow('cache kind');
   });
 
   it('refuses an unknown version, kind or malformed value', () => {

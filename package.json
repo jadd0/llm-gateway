@@ -17,6 +17,9 @@
     "bench:providers": "bash bench/run-providers.sh",
     "bench:chaos": "bash bench/run-chaos.sh",
     "bench:cache": "bash bench/run-cache.sh",
+    "bench:semantic-eval": "node --env-file-if-exists=.env.local bench/semantic/eval.ts",
+    "bench:vector-index": "node --env-file-if-exists=.env.local bench/semantic/index-bench.ts",
+    "bench:semantic": "bash bench/run-semantic.sh",
     "bench:logging": "bash bench/run-logging.sh",
     "worker": "node --env-file-if-exists=.env.local packages/log-worker/src/worker.ts"
   },

@@ -192,6 +192,22 @@ non-streamed and streamed. Stampede sends 50 identical non-streamed requests at 
 hit rate, p50 and p95 for hits and misses, and upstream calls. A short run on the build machine only proved the scripts work; it is
 not a result.
 
+## Semantic cache (PR 9)
+
+Pending quiet run. Three runs, one at a time, each after `bash bench/quiet.sh bench/results/pr-9`; no figure is quoted here until
+`bench/results/pr-9/` is committed (R3).
+
+- `npm run bench:semantic-eval`: hit rate and wrong-answer rate at thresholds 0.80 to 0.99 for Quora Question Pairs and PAWS-Wiki
+  pairs, per embedding model, input type and across models, pairwise and store-wide nearest neighbour, each with and without the
+  guards; threshold chosen on a dev half (nearest neighbour with guards) and reported on a test half, with a recommendation when
+  none meets 1%. Writes `eval.json` and `summary.md`.
+- `npm run bench:vector-index`: HNSW, IVFFlat and an exact scan at 10 000 and 100 000 vectors: recall@1, p50 and p95 query time,
+  build time and index size, with and without the scope-and-context filter. Writes `index-bench.json` and `index-bench.md`.
+- `npm run bench:semantic`: request latency of a semantic hit against an exact hit and a miss, through the gateway with a mock
+  provider. Writes `semantic-*.json` and `latency.md`.
+
+A tiny run on the build machine only proved the scripts work; it is not a result.
+
 ## Request logging off the hot path (PR 10)
 
 Pending quiet run. `bash bench/quiet.sh bench/results/pr-10 && bash bench/run-logging.sh` writes `logging-inline-<n>.json`,

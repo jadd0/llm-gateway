@@ -1,0 +1,111 @@
+import { pgErrorInfo } from '../db/pg-error.ts';
+import { replyWithin } from '../redis.ts';
+import type { CachedCompletion } from '../cache/replay.ts';
+import type { CacheStore } from '../cache/store.ts';
+import type { Embedder } from './embedder.ts';
+import { failedGuard, guardSignature, type GuardOptions, type GuardRule } from './guards.ts';
+import type { SemanticSplit } from './context.ts';
+import type { SemanticStore } from './store.ts';
+
+export interface SemanticHit {
+  entry: CachedCompletion;
+  /** The response-cache key the entry is stored under. */
+  exactKey: string;
+  /** Cosine similarity of the served prompt to the request's, at most 1. */
+  similarity: number;
+}
+
+/** What a semantic lookup found. A miss names the guard that refused the nearest prompt, when one did. */
+export type SemanticResult =
+  | { status: 'hit'; entry: SemanticHit }
+  | { status: 'miss'; guard?: GuardRule }
+  | { status: 'unavailable' };
+
+export interface SemanticLookup {
+  /**
+   * After an exact miss: the cached answer of the stored prompt nearest to this one, if it is close enough and
+   * passes the guards. Never throws; anything that goes wrong (no embedding in time, Postgres slow or down,
+   * Redis down) is a miss or `unavailable`, and the request goes on to the provider.
+   */
+  find(scope: string, split: SemanticSplit): Promise<SemanticResult>;
+}
+
+export interface SemanticLookupOptions {
+  embedder: Embedder;
+  store: SemanticStore;
+  /** Where the answers are: the response cache, read by the key a row names. */
+  cache: Pick<CacheStore, 'get'>;
+  threshold: number;
+  /** Which guards the nearest prompt must pass to be served. */
+  guard: GuardOptions;
+  /** false: only a vector made by the same model as the query's is a candidate. */
+  crossModel: boolean;
+  /** A last user message longer than this is not looked up. */
+  maxChars: number;
+  /** How long a lookup waits for the nearest-neighbour query; the store's pool makes Postgres cancel it at the same budget. */
+  pgTimeoutMs: number;
+  /** Unix ms. Expiry is judged on this clock, the one that wrote `expires_at`. */
+  clock?: () => number;
+  log?: { warn(obj: object, msg: string): void; info(obj: object, msg: string): void };
+}
+
+class Slow extends Error {
+  override name = 'SemanticQueryTimeout';
+}
+
+export function createSemanticLookup(opts: SemanticLookupOptions): SemanticLookup {
+  const now = opts.clock ?? Date.now;
+  let down = false;
+  const failed = (err: unknown) => {
+    if (down) return;
+    down = true;
+    opts.log?.warn({ ...pgErrorInfo(err), op: 'nearest' }, 'semantic lookup failed, skipping the semantic step');
+  };
+  const answered = () => {
+    if (!down) return;
+    down = false;
+    opts.log?.info({}, 'semantic lookup working again');
+  };
+
+  return {
+    async find(scope, split) {
+      if (split.text.length > opts.maxChars) return { status: 'miss' };
+      const embedded = await opts.embedder.embed(split.text);
+      if (!embedded) return { status: 'unavailable' };
+
+      let near;
+      try {
+        near = await replyWithin(
+          opts.store.nearest({
+            scope,
+            contextHash: split.contextHash,
+            embedding: embedded.vector,
+            now: new Date(now()),
+            ...(opts.crossModel ? {} : { embedder: embedded.embedder }),
+          }),
+          // Postgres cancels the statement at the pool's timeout (the same budget); this only bounds a wait for a connection or a reply that never comes.
+          opts.pgTimeoutMs + 25,
+          () => new Slow(),
+        );
+      } catch (err) {
+        failed(err);
+        return { status: 'unavailable' };
+      }
+      answered();
+      if (!near || near.similarity < opts.threshold) return { status: 'miss' };
+      // Close in meaning is not enough: the numbers, quotes, names and negations must agree, and the words nearly.
+      const guard = failedGuard(near.guardSig, guardSignature(split.text), opts.guard);
+      if (guard) return { status: 'miss', guard };
+
+      const found = await opts.cache.get(near.exactKey);
+      if (found.status === 'unavailable') return { status: 'unavailable' };
+      if (found.status === 'miss') {
+        // The answer is gone (evicted, expired, replaced by something unreadable): the row points at nothing.
+        // Not awaited: the request is a miss either way, and a slow delete must not hold it.
+        void opts.store.remove(near.id).catch((err: unknown) => opts.log?.warn({ ...pgErrorInfo(err), op: 'remove' }, 'semantic row could not be removed'));
+        return { status: 'miss' };
+      }
+      return { status: 'hit', entry: { entry: found.entry, exactKey: near.exactKey, similarity: Math.min(1, near.similarity) } };
+    },
+  };
+}

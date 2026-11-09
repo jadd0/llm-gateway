@@ -29,6 +29,8 @@ export interface HitEntry {
   promptTokens: number;
   completionTokens: number;
   savedMicros: number;
+  /** Which cache served it. */
+  cacheKind: 'exact' | 'semantic';
 }
 
 export interface PgReserveArgs {
@@ -386,6 +388,7 @@ export async function applySpendBatch(tx: Tx, entries: QueuedSpend[]): Promise<{
       estimated: e.kind === 'charge' && e.estimated,
       cached: e.kind === 'hit',
       savedMicros: e.kind === 'hit' ? e.savedMicros : 0,
+      cacheKind: e.kind === 'hit' ? (e.cacheKind ?? 'exact') : null,
     }));
   const inserted = rows.length
     ? await tx

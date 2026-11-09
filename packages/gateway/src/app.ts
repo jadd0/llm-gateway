@@ -5,6 +5,7 @@ import { keyStoreFromConfig } from './auth/key-store.ts';
 import { createIpLimiter } from './auth/ip-limit.ts';
 import type { Config } from './config.ts';
 import { createDb } from './db/client.ts';
+import { pgErrorInfo } from './db/pg-error.ts';
 import type { PgLedger } from './budget/pg-ledger.ts';
 import { budgetGuard } from './budget/plugin.ts';
 import { errorBody } from './errors.ts';
@@ -15,6 +16,11 @@ import { createLimiter } from './ratelimit/limiter.ts';
 import { rateLimit } from './ratelimit/plugin.ts';
 import { chatRoutes } from './routes/chat.ts';
 import { createRedis } from './redis.ts';
+import { fallbackEmbedder, localEmbedder, voyageEmbedder, type Embedder } from './semantic/embedder.ts';
+import { createSemanticFill } from './semantic/fill.ts';
+import { createSemanticLookup } from './semantic/lookup.ts';
+import { createSemanticPools } from './semantic/pools.ts';
+import { checkPgvector, createSemanticStore, sweepExpired, type SemanticStoreOptions } from './semantic/store.ts';
 import { createBreaker, probeLockTtlMs, type Breaker } from './resilience/breaker.ts';
 import { chainFor } from './resilience/fallback.ts';
 import { requestLogCollector } from './requestlog/collector.ts';
@@ -38,6 +44,10 @@ export function buildApp(
     wrapBreaker?: (breaker: Breaker) => Breaker;
     /** Wraps the response cache's store. Tests only. */
     wrapCacheStore?: (store: CacheStore) => CacheStore;
+    /** Replaces the semantic cache's embedder. Tests only. */
+    semanticEmbedder?: Embedder;
+    /** Pins the semantic cache's clock (ms): row expiry. Tests only. */
+    semanticClock?: () => number;
     /** Pins the `created` time of a replayed cache hit (ms). Tests only. */
     cacheClock?: () => number;
     /** How long a client of a deadline-cut stream gets to take the last bytes. Tests only. */
@@ -142,16 +152,98 @@ export function buildApp(
   // After the rate limiter, before the budget: an answer already in the cache costs nothing, so it is served
   // without a hold, even to a tenant whose budget is spent.
   if (config.cacheEnabled && redis !== null) {
-    app.register(responseCache, {
-      store: (extra.wrapCacheStore ?? ((s: CacheStore) => s))(
-        createCacheStore({
-          redis,
-          ttlS: config.cacheTtlS,
-          maxEntryBytes: config.cacheMaxEntryBytes,
-          timeoutMs: config.cacheRedisTimeoutMs,
+    const cacheStore = (extra.wrapCacheStore ?? ((s: CacheStore) => s))(
+      createCacheStore({
+        redis,
+        ttlS: config.cacheTtlS,
+        maxEntryBytes: config.cacheMaxEntryBytes,
+        timeoutMs: config.cacheRedisTimeoutMs,
+        log: app.log,
+      }),
+    );
+    // The semantic cache keeps prompt vectors in Postgres and reads the answers from the cache store above.
+    let semantic: { lookup: ReturnType<typeof createSemanticLookup>; fill: ReturnType<typeof createSemanticFill> } | undefined;
+    if (config.semanticEnabled) {
+      const embedder =
+        extra.semanticEmbedder ??
+        fallbackEmbedder(
+          config.voyageApiKey
+            ? voyageEmbedder({
+                apiKey: config.voyageApiKey,
+                baseUrl: config.voyageBaseUrl,
+                model: config.voyageModel,
+                dimensions: config.semanticDimensions,
+                timeoutMs: config.voyageTimeoutMs,
+                inputType: config.semanticInputType,
+                log: app.log,
+              })
+            : undefined,
+          localEmbedder({
+            baseUrl: config.ollamaUrl,
+            model: config.semanticLocalModel,
+            dimensions: config.semanticDimensions,
+            timeoutMs: config.semanticLocalTimeoutMs,
+            inputType: config.semanticInputType,
+            log: app.log,
+          }),
+          // A failed API is left alone this long, so an outage costs one timeout, not one per request.
+          { backoffMs: 5_000 },
+        );
+      // Pools of their own, apart from authentication and the budget: lookups have one (a statement timeout of the
+      // lookup budget, warm connections), and fills, removals and the sweep another, so a burst of fills can queue
+      // only behind itself and never takes a connection a lookup needs.
+      const pools = createSemanticPools({ databaseUrl: config.databaseUrl, lookupPool: config.semanticPgPool, writePool: config.semanticPgFillPool, lookupTimeoutMs: config.semanticPgTimeoutMs });
+      const storeOptions: SemanticStoreOptions = { lookupDb: pools.lookup.db };
+      const semanticStore = createSemanticStore(pools.write.db, storeOptions);
+      // The start-up check: no pgvector, no start, and the error says what to install. The version picks the query.
+      app.addHook('onReady', async () => {
+        const found = await checkPgvector(handle.db);
+        await pools.warm();
+        storeOptions.pgvector = found;
+        app.log.info({ pgvector: found.version, iterativeScan: found.iterativeScan }, 'pgvector found');
+      });
+      const clock = extra.semanticClock ?? Date.now;
+      const fill = createSemanticFill({
+        embedder,
+        store: semanticStore,
+        queueMax: config.semanticFillQueue,
+        maxChars: config.semanticMaxInputChars,
+        clock,
+        log: app.log,
+      });
+      semantic = {
+        fill,
+        lookup: createSemanticLookup({
+          embedder,
+          store: semanticStore,
+          cache: cacheStore,
+          threshold: config.semanticThreshold,
+          guard: { tokenSet: config.semanticGuardTokenSet, maxDiff: config.semanticGuardMaxDiff },
+          crossModel: config.semanticCrossModel,
+          maxChars: config.semanticMaxInputChars,
+          pgTimeoutMs: config.semanticPgTimeoutMs,
+          clock,
           log: app.log,
         }),
-      ),
+      };
+      // Expired rows are deleted in batches; one that outlives its answer by a moment is a miss in the lookup anyway.
+      const sweep = setInterval(() => {
+        sweepExpired(semanticStore, new Date(clock()), 500).catch((err: unknown) => {
+          app.log.warn({ ...pgErrorInfo(err), op: 'cleanup' }, 'semantic cleanup failed');
+        });
+      }, config.semanticCleanupS * 1000);
+      sweep.unref();
+      app.addHook('onClose', async () => {
+        clearInterval(sweep);
+        await fill.close();
+        await embedder.close?.();
+        await pools.close();
+      });
+    }
+    app.register(responseCache, {
+      store: cacheStore,
+      ...(semantic ? { semantic } : {}),
+      ttlS: config.cacheTtlS,
       singleFlight: createSingleFlight({
         redis,
         lockMs: config.cacheLockMs,

@@ -21,21 +21,22 @@ hop (auth, limits, budgets, resilience, caching, logging).
   reserved atomically in Redis before the call and replaced by the actual cost after; Postgres records every charge and
   decides instead while Redis is down. See [../budgets/README.md](../budgets/README.md).
 - **Redis and Postgres+pgvector** (`docker-compose.yml`): Redis holds the key cache, the rate-limit buckets and the live
-  budget balances; Postgres holds tenants and API keys (with their limits and caps) and the spend record. The request log and the spend queue live in a Redis stream. Vectors are not used yet.
+  budget balances; Postgres holds tenants and API keys (with their limits and caps) and the spend record. The semantic cache keeps prompt vectors in Postgres; the request log and the spend queue live in a Redis stream.
 
 - **Response cache** (`packages/gateway/src/cache`): identical `temperature: 0` requests are answered from Redis, scoped per
   tenant, with one upstream call per burst of identical misses. See [../cache/README.md](../cache/README.md).
+- **Semantic cache** (`packages/gateway/src/semantic`): after an exact miss, the last user message is embedded (Voyage, else a local model) and the nearest stored prompt in pgvector serves its cached answer when close enough and its numbers, names, quotes and negations agree. Off per tenant until it opts in. See [../semantic-cache/README.md](../semantic-cache/README.md).
 - **Request log** (`packages/gateway/src/requestlog`, `packages/log-worker`): every request becomes one entry in a Redis stream, and settled spend travels in the same stream; the log worker writes both to Postgres in batches. See [../request-log/README.md](../request-log/README.md).
 - **Resilience** (`packages/gateway/src/resilience`): timeouts, retries, a Redis-shared circuit breaker and fallback chains. See [../resilience/README.md](../resilience/README.md).
 
 ## Planned (marked dashed in the diagram)
 
-The semantic cache and the dashboard.
+The dashboard.
 
 ## Request flow today
 
 client, then the gateway's key check (Redis, or Postgres on a miss), then the rate limit (one Redis script), then the
-response cache (a hit is answered here, at no cost), then the budget reservation, then the provider the model name selects (through its adapter), then back. A request over its limit is answered 429 before it reaches the mock.
+response cache (a hit, exact or by meaning, is answered here, at no cost), then the budget reservation, then the provider the model name selects (through its adapter), then back. A request over its limit is answered 429 before it reaches the mock.
 
 ## Why this design
 

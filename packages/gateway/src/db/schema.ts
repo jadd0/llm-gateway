@@ -1,5 +1,6 @@
-import { bigint, boolean, char, check, index, integer, pgTable, primaryKey, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { bigint, bigserial, boolean, char, check, index, integer, jsonb, pgTable, primaryKey, smallint, text, timestamp, unique, uuid, vector } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
+import type { GuardSignature } from '../semantic/guards.ts';
 
 export const tenants = pgTable('tenants', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -10,6 +11,9 @@ export const tenants = pgTable('tenants', {
   monthlyBudgetMicros: bigint('monthly_budget_micros', { mode: 'number' }),
   // True when the tenant reads and writes the shared response-cache pool instead of its own (keys set-cache-sharing).
   cacheShared: boolean('cache_shared').notNull().default(false),
+  // Off until the tenant opts in (keys set-semantic-cache): a similar prompt is not the same prompt, so the
+  // default is exact-match caching only.
+  semanticCache: boolean('semantic_cache').notNull().default(false),
 });
 
 export const apiKeys = pgTable(
@@ -68,10 +72,15 @@ export const spendLedger = pgTable(
     cached: boolean('cached').notNull().default(false),
     // For a cached row, what the same usage would have cost at the model that first served it.
     savedMicros: bigint('saved_micros', { mode: 'number' }).notNull().default(0),
+    // For a cached row, which cache served it; null for a row that was not a hit.
+    cacheKind: text('cache_kind'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   // The month's spend and savings are summed per tenant and period.
-  (t) => [index('spend_ledger_tenant_period_idx').on(t.tenantId, t.period)],
+  (t) => [
+    index('spend_ledger_tenant_period_idx').on(t.tenantId, t.period),
+    check('spend_ledger_cache_kind_check', sql`${t.cacheKind} IN ('exact', 'semantic')`),
+  ],
 );
 
 // Money held for in-flight requests: every hold, whichever store decided it. The Postgres path counts
@@ -108,6 +117,39 @@ export const budgetEpoch = pgTable(
   (t) => [check('budget_epoch_single_row', sql`${t.id} = 1`)],
 );
 
+// The prompt of every cached answer, as a vector, so a differently worded question can find the answer. The
+// answer itself stays in the response cache (Redis); `exact_key` names it. Scope and context hash decide who
+// may be matched with whom (see semantic/context.ts); the vector only ranks the candidates inside them.
+export const semanticCache = pgTable(
+  'semantic_cache',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    // A tenant id, or 'shared' (the response cache's scope rule).
+    scope: text('scope').notNull(),
+    // Everything about the request except its last user message.
+    contextHash: char('context_hash', { length: 64 }).notNull(),
+    // The response-cache key holding the answer.
+    exactKey: text('exact_key').notNull(),
+    // L2-normalised, SEMANTIC_DIMENSIONS long.
+    embedding: vector('embedding', { dimensions: 1024 }).notNull(),
+    // Which model made the vector: 'voyage-4-lite' or 'voyage-4-nano'.
+    embedder: text('embedder').notNull(),
+    // What the guards compare (semantic/guards.ts): truncated hashes of the prompt's numbers, quoted
+    // strings, names and content words, and its negation count. The prompt itself is never stored here.
+    guardSig: jsonb('guard_sig').$type<GuardSignature>().notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    unique('semantic_cache_scope_exact_key_unique').on(t.scope, t.exactKey),
+    index('semantic_cache_scope_context_idx').on(t.scope, t.contextHash),
+    // The expiry sweep finds rows by expiry.
+    index('semantic_cache_expires_idx').on(t.expiresAt),
+    // HNSW provisionally; docs/semantic-cache/README.md has the index bench that decides.
+    index('semantic_cache_embedding_idx').using('hnsw', t.embedding.op('vector_cosine_ops')),
+  ],
+);
+
 // One row per request, whatever its outcome: who, which model, tokens, cost, timing, cache, fallback. Metadata
 // only; no prompt, completion, header or key is ever stored. Written by the log worker from the Redis stream,
 // so a redelivered entry is a no-op on the primary key. The ids are not foreign keys: a log row outlives
@@ -130,7 +172,7 @@ export const requestLog = pgTable(
     completionTokens: integer('completion_tokens'),
     costMicros: bigint('cost_micros', { mode: 'number' }).notNull().default(0),
     savedMicros: bigint('saved_micros', { mode: 'number' }).notNull().default(0),
-    // hit | miss | bypass | uncacheable | unavailable | refresh; null when the cache was not consulted.
+    // hit | semantic-hit | miss | bypass | uncacheable | unavailable | refresh; null when the cache was not consulted.
     cache: text('cache'),
     attempts: smallint('attempts').notNull().default(0),
     fallbackUsed: boolean('fallback_used').notNull().default(false),

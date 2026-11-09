@@ -33,6 +33,7 @@ const caller = (
   tpmLimit: limits.tpm ?? null,
   monthlyBudgetMicros: limits.budget ?? null,
   cacheShared: false,
+  semanticCache: false,
 });
 
 const seed = async () => {
@@ -271,11 +272,25 @@ describe('key store', () => {
     expect((await store.lookup(s.hash))!.cacheShared).toBe(false);
     const { cacheShared: _dropped, ...old } = JSON.parse((await redis.get(key))!);
     await redis.set(key, JSON.stringify(old), 'EX', 60);
-    expect(await store.setCacheShared(s.tenantId, true)).toEqual({ updated: true, cached: true });
+    expect(await store.setTenantFlag(s.tenantId, 'cacheShared', true)).toEqual({ updated: true, cached: true });
     await redis.set(key, JSON.stringify(old), 'EX', 60); // an old-format entry again
     expect((await store.lookup(s.hash))!.cacheShared).toBe(true);
     expect(await redis.get(key)).toContain('"cacheShared":true');
-    expect(await store.setCacheShared('00000000-0000-4000-8000-000000000000', true)).toEqual({ updated: false, cached: false });
+    expect(await store.setTenantFlag('00000000-0000-4000-8000-000000000000', 'cacheShared', true)).toEqual({ updated: false, cached: false });
+  });
+
+  it('a cached entry from before the semantic switch is a miss that reads the real switch', async () => {
+    const s = await seed();
+    const key = `${config.redisKeyPrefix}apikey:${s.hash}`;
+    const store = storeFor(redis);
+    // A new tenant has not opted in.
+    expect((await store.lookup(s.hash))!.semanticCache).toBe(false);
+    const { semanticCache: _dropped, ...old } = JSON.parse((await redis.get(key))!);
+    expect(await store.setTenantFlag(s.tenantId, 'semanticCache', true)).toEqual({ updated: true, cached: true });
+    await redis.set(key, JSON.stringify(old), 'EX', 60); // an old-format entry again
+    expect((await store.lookup(s.hash))!.semanticCache).toBe(true);
+    expect(await redis.get(key)).toContain('"semanticCache":true');
+    expect(await store.setTenantFlag('00000000-0000-4000-8000-000000000000', 'semanticCache', true)).toEqual({ updated: false, cached: false });
   });
 
   it('a tombstone written after a corrupt value was read survives the fill', async () => {
@@ -302,7 +317,7 @@ describe('key store', () => {
   it('one warn per outage start: a failed write, then cache hits, then a read outage', async () => {
     const warns: Array<{ op: string }> = [];
     const infos: object[] = [];
-    const tenant = JSON.stringify({ tenantId: 't', tenantName: 'n', keyId: 'k', rpmLimit: null, tpmLimit: 7, monthlyBudgetMicros: null, cacheShared: false });
+    const tenant = JSON.stringify({ tenantId: 't', tenantName: 'n', keyId: 'k', rpmLimit: null, tpmLimit: 7, monthlyBudgetMicros: null, cacheShared: false, semanticCache: true });
     let mode: 'miss' | 'hit' | 'down' = 'miss';
     const flaky = {
       status: 'ready',
@@ -318,7 +333,7 @@ describe('key store', () => {
     const hash = randomBytes(32).toString('hex');
     await store.lookup(hash); // miss: Postgres, then the fill fails
     mode = 'hit';
-    for (let i = 0; i < 5; i++) expect(await store.lookup(hash)).toEqual({ tenantId: 't', tenantName: 'n', keyId: 'k', rpmLimit: null, tpmLimit: 7, monthlyBudgetMicros: null, cacheShared: false });
+    for (let i = 0; i < 5; i++) expect(await store.lookup(hash)).toEqual({ tenantId: 't', tenantName: 'n', keyId: 'k', rpmLimit: null, tpmLimit: 7, monthlyBudgetMicros: null, cacheShared: false, semanticCache: true });
     expect(warns.map((w) => w.op)).toEqual(['set']);
     mode = 'down';
     await store.lookup(hash);

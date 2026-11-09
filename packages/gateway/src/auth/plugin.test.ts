@@ -109,6 +109,7 @@ describe('auth hook', () => {
       tpmLimit: null,
       monthlyBudgetMicros: null,
       cacheShared: false,
+      semanticCache: false,
     });
     expect(hashKey(config.apiKeyPepper, s.key)).toBe(s.hash);
     expect((await fetch(`${gw}/__whoami`)).status).toBe(401);

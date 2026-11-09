@@ -56,6 +56,8 @@ export interface CacheHitRecord {
   completionTokens: number;
   /** What the same usage would have cost at `model`, micro-USD. */
   savedMicros: number;
+  /** Which cache served it. */
+  cacheKind: 'exact' | 'semantic';
 }
 
 export interface Budget {
@@ -463,7 +465,7 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
       const period = periodOf(now());
       const queued: QueuedSpend = {
         kind: 'hit', id, tenantId: hit.tenantId, period, model: hit.model, promptTokens: hit.promptTokens,
-        completionTokens: hit.completionTokens, costMicros: 0, estimated: false, savedMicros: hit.savedMicros,
+        completionTokens: hit.completionTokens, costMicros: 0, estimated: false, savedMicros: hit.savedMicros, cacheKind: hit.cacheKind,
       };
       const p = (async () => {
         if (!onPostgres && bumpDone) {

@@ -89,6 +89,7 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
       promptTokens: u?.promptTokens ?? 0,
       completionTokens: u === undefined ? 0 : completionOf(u),
       savedMicros: cost?.cost ?? 0,
+      cacheKind: hit.kind,
     });
   });
 
