@@ -33,6 +33,12 @@ Format — one entry per decision under its category, newest last, ids never reu
   Src: founder chose "Fall back to Postgres" · Code: packages/gateway/src/budget/pg-ledger.ts
 - **D-019** 2026-11-09 · founder · active — Budgets are monthly caps that reset on the 1st of each UTC calendar month. Why: matches how API plans work.
   Src: founder chose "Monthly, resets"
+- **D-024** 2026-11-09 · founder · active — Budget caps are hard through a Redis outage: every hold is written to Postgres as well as Redis, the Postgres path and every Redis rebuild count unexpired Postgres holds, and settles always land on the current balance. Costs one extra Postgres write per request (to be measured). Why: the PR 5 verifier measured 1.12-2.1x cap overspend when Redis died with Redis-only holds.
+  Src: founder chose "Hard cap: holds in Postgres too" in chat · Code: packages/gateway/src/budget/
+- **D-025** 2026-11-09 · founder · active — PR 5 merges after one last pass that shrinks the failover window (epoch checked every ~250 ms) plus the review's leak/deadline fixes; the remaining small overshoot during gateway failover disagreement is measured, documented and owned by PR 12 (R6). Why: after two fix rounds the cap held in 11 of 13 outage runs and the 2 breaches were 1-2% of the cap, with accounting always exact.
+  Src: founder chose "Shrink window, merge" in chat · Code: packages/gateway/src/budget/budget.ts
+- **D-023** 2026-11-09 · loop default · active — If neither Redis nor Postgres can decide a budget reservation, the request is refused with 503 budget_unavailable (fail closed), and requests refused for budget hand back their rate-limit tokens. Why: D-018 keeps spend capped; with both stores down there is no safe way to admit a paid call.
+  Src: .product/plans/pr-5.md "Notes from the build" · Code: packages/gateway/src/budget/budget.ts
 
 ## Data, privacy & legal
 - **D-011** 2026-11-09 · founder · active — API keys are stored only as HMAC-SHA256(server pepper, key) via Node's built-in crypto, never plaintext and not bcrypt/argon2. Why: keys are 256-bit random, so slow hashing adds per-request latency for no security gain.
@@ -41,6 +47,12 @@ Format — one entry per decision under its category, newest last, ids never reu
 ## AI & models
 
 ## Integrations & providers
+- **D-020** 2026-11-09 · founder · active — The third provider is Google Gemini, alongside Anthropic and OpenAI. Why: a genuinely different API that proves the adapter design.
+  Src: .product/plans/pr-6.md; founder chose "Google Gemini"
+- **D-021** 2026-11-09 · founder · active — Providers are called with plain HTTP over the gateway's own undici pools; no provider SDKs. Why: one place for timeouts, streaming and measurement; no extra dependencies.
+  Src: founder chose "Plain HTTP" · Code: packages/gateway/src/providers/
+- **D-022** 2026-11-09 · founder · active — One live smoke call per provider, run by hand with the founder's API keys, never in the gate or CI. Why: proves the adapters against real APIs, not only fixtures.
+  Src: founder chose "Yes, I'll add keys" · Code: scripts/smoke-providers.ts
 
 ## UX & copy
 

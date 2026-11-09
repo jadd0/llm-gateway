@@ -2,10 +2,22 @@
   "name": "@llm-gateway/gateway",
   "private": true,
   "type": "module",
-  "scripts": { "start": "node --env-file-if-exists=../../.env.local src/server.ts" },
+  "scripts": {
+    "start": "node --env-file-if-exists=../../.env.local src/server.ts",
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "node --env-file-if-exists=../../.env.local src/db/migrate.ts",
+    "keys": "node --env-file-if-exists=../../.env.local src/cli/keys.ts"
+  },
   "dependencies": {
+    "drizzle-orm": "^0.45.4",
     "fastify": "^5.12.8",
+    "ioredis": "^6.0.0",
+    "pg": "^8.23.1",
     "undici": "^8.12.4",
     "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.23.1",
+    "drizzle-kit": "^0.31.11"
   }
 }

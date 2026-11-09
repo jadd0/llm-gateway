@@ -29,3 +29,5 @@ Live keys, go-live flags, anything outward-facing: what it is, where it lives, w
 ## Restarting the loop
 
 How to start the coordinator here, and anything it needs from the founder first.
+- [ ] Before PR 6 builds: add `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `GEMINI_API_KEY` to the repo-root `.env.local` (gitignored) for the live smoke calls (D-022).
+- [ ] Ratify D-023 (loop default): budgets fail closed with 503 when both Redis and Postgres are unavailable.

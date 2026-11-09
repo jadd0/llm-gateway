@@ -26,7 +26,7 @@ Flags `/product init` detected or asked for. The kit scripts read this section.
 - `db_dsn_keys`: DATABASE_URL   # .env.local keys worktree-setup repoints at the worktree database
 - `db_superuser_key`:           # optional: a superuser DSN key, repointed at the `postgres` maintenance db
 - `db_create`: true             # worktree-setup creates the worktree database with psql if absent
-- `db_migrate`:                 # optional: command run in a new worktree after its database exists
+- `db_migrate`: npm run db:migrate   # new worktrees get the schema
 - `gate_env`:                   # optional: env file exported into every gate step, e.g. .env.local
 - `gate_inputs`: .env.local, node_modules/.package-lock.json  # untracked files the gate stamp fingerprints
 - `scope_always_allowed`: package-lock.json  # files verify-pr never counts as out of scope

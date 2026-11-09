@@ -5,6 +5,7 @@
 # Lines starting "#<flag>=<value># " are kept by /product init only when that flag matches, and
 # the prefix is removed; a step whose npm script does not exist is deleted, not left to fail.
 own-database	node scripts/assert-own-database.mjs
+db-migrate	npm run --silent db:migrate
 typecheck	npm run --silent typecheck
 test	npm run --silent test
 check-diagrams	node scripts/check-diagrams.mjs
