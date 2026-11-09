@@ -17,7 +17,7 @@ migration: next free number at generate time. Residuals owned by this PR: none.
 | path | change |
 |---|---|
 | `packages/gateway/src/db/schema.ts` | `tenants.monthly_budget_micros`; new tables `tenant_spend` (with `charges`), `spend_ledger`, `budget_reservations` (every hold), `budget_epoch` |
-| `packages/gateway/drizzle/0002_new_stellaris.sql`, `packages/gateway/drizzle/meta/0002_snapshot.json`, `packages/gateway/drizzle/meta/_journal.json` | generated migration |
+| `packages/gateway/drizzle/0002_woozy_ultragirl.sql`, `packages/gateway/drizzle/meta/0002_snapshot.json`, `packages/gateway/drizzle/meta/_journal.json` | generated migration |
 | `packages/gateway/src/pricing/prices.ts` | **new**. Price table (micro-USD per 1M input / output tokens) and `costMicros(model, in, out)` |
 | `packages/gateway/src/pricing/prices.test.ts` | **new** |
 | `packages/gateway/src/budget/budget.lua` | **new**. `reserve`, `settle` and `init` scripts (see Invariants) |
@@ -138,6 +138,14 @@ create table budget_epoch (id int primary key check (id = 1), epoch bigint not n
   and a PING then fails too, or after `BUDGET_OUTAGE_FAILURES` (default 3) consecutive failed calls; any
   success resets the count. Until Redis is declared down a failed call is retried (settle) or decided on
   Postgres for that request alone (reserve); the instance stays on the Redis path.
+- **A lost balance moves the epoch.** An instance that has to rebuild a balance it had used successfully at the
+  same epoch (Redis restarted empty) bumps the epoch with the same compare-and-set, at most once per observed
+  epoch, so every instance rebuilds from Postgres together; a new tenant or month does not bump. Failed bumps back
+  off exponentially (cap 2 s).
+- **Nothing is left behind by a refusal.** After a Redis reserve that may have run (no answer came back), any
+  outcome other than an admission releases the id on the Redis key (best effort, idempotent) and deletes the
+  Postgres row; so does a request that ends `unavailable` after its row was written. A settle reads the epoch
+  after its transaction commits. `budget_reservations` has an index on `expires_at`.
 - **Leaving the Postgres path.** An instance leaves it only when its epoch bump has committed (or another
   instance's bump was adopted) AND a Redis call has then succeeded. While the bump is pending or failing the
   instance retries it on each reserve and decides on Postgres even if Redis answers; a Redis success during
@@ -145,7 +153,7 @@ create table budget_epoch (id int primary key check (id = 1), epoch bigint not n
 - **Epoch.** The epoch is part of every Redis balance key. Declaring an outage bumps it with
   `UPDATE budget_epoch SET epoch = epoch + 1 WHERE epoch = <epoch seen when the failures began>`: of every
   instance that saw the same outage exactly one bumps and the rest adopt the new value (also adopted from the
-  epoch read in each settle and every `BUDGET_EPOCH_REFRESH_S`). No decision is taken until the bump has
+  epoch read in each settle and every `BUDGET_EPOCH_REFRESH_MS`, default 250: one tiny select per interval per instance, never per request; adopting a newer epoch makes the next reserve rebuild). No decision is taken until the bump has
   landed, and a bump that failed is retried. After recovery the first reserve at the new epoch finds no balance and rebuilds it from Postgres.
   Old-epoch keys expire.
 - **Recovery.** While on the Postgres path an instance tries Redis again at most once a second; a success
@@ -155,7 +163,9 @@ create table budget_epoch (id int primary key check (id = 1), epoch bigint not n
 - **A hold outlives its call.** `UPSTREAM_TIMEOUT_MS` limits silence, not total time, so every upstream call
   has a total deadline, `UPSTREAM_MAX_DURATION_MS` (default 240000), that aborts it: non-streamed answers 504
   `upstream_max_duration`; streamed ends with an OpenAI-shaped error event (after a blank line that closes any
-  interrupted event) and the upstream is aborted once the response has finished. The estimate stays charged.
+  interrupted event, only for a 2xx event stream; any other body is just ended); the upstream is aborted at once, the
+  estimate is charged at that moment, and a client that has not taken the rest within 5 s has its connection
+  destroyed.
   Startup check: `BUDGET_RESERVATION_TTL_S * 1000 > UPSTREAM_MAX_DURATION_MS + 30000` or the config fails to
   load, naming both settings.
 - **A client that leaves before dispatch** (its socket is gone before anything is sent upstream) is refunded in
@@ -209,7 +219,7 @@ create table budget_epoch (id int primary key check (id = 1), epoch bigint not n
 - `while the epoch bump is failing or pending, reserves stay on Postgres even though Redis answers; the first one after the bump rebuilds the new key`
 - `a settle whose first reply was lost still corrects the live balance when it is retried`
 - `the Postgres hold is written before Redis decides: a snapshot taken in between includes it`; `a hold Redis refuses is removed from Postgres before the refusal is returned`; `a request decided on Postgres after its hold was written is counted once`
-- `a Redis reserve that times out but still runs leaves no phantom hold once the request settles`
+- `a Redis reserve that times out but still runs leaves no phantom hold once the request settles`; `a hold left by a Redis reserve that ran but whose reply was lost is released when the request is then refused`; `a request that ends unavailable after its Postgres hold was written leaves no row behind`; `a balance Redis lost moves the epoch once however many instances notice; a new tenant does not`; `an instance that rebuilt after a flush counts what another admitted on Postgres...`; `a stale instance adopts the newer epoch on its next refresh...`; `failed epoch bumps are retried with a back-off`
 - `lapsed holds are deleted from Postgres while Redis is healthy, a bounded number at a time`; `the sweep runs on its timer`
 
 `budget/plugin.test.ts`: 402 body and no upstream call; `model_not_priced`; `aborted stream is charged its full
@@ -218,7 +228,7 @@ match the rate limiter; `503 budget_unavailable when the Postgres copy of a hold
 requests that fit are admitted under a 30-request flood; `a streamed call past the maximum duration is cut with an
 error event and its hold is settled at the estimate`; `a non-streamed call past the maximum duration answers 504 and
 keeps the estimate`; `a client that leaves before the request is dispatched upstream gets everything back`; `a
-client that leaves after the request was dispatched is charged the estimate`.
+client that leaves after the request was dispatched is charged the estimate`; `at the deadline the upstream is aborted at once and the estimate settled, however slowly the client reads`; `a client that does not take what is left after the cut is dropped`; `a stream that is not an event stream is ended at the deadline without an error event added`.
 
 `pricing/prices.test.ts`: `cost rounds up in micro-USD`. `cli/keys.test.ts`: `set-budget then show-spend`.
 `config.test.ts`: `a reservation TTL that does not outlast the longest upstream call plus 30 s stops the gateway starting`; defaults.
@@ -269,7 +279,7 @@ client that leaves after the request was dispatched is charged the estimate`.
 - **Prices:** mock models only (`mock-*`, a clearly labelled fictitious price). Real model prices are added in
   PR 6, from the providers' pricing pages with the date recorded.
 - **Config rows:** `BUDGET_DEFAULT_MONTHLY_USD=10`, `BUDGET_RESERVATION_TTL_S=300` (must exceed
-  `UPSTREAM_MAX_DURATION_MS` + 30 s), `BUDGET_REDIS_TIMEOUT_MS=50`, `BUDGET_EPOCH_REFRESH_S=5`, `BUDGET_OUTAGE_FAILURES=3`,
+  `UPSTREAM_MAX_DURATION_MS` + 30 s), `BUDGET_REDIS_TIMEOUT_MS=50`, `BUDGET_EPOCH_REFRESH_MS=250`, `BUDGET_OUTAGE_FAILURES=3`,
   `BUDGET_SWEEP_INTERVAL_S=60`, `BUDGET_ENABLED=true`; and `UPSTREAM_MAX_DURATION_MS=240000` (a gateway-wide setting).
 - **Docs** (R2): interview Qs incl. "why reserve the worst case?", "why not just check balance > 0?",
   "why integer micro-dollars?", "what happens if Redis dies mid-month?", "what's the epoch for?",
@@ -293,3 +303,7 @@ client that leaves after the request was dispatched is charged the estimate`.
 - The phantom hold the verifier saw (Redis `reserved` at exactly one estimate, no Postgres row) is reproduced by a
   Redis reserve that times out but still runs; it is released when the request settles (by id). The old
   ordering and the old early return to Redis could also leave one.
+- Final pass (D-025): the remaining overshoot is documented and owned by PR 12 (R6). The verifier at 2b7e4fe: 11 of 13
+  steady-flood outage runs within the cap, 2 over by 3101 and 6102 micro-USD; the phantom hold appeared in 8 of 13; two
+  epoch bumps per outage in about a quarter. Causes addressed: the stale-view window (250 ms refresh, rebuild bump),
+  the unreleased Redis hold of a refused request, the epoch read inside the settle transaction.

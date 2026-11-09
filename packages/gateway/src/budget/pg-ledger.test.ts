@@ -172,6 +172,13 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
     expect(await heldRows(t)).toBe(1);
   });
 
+  it('lapsed holds are found by an index on expires_at', async () => {
+    const r = await handle.db.execute(sql`select indexname from pg_indexes where tablename = 'budget_reservations'`);
+    expect(r.rows.map((x) => x.indexname)).toEqual(
+      expect.arrayContaining(['budget_reservations_expires_idx', 'budget_reservations_tenant_period_idx']),
+    );
+  });
+
   it('a bump from an epoch that is not the current one changes nothing and reports the current epoch', async () => {
     // Bumps that succeed are tested in budget.test.ts, the only file that moves the shared epoch.
     const current = await ledger.readEpoch();

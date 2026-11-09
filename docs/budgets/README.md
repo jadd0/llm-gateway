@@ -72,18 +72,35 @@ the gateway won't start), so a gateway that crashes mid-request can't hold money
   other requests. A call past the deadline is cut: non-streamed answers `504 upstream_max_duration`, streamed ends with an
   OpenAI-shaped error event; the estimate stays charged (the provider may have worked). The gateway refuses to start
   unless `BUDGET_RESERVATION_TTL_S` x 1000 exceeds `UPSTREAM_MAX_DURATION_MS` + 30 s, so a hold always outlives its call.
+- **At the deadline** the upstream call is aborted at once and the estimate is charged then, not when the response
+  finishes. A streamed answer gets the error event only if it is a 2xx event stream (other bodies are just ended); a
+  client that does not read what is left within 5 s has its connection destroyed.
 - **A client that leaves before the request is sent upstream gets everything back** (limiter tokens and budget);
   after it was sent the estimate stays, because the provider may bill.
 - **Lapsed holds** are deleted from Postgres by a bounded sweep (1000 rows every `BUDGET_SWEEP_INTERVAL_S`, 60 s, per
   instance) as well as on the Postgres path; the holds table also goes with its tenant (`on delete cascade`).
 
+- **Why a hold could be left in Redis.** A Redis reserve whose script ran but whose reply was lost leaves a hold that
+  nothing else knows of. If the request is then admitted on Postgres its settle releases the hold by id; if it is
+  refused (or ends unavailable) the hold is now released straight away, together with the Postgres row. A settle also
+  reads the epoch after its transaction commits, so it releases on the balance that a rebuild after the commit would
+  have been built at. A rebuild creates the balance only from the Postgres snapshot, so ids without a Postgres row
+  cannot survive an epoch change.
+- **Failed epoch bumps back off** (exponentially, at most 2 s) instead of an UPDATE per request.
+- **A balance Redis lost** (a restart) is noticed when an instance has to rebuild a balance it had been using; it moves
+  the epoch with the same compare-and-set, so all instances rebuild together. A new tenant or month, which also needs a
+  rebuild, does not.
+
 ## Known limits (documented, not closed here)
 
 - **R6, partial outages.** An instance that didn't see the outage keeps using the old epoch's balance for up to
-  `BUDGET_EPOCH_REFRESH_S` (it also learns the epoch from every settle). The Postgres-path instance sees every hold;
-  Redis-path instances see the Postgres-path holds only after they move to the new epoch and rebuild. The verifier
-  measured 1.92x the cap with Redis-only holds and 1.02x with Postgres holds; PR 12 measures the bound properly with
-  3 instances.
+  `BUDGET_EPOCH_REFRESH_MS` (250 ms; it also learns the epoch from every settle, and an instance whose Redis balance
+  vanished moves the epoch itself). The Postgres-path instance sees every hold; Redis-path instances see the
+  Postgres-path holds only after they move to the new epoch and rebuild. Measured by the verifier: 1.92x the cap with
+  Redis-only holds; 0.96x for a partial outage with Postgres holds (5 s refresh); and in 13 steady-flood runs that
+  killed and restarted Redis, 11 stayed within the cap and 2 went over by 3101 and 6102 micro-USD (101 and 102 requests
+  admitted where 99 fit), with the accounting exact every time. The overshoot comes from the window above, which the
+  250 ms refresh and the rebuild bump shrink; PR 12 measures the bound properly with 3 instances.
 - **R7, settled-spend writes are in-process.** The Postgres transaction that removes the hold and records the charge
   runs after the response, with 3 retries. If it still fails, or the process dies before it runs, nothing is written:
   the hold stays in Redis and Postgres until its TTL and then the whole charge is lost (the tenant is under-billed,
@@ -93,6 +110,9 @@ the gateway won't start), so a gateway that crashes mid-request can't hold money
   requests times their estimate error. The verifier measured one concurrent burst with a 10x underestimate reaching
   3.12x the cap. That bound is inherent to estimating before the call; the flood benchmark with the mock cannot show it
   because the mock counts prompt tokens by the same heuristic.
+- **A retry of the request's own hold can be refused.** A reserve that is sent again with the same id (after a lost
+  reply) is admitted only if everything counted still fits the cap; if the balance went over in between, the retry is
+  refused and its hold dropped, although the first attempt would have fitted. That errs towards refusing.
 - A call that outlives its reservation TTL still has its real cost added when it settles, but the money it held may
   have been given to another request meanwhile.
 - Prices exist for `mock-*` models only (a fictitious $1 in / $3 out per million tokens); real prices arrive with the adapters.
