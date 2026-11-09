@@ -329,7 +329,7 @@ describe('across gateway instances', { timeout: 120_000 }, () => {
           testConfig({
             API_KEY_PEPPER: base.apiKeyPepper,
             REDIS_KEY_PREFIX: prefix,
-            OPENAI_BASE_URL: mockUrl,
+            OPENAI_BASE_URL: `${mockUrl}/v1`,
             RATE_LIMIT_REDIS_TIMEOUT_MS: '30000',
           }),
           { rateLimitClock: clock },

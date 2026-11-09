@@ -5,6 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { errorBody } from '../errors.ts';
 import { completionFromBody, StreamCollector } from '../cache/collect.ts';
 import { classifyClose } from '../requestlog/collector.ts';
+import { defaultMaxTokensFor } from '../pricing/prices.ts';
 import { chatRequest } from '../request-body.ts';
 import { usageSettler, type UsageSettler } from '../usage/settle.ts';
 import { SseUsageTap, usageFromBody, type Usage } from '../usage/sse-usage.ts';
@@ -74,6 +75,13 @@ const maxDurationEvent = `data: ${JSON.stringify({
   error: { message: 'upstream call exceeded the maximum duration', type: 'gateway_error', code: 'upstream_max_duration' },
 })}\n\n`;
 
+// The model name is client input. It is echoed in a header only when it is printable ASCII of a sane length:
+// anything else would make the header invalid (a 500) or oversized, and the body already says which model failed.
+const HEADER_SAFE_MODEL = /^[\x20-\x7e]{1,128}$/;
+function setModelHeader(reply: { header(name: string, value: string): unknown }, model: string): void {
+  if (HEADER_SAFE_MODEL.test(model)) reply.header('x-gateway-model', model);
+}
+
 export interface ChatRouteOptions {
   upstream: Upstream;
   breaker: Breaker;
@@ -82,6 +90,10 @@ export interface ChatRouteOptions {
   retry: RetryPolicy;
   maxDurationMs: number;
   defaultMaxTokens: number;
+  /** How long a provider's error body is waited for once its status and headers are in. */
+  errorBodyTimeoutMs?: number;
+  /** Most bytes of a provider's error body that are kept; the rest is dropped unread. */
+  errorBodyMaxBytes?: number;
   cutDrainMs?: number;
 }
 
@@ -102,6 +114,8 @@ const asText = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : 
 
 export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts) => {
   const { upstream, breaker, chains, retry, maxDurationMs, defaultMaxTokens } = opts;
+  const errorBodyTimeoutMs = opts.errorBodyTimeoutMs ?? 2000;
+  const errorBodyMaxBytes = opts.errorBodyMaxBytes ?? 65536;
   // After a cut stream's last bytes are written, a client that still hasn't taken them this long is dropped.
   const cutDrainMs = opts.cutDrainMs ?? 5000;
 
@@ -109,6 +123,19 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
   app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) =>
     done(null, body),
   );
+
+  // Requests that dispatched at least one attempt: whatever they end as (a 500 included), "0 attempts" is untrue.
+  const sent = new WeakSet<FastifyRequest>();
+
+  // A request refused before anything was sent upstream (400, 402, 429 from the budget or rate limiter, ...)
+  // still says which model was asked for and that no attempt was made, as the replies of a dispatched
+  // request do. Only authenticated requests: a caller refused by the key check learns nothing about models.
+  app.addHook('onSend', async (request, reply) => {
+    if (reply.statusCode < 400 || request.tenant === null || reply.hasHeader('x-gateway-attempts') || sent.has(request)) return;
+    reply.header('x-gateway-attempts', '0');
+    const body = Buffer.isBuffer(request.body) ? chatRequest(request) : undefined;
+    if (body?.ok) setModelHeader(reply, body.value.model);
+  });
 
   app.post('/v1/chat/completions', { config: { rateLimited: true, budgeted: true, cached: true } }, async (request, reply) => {
     // Every way out of the handler ends the request's up-front charges. keep() is last and counts only
@@ -126,6 +153,47 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
       request.cacheFill?.abandon();
     }
   });
+
+  // The error body of a non-2xx answer, read in full (which also frees the socket) unless it takes longer than
+  // errorBodyTimeoutMs: a provider that sends its status and then stalls must not hold the request for the
+  // whole idle timeout before the next attempt or model. A slow body is dropped and its connection closed;
+  // the status is kept. errorBodyMaxBytes: a body past the cap is cut there and the connection closed, so a
+  // provider cannot make the gateway buffer an unbounded error answer.
+  async function readErrorBody(stream: Readable): Promise<Buffer> {
+    let timer: NodeJS.Timeout | undefined;
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let capped = false;
+    const read = (async () => {
+      for await (const chunk of stream) {
+        const c = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+        const room = errorBodyMaxBytes - size;
+        chunks.push(room < c.length ? c.subarray(0, room) : c);
+        size += Math.min(room, c.length);
+        if (size >= errorBodyMaxBytes) {
+          capped = true;
+          return;
+        }
+      }
+    })();
+    const slow = new Promise<'slow'>((resolve) => {
+      timer = setTimeout(() => resolve('slow'), errorBodyTimeoutMs);
+    });
+    try {
+      const got = await Promise.race([read.then(() => 'done' as const), slow]);
+      if (got === 'done' && !capped) return Buffer.concat(chunks);
+      read.catch(() => {}); // destroying the stream rejects the pending read
+      stream.destroy(); // frees the socket without draining what is left
+      if (capped) {
+        app.log.warn({ maxBytes: errorBodyMaxBytes }, 'upstream error body over the cap, rest dropped');
+        return Buffer.concat(chunks);
+      }
+      app.log.warn({ timeoutMs: errorBodyTimeoutMs }, 'upstream error body too slow, dropped');
+      return Buffer.alloc(0);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   async function handleChat(request: FastifyRequest, reply: FastifyReply, settle: UsageSettler, state: RequestState) {
     const started = performance.now();
@@ -164,7 +232,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     const prepare = (model: string, target: Target): { ok: true; forward: UpstreamRequest } | { ok: false; param: string; message: string } => {
       const body = model === parsed.model ? parsed : { ...parsed, model };
       const raw = model === parsed.model ? rawBody : Buffer.from(JSON.stringify(body));
-      const built = target.adapter.buildRequest({ body, raw, metered, defaultMaxTokens, apiKey: target.apiKey });
+      const built = target.adapter.buildRequest({ body, raw, metered, defaultMaxTokens: defaultMaxTokensFor(model, defaultMaxTokens), apiKey: target.apiKey });
       return built.ok ? { ok: true, forward: built.request } : built;
     };
     // The model asked for is checked before anything is sent: a request it cannot take is the client's to fix.
@@ -269,6 +337,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
         if (abort.signal.aborted) break; // the deadline or the client came while the breaker was asked
         while (true) {
           attempts++;
+          sent.add(request);
           triesOnModel++;
           state.model = model;
           const attemptStarted = performance.now();
@@ -297,7 +366,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
             // the one the client gets.
             let body: Buffer;
             try {
-              body = Buffer.from(await res.body.arrayBuffer());
+              body = await readErrorBody(res.body);
             } catch (err) {
               if (abort.signal.aborted) break models;
               // The status alone decides what happens next; the client gets the answer without its body.
@@ -369,7 +438,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     }
 
     reply.header('x-gateway-attempts', String(attempts));
-    if (state.model !== undefined) reply.header('x-gateway-model', state.model);
+    if (state.model !== undefined) setModelHeader(reply, state.model);
 
     if (!served) {
       if (deadlineHit) {

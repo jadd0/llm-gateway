@@ -491,6 +491,106 @@ describe('what counts as a failure, and where a failure leads', { timeout: 60_00
     expect(await ledger(s.tenantId)).toEqual([]); // the provider had answered with an error: no spend
   });
 
+  it('a 503 with a hanging body falls over within the error-body timeout', async () => {
+    const stuck = await stubServer((req, res) => {
+      req.resume();
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.write('{"error":'); // the rest never comes
+    });
+    closers.push(() => new Promise((r) => (stuck.server.closeAllConnections(), stuck.server.close(r))));
+    // Control for the clock: the idle timeout alone would hold the request for 30 s.
+    const gw = await gateway({ MOCK_BASE_URL: stuck.url, RETRY_MAX_ATTEMPTS_PER_MODEL: '1', UPSTREAM_ERROR_BODY_TIMEOUT_MS: '300', UPSTREAM_IDLE_TIMEOUT_MS: '30000' });
+    const s = await tenant();
+    const started = performance.now();
+    const res = await send(gw, s.key);
+    const elapsed = performance.now() - started;
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-gateway-model')).toBe(MODELS.b);
+    expect(res.headers.get('x-gateway-attempts')).toBe('2');
+    expect(elapsed).toBeGreaterThanOrEqual(250); // the dead body was waited for, but only that long
+    expect(elapsed).toBeLessThan(2000);
+  }, 15_000);
+
+  it('a hanging error body at the end of the chain keeps the provider status', async () => {
+    const stuck = await stubServer((req, res) => {
+      req.resume();
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.write('{"error":');
+    });
+    closers.push(() => new Promise((r) => (stuck.server.closeAllConnections(), stuck.server.close(r))));
+    const gw = await gateway({ MOCK_BASE_URL: stuck.url, MODEL_FALLBACKS: '', RETRY_MAX_ATTEMPTS_PER_MODEL: '1', UPSTREAM_ERROR_BODY_TIMEOUT_MS: '300' });
+    const s = await tenant();
+    const res = await send(gw, s.key);
+    expect(res.status).toBe(503);
+    await until(() => heldMicros(s.tenantId), (h) => h === 0);
+  }, 15_000);
+
+  it('a 10 MB error body is cut at the cap and the rest is never read', async () => {
+    let sent = 0;
+    const big = await stubServer((req, res) => {
+      req.resume();
+      res.writeHead(503, { 'content-type': 'text/plain' });
+      const chunk = Buffer.alloc(64 * 1024, 'x');
+      const pump = () => {
+        while (sent < 10 * 1024 * 1024 && !res.destroyed) {
+          sent += chunk.length;
+          if (!res.write(chunk)) return void res.once('drain', pump);
+        }
+        if (!res.destroyed) res.end();
+      };
+      pump();
+    });
+    closers.push(() => new Promise((r) => (big.server.closeAllConnections(), big.server.close(r))));
+    const gw = await gateway({ MOCK_BASE_URL: big.url, MODEL_FALLBACKS: '', RETRY_MAX_ATTEMPTS_PER_MODEL: '1', UPSTREAM_ERROR_BODY_MAX_BYTES: '65536' });
+    const s = await tenant();
+    const res = await send(gw, s.key);
+    expect(res.status).toBe(503);
+    expect((await res.arrayBuffer()).byteLength).toBeLessThanOrEqual(65536);
+    expect(sent).toBeLessThan(10 * 1024 * 1024); // the provider was cut off, not drained
+  }, 15_000);
+
+  it('a 500 raised after an attempt was made does not claim zero attempts', async () => {
+    const broken = (b: Breaker): Breaker => ({
+      acquire: (t) => b.acquire(t),
+      record: () => {
+        throw new Error('breaker exploded');
+      },
+    });
+    const gw = await gateway({}, { wrapBreaker: broken });
+    const s = await tenant();
+    const res = await send(gw, s.key);
+    expect(res.status).toBe(500);
+    expect(A.hits).toBeGreaterThanOrEqual(1);
+    expect(res.headers.get('x-gateway-attempts')).toBeNull();
+  });
+
+  it('402 before dispatch carries x-gateway-model and attempts 0', async () => {
+    const gw = await gateway();
+    const broke = await tenant(undefined, 1); // a cap of one micro-USD: every hold is refused
+    const refused = await send(gw, broke.key);
+    expect(refused.status).toBe(402);
+    expect(refused.headers.get('x-gateway-model')).toBe(MODELS.a);
+    expect(refused.headers.get('x-gateway-attempts')).toBe('0');
+
+    const unknown = await send(gw, (await tenant()).key, { model: 'no-such-model' });
+    expect(unknown.status).toBe(400);
+    expect(unknown.headers.get('x-gateway-model')).toBe('no-such-model');
+    expect(unknown.headers.get('x-gateway-attempts')).toBe('0');
+
+    const limited = await tenant({ rpm: 1, tpm: 100_000_000 });
+    expect((await send(gw, limited.key)).status).toBe(200);
+    const slowDown = await send(gw, limited.key);
+    expect(slowDown.status).toBe(429);
+    expect(slowDown.headers.get('x-gateway-model')).toBe(MODELS.a);
+    expect(slowDown.headers.get('x-gateway-attempts')).toBe('0');
+
+    // A caller the key check refuses is told nothing about models.
+    const noKey = await send(gw, 'sk-nope-nope');
+    expect(noKey.status).toBe(401);
+    expect(noKey.headers.has('x-gateway-attempts')).toBe(false);
+    expect(A.hits).toBe(1); // only the one admitted request went upstream
+  });
+
   it('a deadline that falls with a call in flight keeps the estimate', async () => {
     A.settings.outage = 'hang';
     const gw = await gateway({ MODEL_FALLBACKS: '', UPSTREAM_MAX_DURATION_MS: '400' });

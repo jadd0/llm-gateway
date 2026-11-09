@@ -21,7 +21,7 @@ Budgets (PR 5) sit right after this check and settle through the same step as th
    (valid JSON, a string `model`, an array `messages`). A body the route is going to answer with a 400 is not
    charged at all: no request token, no tokens. (Such 400s cost the gateway almost nothing and need a valid key.)
    Then it estimates the token cost: `ceil(prompt characters / 4)` plus the output allowance, which is
-   `max_tokens` (or `max_completion_tokens`) when the caller set one, else `RATE_LIMIT_DEFAULT_MAX_TOKENS`
+   `max_tokens` (or `max_completion_tokens`) when the caller set one, else `RATE_LIMIT_DEFAULT_MAX_TOKENS` (a TPM estimate only; the cap sent to the provider and the budget hold come from the per-model defaults, which this does not change)
    trimmed to whatever is left of the key's minute, so a small request with no `max_tokens` is not refused
    because of a default the caller never chose.
 3. A request that can never fit in the key's whole tokens-per-minute is `400 request_too_large`, nothing charged:

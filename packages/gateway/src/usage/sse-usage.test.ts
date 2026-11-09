@@ -133,6 +133,49 @@ describe('SseUsageTap with stripping', () => {
   });
 });
 
+describe('large events in strip mode', () => {
+  const run = async (chunks: Iterable<Buffer>) => {
+    let got: Usage | undefined;
+    const out: Buffer[] = [];
+    const tap = new SseUsageTap((u) => (got = u), { stripUsageChunk: true });
+    tap.on('data', (c: Buffer) => out.push(c));
+    await pipeline(Readable.from(chunks), tap);
+    return { got, out: Buffer.concat(out) };
+  };
+
+  it('1 MiB event fed byte by byte finishes under 2 s', async () => {
+    const head = Buffer.from('data: {"choices":[{"delta":{"content":"');
+    const tail = Buffer.from('"}}],"usage":null}\n\n');
+    const filler = Buffer.alloc(1_000_000, 0x61);
+    const whole = Buffer.concat([head, filler, tail, Buffer.from(event({ choices: [], usage }))]);
+    expect(whole.length).toBeGreaterThan(1_000_000);
+    const bytes = Array.from({ length: whole.length }, (_, i) => whole.subarray(i, i + 1));
+    const started = performance.now();
+    const { got, out } = await run(bytes);
+    const elapsed = performance.now() - started;
+    expect(got?.totalTokens).toBe(33);
+    // The big event is forwarded whole; only the usage-only event is dropped.
+    expect(out.length).toBe(head.length + filler.length + tail.length);
+    expect(elapsed).toBeLessThan(2000);
+  }, 20_000);
+
+  it('overflow fallback still finds usage', async () => {
+    // Lines of an event that never ends until past 1 MiB. The usage line is cut inside a two-byte
+    // character exactly where the held bytes overflow, so only a primed decoder reads it whole.
+    const filler = Buffer.from(`data: {"filler":"${'x'.repeat(1_048_540)}"}\n`);
+    const usageLine = Buffer.from(`data: {"choices":[],"usage":${JSON.stringify(usage)},"n":"é"}\n\n`);
+    const cut = usageLine.indexOf(Buffer.from('é')) + 1;
+    const first = Buffer.concat([filler, usageLine.subarray(0, cut)]);
+    expect(first.length).toBeGreaterThan(1024 * 1024);
+    const after = Buffer.from(event({ choices: [{ delta: { content: 'z' } }], usage: null }) + 'data: [DONE]\n\n');
+    const input = Buffer.concat([first, usageLine.subarray(cut), after]);
+    const { got, out } = await run([first, Buffer.concat([usageLine.subarray(cut), after])]);
+    expect(got?.totalTokens).toBe(33);
+    // Stripping stops at the fallback, so every byte is forwarded unchanged.
+    expect(out.equals(input)).toBe(true);
+  });
+});
+
 describe('event terminators', () => {
   const body = (eol: string) => `data: {"choices":[{"delta":{"content":"a"}}],"usage":null}${eol}`;
 
