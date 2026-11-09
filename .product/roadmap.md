@@ -25,13 +25,13 @@ completed_at:
 notes:
 
 ## PR 3 — Tenants and API keys
-status: pending
+status: done
 acceptance: tenants and keys in Postgres with keys stored hashed (never plaintext); a missing or wrong key gets 401, a valid key passes and the tenant is attached to the request; key lookup is cached so the hot path does not query Postgres per request; overhead re-measured with auth on and recorded.
 scope_notes: key creation by CLI script, no admin UI. No limits or budgets yet.
 base_branch: main
-commit:
-completed_at:
-notes:
+commit: b3b0706
+completed_at: 2026-11-09
+notes: HMAC-SHA256 keys, Redis-cached lookup with race-free tombstone revocation (verified live: 0 post-revoke 200s at 500 req/s), Postgres fallback, repeatable revoke. Benchmark figures provisional (R8). R9 opened.
 
 ## PR 4 — Distributed rate limiter (Redis Lua token bucket)
 status: pending
