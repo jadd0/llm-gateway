@@ -56,7 +56,7 @@ beforeAll(async () => {
     testConfig({
       API_KEY_PEPPER: base.apiKeyPepper,
       REDIS_KEY_PREFIX: prefix,
-      OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
+      OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`,
       BUDGET_ENABLED: 'true',
       CACHE_ENABLED: 'true',
       BUDGET_REDIS_TIMEOUT_MS: '5000',
