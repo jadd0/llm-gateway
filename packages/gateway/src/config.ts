@@ -145,8 +145,9 @@ const schema = z
     CACHE_TTL_S: int(3600, 1),
     CACHE_MAX_ENTRY_BYTES: int(262_144, 1),
     CACHE_ALLOW_NONDETERMINISTIC: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('false')),
-    CACHE_LOCK_MS: int(30_000, 1),
-    CACHE_WAIT_MS: int(10_000, 1),
+    CACHE_LOCK_MS: int(5_000, 1),
+    CACHE_POLL_MS: int(250, 1),
+    CACHE_WAIT_MS: int(120_000, 1),
     CACHE_REDIS_TIMEOUT_MS: int(50, 1),
     CACHE_REPLAY_CHUNK_CHARS: int(64, 1),
   })
@@ -179,8 +180,12 @@ const schema = z
     message: 'REDIS_URL is required when CACHE_ENABLED=true',
     path: ['REDIS_URL'],
   })
-  .refine((e) => e.CACHE_WAIT_MS <= e.CACHE_LOCK_MS, {
-    message: 'CACHE_WAIT_MS must not be longer than CACHE_LOCK_MS: a waiter should not outlast the lock it waits on',
+  .refine((e) => e.CACHE_WAIT_MS <= e.UPSTREAM_MAX_DURATION_MS, {
+    message: 'CACHE_WAIT_MS must not be longer than UPSTREAM_MAX_DURATION_MS: no call outlasts that, so no one should wait longer for one',
+    path: ['CACHE_WAIT_MS'],
+  })
+  .refine((e) => e.CACHE_WAIT_MS >= e.CACHE_LOCK_MS, {
+    message: 'CACHE_WAIT_MS must not be shorter than CACHE_LOCK_MS: a leader is renewing its lock for at least that long',
     path: ['CACHE_WAIT_MS'],
   })
   .refine((e) => e.BUDGET_ENABLED === 'false' || e.BUDGET_RESERVATION_TTL_S * 1000 > e.UPSTREAM_MAX_DURATION_MS + 30_000, {
@@ -257,6 +262,7 @@ export interface Config {
   /** How long the request that leads an identical-miss burst holds the Redis lock. */
   cacheLockMs: number;
   /** How long a request waits for the leader's fill before going upstream itself. */
+  cachePollMs: number;
   cacheWaitMs: number;
   cacheRedisTimeoutMs: number;
   /** Characters (code points) per content chunk when a cached answer is replayed as a stream. */
@@ -322,6 +328,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cacheMaxEntryBytes: e.CACHE_MAX_ENTRY_BYTES,
     cacheAllowNondeterministic: e.CACHE_ALLOW_NONDETERMINISTIC === 'true',
     cacheLockMs: e.CACHE_LOCK_MS,
+    cachePollMs: e.CACHE_POLL_MS,
     cacheWaitMs: e.CACHE_WAIT_MS,
     cacheRedisTimeoutMs: e.CACHE_REDIS_TIMEOUT_MS,
     cacheReplayChunkChars: e.CACHE_REPLAY_CHUNK_CHARS,

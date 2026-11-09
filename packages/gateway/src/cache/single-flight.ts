@@ -2,15 +2,19 @@ import { randomUUID } from 'node:crypto';
 import type { Redis } from 'ioredis';
 import { waitReady } from '../redis.ts';
 import { within } from './store.ts';
+import type { Lookup } from './store.ts';
 
 type Outcome = 'filled' | 'failed' | 'timeout';
+
+/** What a follower's `read` reports: the entry, a plain miss, or a Redis that could not answer. */
+export type Look<T> = { status: 'hit'; entry: T } | { status: 'miss' } | { status: 'unavailable' };
 
 /** What `acquire` decided for one request that missed. */
 export type Acquired =
   /** This request goes upstream for everyone. `finish` must be called when its fill is written or abandoned. */
   | { role: 'leader'; finish(outcome: 'filled' | 'failed'): void }
-  /** An identical request is already going upstream. `wait` resolves with what `read` finds after its fill. */
-  | { role: 'follower'; wait<T>(read: () => Promise<T | undefined>): Promise<T | undefined> }
+  /** An identical request is already going upstream. `wait` resolves with the entry, or undefined when this request should go upstream itself. */
+  | { role: 'follower'; wait<T>(read: () => Promise<Look<T>>): Promise<T | undefined> }
   /** Redis could not say who leads: go upstream alone. */
   | { role: 'solo' };
 
@@ -18,15 +22,18 @@ export interface SingleFlight {
   acquire(key: string): Promise<Acquired>;
   /** Resolves when every lock release and notification started by a `finish` has been tried. */
   idle(): Promise<void>;
+  /** Stops lock renewal (a leader that is still running loses its lock), then closes the subscriber. */
   close(): Promise<void>;
 }
 
 export interface SingleFlightOptions {
   redis: Redis;
-  /** How long the leader's Redis lock lasts, and the most a leader is waited for in its own process. */
+  /** How long the leader's Redis lock lasts between renewals. A leader that stops renewing is gone after this. */
   lockMs: number;
-  /** The most a follower waits for the fill before it goes upstream. */
+  /** The most anyone waits for one fill, and the most a leader keeps renewing its lock. */
   waitMs: number;
+  /** How often a waiting follower looks at the entry and the lock. */
+  pollMs: number;
   /** A Redis answer slower than this is a failure. */
   timeoutMs: number;
   log?: { warn(obj: object, msg: string): void };
@@ -34,6 +41,8 @@ export interface SingleFlightOptions {
 
 // Deletes the lock only if it is still this leader's: a lock that lapsed and was taken by another leader stays.
 const UNLOCK = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+// Extends the lock only if it is still this leader's.
+const RENEW = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end";
 
 interface Flight {
   /** 'claiming' until the lock is decided; 'leader' when this process leads; 'remote' when another does. */
@@ -41,6 +50,8 @@ interface Flight {
   /** Resolves once the kind is decided (and, for 'remote', the notification channel is subscribed). */
   ready: Promise<void>;
   settled: Promise<Outcome>;
+  done: boolean;
+  polling: boolean;
   settle(outcome: Outcome): void;
   /** Called once the kind is decided and, for 'remote', the channel is subscribed. */
   decided(): void;
@@ -49,19 +60,28 @@ interface Flight {
 /**
  * One request in a burst of identical misses goes upstream; the others wait for its fill. Within a process
  * the first request claims the key in a map (no Redis call for the rest). Across processes the first to take
- * `SET lock NX PX` leads and the others subscribe to its notification channel, read once after subscribing
- * (the fill may have landed before they were listening), and once more when the wait runs out. A leader
- * that fails, or never reports, makes waiters go upstream on their own: a failure is never shared.
+ * `SET lock NX PX` leads: it renews the lock while its call is in flight, so the lock is short and a dead
+ * leader frees it within `lockMs`. Followers learn of the fill from the leader's notification, and also look
+ * for it themselves every `pollMs`: entry present is a hit; no lock and no entry, or a Redis that does not
+ * answer, sends them upstream at once. A failure is never shared.
  */
 export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
   const flights = new Map<string, Flight>();
   const channels = new Map<string, Flight>();
   const pending = new Set<Promise<unknown>>();
+  const leaving = new Set<() => void>();
   let sub: Redis | undefined;
   let subReady: Promise<boolean> | undefined;
 
-  // The subscriber is a second connection, made when the first request has to wait on another process.
-  const subscriber = (): Promise<Redis | undefined> => {
+  const dropSubscriber = () => {
+    sub?.disconnect();
+    sub = undefined;
+    subReady = undefined;
+  };
+
+  // The subscriber is a second connection, made when the first request has to wait on another process. One
+  // that never became ready is thrown away so a later call starts over.
+  const subscriber = async (): Promise<Redis | undefined> => {
     if (!subReady) {
       const s = opts.redis.duplicate();
       s.on('error', () => {});
@@ -71,7 +91,13 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
       sub = s;
       subReady = waitReady(s, 2000);
     }
-    return subReady.then((ok) => (ok ? sub : undefined));
+    const attempt = subReady;
+    const ok = await attempt;
+    if (!ok) {
+      if (subReady === attempt) dropSubscriber();
+      return undefined;
+    }
+    return sub?.status === 'ready' ? sub : undefined;
   };
 
   function newFlight(): Flight {
@@ -79,16 +105,57 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
     let decided!: () => void;
     const settled = new Promise<Outcome>((r) => (settle = r));
     const ready = new Promise<void>((r) => (decided = r));
-    return { kind: 'claiming', ready, settled, settle, decided };
+    const flight: Flight = {
+      kind: 'claiming',
+      ready,
+      settled,
+      done: false,
+      polling: false,
+      settle: (o) => {
+        flight.done = true;
+        settle(o);
+      },
+      decided,
+    };
+    return flight;
   }
 
-  const wait = (flight: Flight) =>
-    async function <T>(read: () => Promise<T | undefined>): Promise<T | undefined> {
+  // One poller per flight per process, however many requests wait on it.
+  function poll<T>(key: string, flight: Flight, read: () => Promise<Look<T>>) {
+    if (flight.polling || flight.done) return;
+    flight.polling = true;
+    const lockKey = `${key}:lock`;
+    let timer: NodeJS.Timeout | undefined;
+    const tick = async () => {
+      try {
+        // Lock first, then the entry: a leader writes the entry before it releases the lock.
+        const locked = flight.kind === 'remote' ? (await within(opts.redis.exists(lockKey), opts.timeoutMs)) === 1 : true;
+        const look = await read();
+        if (look.status === 'hit') flight.settle('filled');
+        else if (look.status === 'unavailable' || !locked) flight.settle('failed');
+      } catch {
+        flight.settle('failed');
+      }
+      if (!flight.done) {
+        timer = setTimeout(tick, opts.pollMs);
+        timer.unref();
+      }
+    };
+    timer = setTimeout(tick, opts.pollMs);
+    timer.unref();
+    void flight.settled.then(() => clearTimeout(timer));
+  }
+
+  const wait = (key: string, flight: Flight) =>
+    async function <T>(read: () => Promise<Look<T>>): Promise<T | undefined> {
       await flight.ready;
       if (flight.kind === 'remote') {
+        // The fill may have landed before this process was listening.
         const early = await read();
-        if (early !== undefined) return early;
+        if (early.status === 'hit') return early.entry;
+        if (early.status === 'unavailable') return undefined;
       }
+      poll(key, flight, read);
       let timer: NodeJS.Timeout | undefined;
       const outcome = await Promise.race([
         flight.settled,
@@ -96,8 +163,9 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
           timer = setTimeout(() => r('timeout'), opts.waitMs);
         }),
       ]).finally(() => clearTimeout(timer));
-      if (outcome === 'failed') return undefined; // the leader gave up; this request goes upstream itself
-      return read(); // filled, or the wait ran out: one last look
+      if (outcome === 'failed') return undefined; // the leader gave up or Redis stopped answering: go upstream
+      const last = await read(); // filled, or the wait ran out: one last look
+      return last.status === 'hit' ? last.entry : undefined;
     };
 
   const track = (p: Promise<unknown>) => {
@@ -105,10 +173,13 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
     void p.finally(() => pending.delete(p));
   };
 
+  const warn = (err: unknown, msg: string) =>
+    opts.log?.warn({ errClass: (err as Error).name, code: (err as { code?: string }).code }, msg);
+
   return {
     async acquire(key) {
       const existing = flights.get(key);
-      if (existing) return { role: 'follower', wait: wait(existing) };
+      if (existing) return { role: 'follower', wait: wait(key, existing) };
 
       const flight = newFlight();
       flights.set(key, flight);
@@ -118,8 +189,11 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
       let won: boolean;
       try {
         won = (await within(opts.redis.set(lockKey, token, 'PX', opts.lockMs, 'NX'), opts.timeoutMs)) === 'OK';
-      } catch {
-        // Nobody knows who leads. Requests that joined meanwhile go upstream too.
+      } catch (err) {
+        // The lock may have landed even though its reply did not: take it back by token, or it lapses on its
+        // own within `lockMs`. Requests that joined meanwhile go upstream too.
+        track(within(opts.redis.eval(UNLOCK, 1, lockKey, token), opts.timeoutMs).catch(() => {}));
+        warn(err, 'cache lock acquire failed');
         flights.delete(key);
         flight.settle('failed');
         flight.decided();
@@ -137,14 +211,34 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
       if (won) {
         flight.kind = 'leader';
         flight.decided();
-        // A leader that never reports (a bug, a lost reply) is dropped when its lock would have lapsed anyway.
-        const safety = setTimeout(() => finish('failed'), opts.lockMs);
-        safety.unref();
         let finished = false;
+        let renewing: NodeJS.Timeout | undefined;
+        let safety: NodeJS.Timeout | undefined;
+        const stop = () => {
+          clearInterval(renewing);
+          clearTimeout(safety);
+          leaving.delete(stop);
+        };
+        leaving.add(stop);
+        // The lock is short; renewing it while the call is in flight is what keeps the followers waiting.
+        renewing = setInterval(() => {
+          track(
+            within(opts.redis.eval(RENEW, 1, lockKey, token, opts.lockMs), opts.timeoutMs).then(
+              (kept) => {
+                if (kept === 0) clearInterval(renewing); // the lock is someone else's now
+              },
+              (err) => warn(err, 'cache lock renewal failed'),
+            ),
+          );
+        }, Math.max(1, Math.floor(opts.lockMs / 3)));
+        renewing.unref();
+        // A leader that never reports (a bug, a lost reply) is dropped when the longest wait would be over.
+        safety = setTimeout(() => finish('failed'), opts.waitMs);
+        safety.unref();
         const finish = (outcome: 'filled' | 'failed') => {
           if (finished) return;
           finished = true;
-          clearTimeout(safety);
+          stop();
           drop();
           flight.settle(outcome);
           // Lock first, then the notification, so a waiter that wakes can lead the next burst at once.
@@ -154,8 +248,8 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
                 await within(opts.redis.eval(UNLOCK, 1, lockKey, token), opts.timeoutMs);
                 await within(opts.redis.publish(channel, outcome), opts.timeoutMs);
               } catch (err) {
-                // Waiters in other processes fall back on their wait timeout.
-                opts.log?.warn({ errClass: (err as Error).name, code: (err as { code?: string }).code }, 'cache lock release failed');
+                // Followers in other processes see the lock lapse, or the entry, on their next look.
+                warn(err, 'cache lock release failed');
               }
             })(),
           );
@@ -182,7 +276,7 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
         clearTimeout(giveUp);
         drop();
       });
-      return { role: 'follower', wait: wait(flight) };
+      return { role: 'follower', wait: wait(key, flight) };
     },
 
     async idle() {
@@ -190,6 +284,7 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
     },
 
     async close() {
+      for (const stop of [...leaving]) stop();
       await Promise.allSettled([...pending]);
       sub?.disconnect();
     },

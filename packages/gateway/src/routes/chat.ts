@@ -450,7 +450,8 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
         }
         // The whole answer reached the client and ended the way a good one does: it is worth keeping.
         const answer = collector?.complete();
-        if (request.cacheFill && answer && !deadlineHit) {
+        // An answer from a fallback model is a degraded one for this request: it is not pinned for the TTL.
+        if (request.cacheFill && answer && !deadlineHit && served.model === parsed.model) {
           await request.cacheFill.store({ ...answer, usage: observedUsage ?? answer.usage, model: served.model });
         }
       } catch (err) {
@@ -495,7 +496,9 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     // Written before the reply goes out, so a client that has its answer can count on the entry being there.
     if (request.cacheFill) {
       const answer = completionFromBody(payload);
-      if (answer) await request.cacheFill.store({ ...answer, model: served.model });
+      // Not a fallback model's answer: a degraded one is not pinned for the TTL, and waiting identical requests go upstream.
+      if (answer && served.model === parsed.model) await request.cacheFill.store({ ...answer, model: served.model });
+      else request.cacheFill.abandon();
     }
     const upstreamMs = received - dispatched;
     const preDispatchMs = dispatched - started;

@@ -431,25 +431,62 @@ describe('response cache on POST /v1/chat/completions', () => {
     expect(await entries(t.tenantId)).toHaveLength(1);
   });
 
-  it('a request is cached under the model asked for; the entry says which model served it', async () => {
+  it('an answer from a fallback model is served but not cached', async () => {
     const t = await tenant();
     const body = req('mock-fb-a', uniq());
-    const first = await post(t.key, body);
-    expect(first.status).toBe(200);
-    expect(first.headers.get('x-gateway-model')).toBe('mock-b'); // mock-fb-a failed over to mock-b
-    expect(first.headers.get('x-gateway-attempts')).toBe('2');
-    const made = await json(first);
-    const nb = calls['mock-b'];
-    const hit = await post(t.key, body);
-    expect(hit.headers.get('x-gateway-cache')).toBe('hit');
-    expect(hit.headers.get('x-gateway-model')).toBe('mock-b');
-    expect(hit.headers.get('x-gateway-attempts')).toBe('0');
-    expect((await json(hit)).choices[0].message.content).toBe(made.choices[0].message.content);
-    expect(calls['mock-b']).toBe(nb); // not even the failing first model was tried
-    // The same prompt asked of the serving model itself is a different key.
-    const direct = await post(t.key, { ...body, model: 'mock-b' });
-    expect(direct.headers.get('x-gateway-cache')).toBe('miss');
-    await direct.text();
+    const nb = calls['mock-b'] ?? 0;
+    for (let i = 1; i <= 2; i++) {
+      const res = await post(t.key, body);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('x-gateway-cache')).toBe('miss');
+      expect(res.headers.get('x-gateway-model')).toBe('mock-b'); // mock-fb-a failed over to mock-b
+      expect(res.headers.get('x-gateway-attempts')).toBe('2');
+      await res.text();
+      expect(calls['mock-b']).toBe(nb + i); // the second request had to go upstream again
+    }
+    const streamed = await post(t.key, { ...body, stream: true });
+    expect(streamed.headers.get('x-gateway-model')).toBe('mock-b');
+    await streamed.text();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(await entries(t.tenantId)).toHaveLength(0);
+    // The serving model asked for by name is an ordinary request and is cached under its own name.
+    const direct = { ...body, model: 'mock-b' };
+    await (await post(t.key, direct)).text();
+    const again = await post(t.key, direct);
+    expect(again.headers.get('x-gateway-cache')).toBe('hit');
+    expect(again.headers.get('x-gateway-model')).toBe('mock-b');
+    await again.text();
+  });
+
+  it('a request with no output limit and one capped at the gateway default are different requests', async () => {
+    const t = await tenant();
+    const prompt = uniq();
+    const uncapped = { model: 'mock-a', temperature: 0, messages: [{ role: 'user', content: prompt }] };
+    const capped = { ...uncapped, max_tokens: base.rateLimitDefaultMaxTokens };
+    const n0 = calls['mock-a'] ?? 0;
+    for (const body of [uncapped, capped]) {
+      const res = await post(t.key, body);
+      expect(res.headers.get('x-gateway-cache')).toBe('miss');
+      await res.text();
+    }
+    expect(calls['mock-a']).toBe(n0 + 2);
+    for (const body of [uncapped, capped]) {
+      const res = await post(t.key, body);
+      expect(res.headers.get('x-gateway-cache')).toBe('hit');
+      await res.text();
+    }
+    expect(await entries(t.tenantId)).toHaveLength(2);
+  });
+
+  it('a hit on a model with no price still records its tokens, with nothing saved', async () => {
+    const t = await tenant();
+    await app.recordCacheHit!({
+      tenantId: t.tenantId,
+      model: 'model-without-a-price',
+      usage: { promptTokens: 7, completionTokens: 5, totalTokens: 12 },
+    });
+    const [row] = await handle.db.select().from(spendLedger).where(eq(spendLedger.tenantId, t.tenantId));
+    expect(row).toMatchObject({ cached: true, model: 'model-without-a-price', promptTokens: 7, completionTokens: 5, costMicros: 0, savedMicros: 0 });
   });
 
   it('identical concurrent misses make one upstream call', async () => {

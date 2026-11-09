@@ -1,0 +1,1 @@
+CREATE INDEX "spend_ledger_tenant_period_idx" ON "spend_ledger" USING btree ("tenant_id","period");

@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { positiveInt } from '../providers/common.ts';
 
 /** Changes whenever `normalise` does, so entries made under old rules are never read under new ones. */
 export const KEY_VERSION = 'v1';
@@ -45,16 +46,22 @@ function normaliseMessage(message: unknown): unknown {
 
 /**
  * The request reduced to what decides the answer. Absent and null are the same; a string `stop` is a
- * one-element list; the output limit is whichever of max_completion_tokens / max_tokens is set, else the
- * gateway default (which is what the provider is asked for); a zero penalty and `n: 1` are the defaults.
+ * one-element list; a zero penalty and `n: 1` are the defaults.
+ *
+ * The output limit in the key is the one the provider is actually given. A provider that translates the
+ * request (Anthropic, Gemini) is always sent a limit, so the key carries max_tokens, else
+ * max_completion_tokens, else `injectedMaxTokens`. An OpenAI-format provider gets the request as sent, so a
+ * request with no limit keeps no limit in its key (`injectedMaxTokens` is null) and is never the same as one
+ * that names the gateway's default.
  */
-export function normalise(body: Record<string, unknown>, defaultMaxTokens: number): Record<string, unknown> {
+export function normalise(body: Record<string, unknown>, injectedMaxTokens: number | null): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [name, value] of Object.entries(body)) {
     if (EXCLUDED.has(name) || value === null || value === undefined) continue;
     switch (name) {
       case 'max_tokens':
       case 'max_completion_tokens':
+        if (injectedMaxTokens === null) out[name] = value;
         break;
       case 'messages':
         out.messages = Array.isArray(value) ? value.map(normaliseMessage) : value;
@@ -73,7 +80,8 @@ export function normalise(body: Record<string, unknown>, defaultMaxTokens: numbe
         out[name] = value;
     }
   }
-  out.max_tokens = body.max_completion_tokens ?? body.max_tokens ?? defaultMaxTokens;
+  // Same order of preference as the translating adapters (providers/common.ts).
+  if (injectedMaxTokens !== null) out.max_tokens = positiveInt(body.max_tokens) ?? positiveInt(body.max_completion_tokens) ?? injectedMaxTokens;
   return out;
 }
 

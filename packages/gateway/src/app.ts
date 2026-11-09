@@ -116,6 +116,7 @@ export function buildApp(
         redis,
         lockMs: config.cacheLockMs,
         waitMs: config.cacheWaitMs,
+        pollMs: config.cachePollMs,
         timeoutMs: config.cacheRedisTimeoutMs,
         log: app.log,
       }),
@@ -124,7 +125,10 @@ export function buildApp(
       allowNondeterministic: config.cacheAllowNondeterministic,
       maxEntryBytes: config.cacheMaxEntryBytes,
       replayChunkChars: config.cacheReplayChunkChars,
-      isRoutable: (model) => upstream.resolve(model) !== undefined,
+      resolve: (model) => {
+        const target = upstream.resolve(model);
+        return target ? { translates: target.adapter.translates } : undefined;
+      },
       ...(extra.cacheClock ? { clock: extra.cacheClock } : {}),
     });
   }

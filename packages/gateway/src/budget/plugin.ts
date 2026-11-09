@@ -72,8 +72,9 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
     await budget.recordHit({
       tenantId: hit.tenantId,
       model: hit.model,
-      promptTokens: cost?.prompt ?? 0,
-      completionTokens: cost?.completion ?? 0,
+      // The tokens are the stored usage's whether or not the model has a price; only the saving needs one.
+      promptTokens: u?.promptTokens ?? 0,
+      completionTokens: u === undefined ? 0 : Math.max(u.completionTokens, u.totalTokens - u.promptTokens),
       savedMicros: cost?.cost ?? 0,
     });
   });
