@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import { like, sql } from 'drizzle-orm';
 import pg from 'pg';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { createDb } from '../db/client.ts';
 import { semanticCache } from '../db/schema.ts';
 import { testConfig } from '../test-env.ts';
@@ -128,7 +128,7 @@ describe('semantic store on a private table', () => {
   // large table; with statistics it would read a few qualifying rows through the btree index and sort them.
   const adverse = [...stingy, '-c enable_seqscan=off', '-c enable_bitmapscan=off'];
   const url = (options: string[]) => `${config.databaseUrl}${config.databaseUrl.includes('?') ? '&' : '?'}options=${encodeURIComponent([`-c search_path=${schema},public`, ...options].join(' '))}`;
-  const ownDb = (options: string[] = [], statementTimeoutMs?: number) => createDb({ databaseUrl: url(options), poolSize: 4, ...(statementTimeoutMs ? { statementTimeoutMs } : {}) });
+  const ownDb = (options: string[] = [], statementTimeoutMs?: number) => createDb({ databaseUrl: url(options), poolSize: 3, ...(statementTimeoutMs ? { statementTimeoutMs } : {}) });
   const made: Array<{ close(): Promise<void> }> = [];
   const open = (options: string[] = [], storeOptions: SemanticStoreOptions = {}, statementTimeoutMs?: number) => {
     const h = ownDb(options, statementTimeoutMs);
@@ -139,8 +139,11 @@ describe('semantic store on a private table', () => {
   beforeAll(async () => {
     await handle.db.execute(sql.raw(`CREATE SCHEMA ${schema}`));
     await handle.db.execute(sql.raw(`CREATE TABLE ${schema}.semantic_cache (LIKE public.semantic_cache INCLUDING ALL)`));  });
+  // Closed after each test: the suite runs beside many others that share one Postgres connection limit.
+  afterEach(async () => {
+    for (const h of made.splice(0)) await h.close();
+  });
   afterAll(async () => {
-    for (const h of made) await h.close();
     await handle.db.execute(sql.raw(`DROP SCHEMA ${schema} CASCADE`));
   });
 
