@@ -21,7 +21,7 @@ describe('db:migrate', () => {
     const handle = createDb({ databaseUrl: testConfig().databaseUrl, poolSize: 1 });
     try {
       const rows = await handle.db.execute<{ def: string }>(
-        sql`select indexdef as def from pg_indexes where tablename = 'spend_ledger' and indexname = 'spend_ledger_tenant_period_idx'`,
+        sql`select indexdef as def from pg_indexes where schemaname = 'public' and tablename = 'spend_ledger' and indexname = 'spend_ledger_tenant_period_idx'`,
       );
       expect(rows.rows.map((r) => r.def)).toEqual([expect.stringContaining('(tenant_id, period)')]);
     } finally {

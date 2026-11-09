@@ -220,3 +220,14 @@ on, mock provider with realistic latency) with `LOG_MODE=inline` (one awaited Po
 range over the repeats, and for the worker the maximum stream lag, the maximum pending entries and rows written per second. A short run
 on the build machine only proved the scripts work; it is not a result.
 
+## Dashboard query time vs log size (PR 11)
+
+Pending quiet run. `bash bench/quiet.sh bench/results/pr-11 && npm run bench:dashboard -- --sizes 10000,100000,1000000,5000000 --out bench/results/pr-11`
+writes `results.json` and `summary.md` to `bench/results/pr-11/`; no figure is quoted here until that run is committed (R3).
+
+What the run measures: a synthetic log (20 tenants, 6 models, a day and night traffic shape, 2% errors, 30% cache hits, log-normal
+latencies, fixed seed) grown to each size through the log worker's own rollup code. At each size every dashboard range (1 h, 24 h, 7 d,
+30 d) is timed on the rollups (the queries the page runs) and the same answer is computed from the raw request log, median and p95 of
+the timed runs after one warm-up, and the two answers are compared. The last-failures query is timed on its own, with its plan checked for the
+partial index. A short run on the build machine only proved the scripts work; it is not a result.
+

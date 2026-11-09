@@ -193,6 +193,9 @@ const schema = z
     LOG_SWEEP_GRACE_S: int(60, 0),
     LOG_STREAM_MAX: int(1_000_000, 1),
     BUDGET_ORPHAN_GRACE_S: int(600, 0),
+    ROLLUP_FOLD_AFTER_MIN: int(90, 1),
+    // The dashboard reads the minute table for ranges up to 24 hours, so minutes must outlive that.
+    ROLLUP_MINUTE_RETENTION_H: int(48, 25),
     WORKER_CONSUMER: z.preprocess(blankAsUnset, z.string().default(`${hostname()}-${process.pid}`)),
   })
   .refine((e) => e.OPENAI_BASE_URL_ALLOW_ROOT === 'true' || new URL(e.OPENAI_BASE_URL).pathname.replace(/\/+$/, '') !== '', {
@@ -376,6 +379,10 @@ export interface Config {
   logStreamMax: number;
   /** A Redis hold with no Postgres hold row is dropped only once it is this far past its expiry (seconds). */
   budgetOrphanGraceS: number;
+  /** An hour is folded from minute rollups into hour rollups once it ended this long ago (minutes). */
+  rollupFoldAfterMin: number;
+  /** Folded minute rollups are deleted after this many hours (at least 25: the dashboard's 24 h range reads them). */
+  rollupMinuteRetentionH: number;
   workerConsumer: string;
 }
 
@@ -477,6 +484,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     logSweepGraceS: e.LOG_SWEEP_GRACE_S,
     logStreamMax: e.LOG_STREAM_MAX,
     budgetOrphanGraceS: e.BUDGET_ORPHAN_GRACE_S,
+    rollupFoldAfterMin: e.ROLLUP_FOLD_AFTER_MIN,
+    rollupMinuteRetentionH: e.ROLLUP_MINUTE_RETENTION_H,
     workerConsumer: e.WORKER_CONSUMER,
   };
 }

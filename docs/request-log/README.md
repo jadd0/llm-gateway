@@ -23,6 +23,12 @@ timings); a value that is not the right type does not parse. The log is for oper
    `LOG_MAX_DELIVERIES` times moves to `{prefix}requestlog:dead` so it cannot block the stream. Each stream is trimmed, on an interval, below the
    oldest pending entry, never past it.
 
+## Rollups for the dashboard
+
+The same transaction also adds the batch's counts to the rollup tables, from the log rows the insert actually wrote, so a redelivered entry adds
+nothing. The worker's sweep timer folds finished hours from minute to hour rollups (`ROLLUP_FOLD_AFTER_MIN`) and trims folded minutes (`ROLLUP_MINUTE_RETENTION_H`).
+Details: [../dashboard/README.md](../dashboard/README.md).
+
 ## At-least-once, made safe
 
 An entry can arrive twice (the worker wrote it and died before acknowledging). Every write is idempotent: `request_log`

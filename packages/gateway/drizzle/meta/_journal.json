@@ -57,6 +57,13 @@
       "when": 1794257141761,
       "tag": "0007_freezing_slayback",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1794259368472,
+      "tag": "0008_rollups",
+      "breakpoints": true
     }
   ]
 }

@@ -13,6 +13,7 @@ One folder per part of the system. Each holds a `README.md` and a diagram drawn 
 - [cache/](cache/README.md): exact-match response cache in Redis, tenant-scoped keys, single-flight, streamed replay, zero-cost hits.
 - [semantic-cache/](semantic-cache/README.md): near-duplicate prompts served from pgvector behind hard guards, opt-in per tenant, one Voyage embedding space (API and local), last user message only.
 - [request-log/](request-log/README.md): one row per request through a Redis stream and a log worker, spend carried by the same queue, nothing lost on shutdown.
+- [dashboard/](dashboard/README.md): a read-only admin page over pre-aggregated rollups the log worker writes with each batch; percentiles from histograms.
 - [benchmarks/](benchmarks/README.md): how overhead is measured, and why the rig runs natively.
 
 Flow registry for the diagram check: [diagrams/flows.md](diagrams/flows.md). Numbers live in [../BENCHMARKS.md](../BENCHMARKS.md).
