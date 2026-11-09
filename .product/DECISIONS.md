@@ -27,6 +27,12 @@ Format — one entry per decision under its category, newest last, ids never reu
 ## Roles & permissions
 
 ## Money & payments
+- **D-017** 2026-11-09 · founder · active — Tenant budgets use reserve-then-settle; the live balance is in Redis, every settled charge is recorded in Postgres, and Redis is rebuilt from Postgres when it loses the balance. Why: fast atomic checks without losing spend history.
+  Src: .product/plans/pr-5.md; founder chose "Redis + Postgres record" · Code: packages/gateway/src/budget/
+- **D-018** 2026-11-09 · founder · active — When Redis is down, budget checks fall back to a Postgres row-lock path (not fail open, not fail closed). Why: the rate limiter fails open (D-016), so budgets must keep spend capped.
+  Src: founder chose "Fall back to Postgres" · Code: packages/gateway/src/budget/pg-ledger.ts
+- **D-019** 2026-11-09 · founder · active — Budgets are monthly caps that reset on the 1st of each UTC calendar month. Why: matches how API plans work.
+  Src: founder chose "Monthly, resets"
 
 ## Data, privacy & legal
 - **D-011** 2026-11-09 · founder · active — API keys are stored only as HMAC-SHA256(server pepper, key) via Node's built-in crypto, never plaintext and not bcrypt/argon2. Why: keys are 256-bit random, so slow hashing adds per-request latency for no security gain.
