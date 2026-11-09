@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 import type { FastifyInstance } from 'fastify';
 import { eq, sql } from 'drizzle-orm';
 import { Redis } from 'ioredis';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../app.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { tenants } from '../db/schema.ts';
@@ -238,7 +238,7 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     expect(hits).toBe(before);
     expect(await balanceKey(s.tenantId)).toBeUndefined(); // nothing was reserved
     expect(await redis.exists(`${prefix}rl:{${s.keyId}}:req`)).toBe(1); // the request itself was counted...
-    expect(await tokensLeft(s.keyId)).toBe(TPM); // ...but its tokens went back
+    await vi.waitFor(async () => expect(await tokensLeft(s.keyId)).toBe(TPM)); // ...but its tokens went back
   });
 
   it('a body the route rejects reserves nothing', async () => {
@@ -308,7 +308,8 @@ describe('budget plugin', { timeout: 60_000 }, () => {
       expect(res.statusCode).toBe(503);
       expect(res.json().error).toMatchObject({ type: 'gateway_error', code: 'budget_unavailable' });
       expect(hits).toBe(before);
-      expect(await tokensLeft(s.keyId)).toBe(TPM); // the limiter's tokens went back
+      // the limiter's tokens go back by a fire-and-forget correction: wait for it rather than race it
+      await vi.waitFor(async () => expect(await tokensLeft(s.keyId)).toBe(TPM));
       await failing.close(); // waits for the Redis hold to be released
       expect(await balance(s.tenantId)).toEqual({ spent: 0, reserved: 0 });
     } finally {
@@ -346,7 +347,7 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     expect(res.statusCode).toBe(500);
     await settledAt(s.tenantId, 0);
     expect(await ledgerRows(s.tenantId)).toEqual([]);
-    expect(await tokensLeft(s.keyId)).toBe(TPM);
+    await vi.waitFor(async () => expect(await tokensLeft(s.keyId)).toBe(TPM));
   });
 
   it('a 2xx with no usage keeps the estimate, like the rate limiter', async () => {
@@ -535,7 +536,7 @@ describe('budget plugin', { timeout: 60_000 }, () => {
       expect(hits).toBe(before);
       expect(await ledgerRows(s.tenantId)).toEqual([]);
       expect(await balance(s.tenantId)).toEqual({ spent: 0, reserved: 0 });
-      expect(await tokensLeft(s.keyId)).toBe(TPM); // the limiter's tokens are back too
+      await vi.waitFor(async () => expect(await tokensLeft(s.keyId)).toBe(TPM)); // the limiter's tokens are back too
     } finally {
       openHold();
       await gated.close();
