@@ -37,7 +37,7 @@ beforeAll(async () => {
     testConfig({
       API_KEY_PEPPER: base.apiKeyPepper,
       REDIS_KEY_PREFIX: prefix,
-      OPENAI_BASE_URL: url,
+      OPENAI_BASE_URL: `${url}/v1`,
       RATE_LIMIT_REDIS_TIMEOUT_MS: '5000',
     }),
     { rateLimitClock: () => now },
@@ -228,7 +228,7 @@ describe('rate limit plugin', { timeout: 30_000 }, () => {
       testConfig({
         API_KEY_PEPPER: base.apiKeyPepper,
         REDIS_KEY_PREFIX: prefix,
-        OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
+        OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`,
         REDIS_URL: 'redis://127.0.0.1:1',
         AUTH_CACHE: 'none', // the key is looked up in Postgres, so only the limiter sees the dead Redis
       }),

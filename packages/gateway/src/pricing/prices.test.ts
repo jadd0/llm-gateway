@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { costMicros, formatUsd, parseUsd, priceFor, REAL_PRICES } from './prices.ts';
+import { costMicros, defaultMaxTokensFor, formatUsd, parseUsd, priceFor, REAL_PRICES } from './prices.ts';
 
 describe('prices', () => {
   const mock = priceFor('mock-model')!;
@@ -26,6 +26,42 @@ describe('prices', () => {
       expect(priceFor(name), name).toBe(r);
     }
     expect(priceFor('claude-haiku-5-5')).toMatchObject({ inPerMillion: 100_000, outPerMillion: 500_000 });
+  });
+
+  it('long prompt priced at the long-context tier', () => {
+    const haiku = priceFor('claude-haiku-5-5')!;
+    // At the threshold the short rates apply; one token over, both sides pay the long-context rates.
+    expect(costMicros(haiku, 100_000, 1_000_000)).toBe(10_000 + 500_000);
+    expect(costMicros(haiku, 100_001, 1_000_000)).toBe(Math.ceil((100_001 * 500_000) / 1_000_000) + 2_500_000);
+    const astra = priceFor('gpt-6-astra')!;
+    expect(costMicros(astra, 272_000, 0)).toBe(2_720_000);
+    expect(costMicros(astra, 272_001, 1_000_000)).toBe(Math.ceil((272_001 * 20_000_000) / 1_000_000) + 75_000_000);
+    const gemini = priceFor('gemini-3.1-pro-preview')!;
+    expect(costMicros(gemini, 200_001, 1_000_000)).toBe(Math.ceil((200_001 * 4_000_000) / 1_000_000) + 18_000_000);
+    // A model with no tier on its pricing page is priced flat at any length.
+    const nano = priceFor('gpt-5-nano')!;
+    expect(nano.longContext).toBeUndefined();
+    expect(costMicros(nano, 1_000_000, 0)).toBe(50_000);
+  });
+
+  it('every tier row has a source URL and date', () => {
+    const tiered = Object.entries(REAL_PRICES).filter(([, r]) => r.longContext !== undefined);
+    expect(tiered.map(([n]) => n).sort()).toEqual(['claude-haiku-5-5', 'gemini-3.1-pro-preview', 'gpt-6-astra']);
+    for (const [name, r] of tiered) {
+      const t = r.longContext!;
+      expect(Number.isInteger(t.threshold) && t.threshold > 0, name).toBe(true);
+      expect(Number.isInteger(t.inPerMillion) && t.inPerMillion > r.inPerMillion, name).toBe(true);
+      expect(Number.isInteger(t.outPerMillion) && t.outPerMillion > r.outPerMillion, name).toBe(true);
+      expect(r.source, name).toMatch(/^https:\/\//);
+      expect(r.asOf, name).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    }
+  });
+
+  it('default output cap comes from the model row, else the fallback', () => {
+    expect(defaultMaxTokensFor('claude-fable-5-1', 1024)).toBe(4096);
+    expect(defaultMaxTokensFor('gemini-3.1-flash-lite', 1024)).toBe(1024);
+    expect(defaultMaxTokensFor('mock-x', 77)).toBe(77);
+    expect(defaultMaxTokensFor('unknown-model', 77)).toBe(77);
   });
 
   it('cost rounds up in micro-USD', () => {

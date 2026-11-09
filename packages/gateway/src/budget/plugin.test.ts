@@ -96,8 +96,9 @@ beforeAll(async () => {
     testConfig({
       API_KEY_PEPPER: base.apiKeyPepper,
       REDIS_KEY_PREFIX: prefix,
-      OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
+      OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`,
       BUDGET_ENABLED: 'true',
+      OPENAI_API_KEY: 'sk-test',
       BUDGET_REDIS_TIMEOUT_MS: '5000',
       BUDGET_EPOCH_REFRESH_MS: '3600000',
       RATE_LIMIT_REDIS_TIMEOUT_MS: '5000',
@@ -196,6 +197,31 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     expect(await tokensLeft(s.keyId)).toBe(tokensBefore);
   });
 
+  it('an uncapped OpenAI-format request holds the model\'s documented maximum output; a capped one is unchanged', async () => {
+    // gpt-6-astra: $10 in / $50 out per million, 128,000 max output tokens. 'hi' is 1 prompt token.
+    const uncapped = { model: 'gpt-6-astra', messages: [{ role: 'user', content: 'hi' }] };
+    const post = (key: string, payload: object) =>
+      app.inject({ method: 'POST', url: '/v1/chat/completions', headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` }, payload: JSON.stringify(payload) });
+
+    const rich = await fresh(10_000_000); // $10.00
+    const res = await post(rich.key, uncapped);
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-budget-remaining-usd']).toBe('3.599990'); // 10,000,000 - (10 + 128,000 * 50)
+
+    const capped = await fresh(10_000_000);
+    const res2 = await post(capped.key, { ...uncapped, max_completion_tokens: 20 });
+    expect(res2.headers['x-budget-remaining-usd']).toBe('9.998990'); // 10,000,000 - (10 + 20 * 50)
+
+    const poor = await fresh(6_000_000, 100_000); // $6.00 cannot cover the $6.40 hold
+    const before = hits;
+    const refused = await post(poor.key, uncapped);
+    expect(refused.statusCode).toBe(402);
+    expect(refused.json().error.message).toContain('max_tokens');
+    expect(hits).toBe(before);
+    // The same tenant is served once it names a limit that fits.
+    expect((await post(poor.key, { ...uncapped, max_tokens: 100 })).statusCode).toBe(200);
+  });
+
   it('unknown model returns 400 model_not_priced', async () => {
     const s = await fresh(1_000_000);
     const before = hits;
@@ -233,7 +259,8 @@ describe('budget plugin', { timeout: 60_000 }, () => {
 
   it('with no max_tokens the worst case is the default allowance, not what the key rate limit would clamp it to', async () => {
     // The key allows 60 tokens a minute, so the limiter trims its estimate to 60. The budget holds the
-    // whole default output (1024 tokens at 3 micro-USD each) plus 1 prompt token.
+    // whole output a mock-* model may generate unlimited (MOCK_MAX_OUTPUT_TOKENS, 4096, at 3 micro-USD each)
+    // plus 1 prompt token.
     const s = await fresh(1_000_000);
     const res = await app.inject({
       method: 'POST',
@@ -243,7 +270,7 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     });
     expect(res.statusCode).toBe(200);
     expect(res.headers['x-ratelimit-remaining-tokens']).toBe('0');
-    expect(res.headers['x-budget-remaining-usd']).toBe('0.996927'); // 1,000,000 - (1 + 1024 * 3)
+    expect(res.headers['x-budget-remaining-usd']).toBe('0.987711'); // 1,000,000 - (1 + 4096 * 3)
   });
 
   it('503 budget_unavailable when the Postgres copy of a hold cannot be written, and nothing stays held', async () => {
@@ -251,7 +278,7 @@ describe('budget plugin', { timeout: 60_000 }, () => {
       testConfig({
         API_KEY_PEPPER: base.apiKeyPepper,
         REDIS_KEY_PREFIX: prefix,
-        OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
+        OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`,
         BUDGET_ENABLED: 'true',
         BUDGET_REDIS_TIMEOUT_MS: '5000',
         BUDGET_EPOCH_REFRESH_MS: '3600000',
@@ -400,7 +427,7 @@ describe('budget plugin', { timeout: 60_000 }, () => {
       testConfig({
         API_KEY_PEPPER: base.apiKeyPepper,
         REDIS_KEY_PREFIX: prefix,
-        OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
+        OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`,
         BUDGET_ENABLED: 'true',
         BUDGET_REDIS_TIMEOUT_MS: '5000',
         BUDGET_EPOCH_REFRESH_MS: '3600000',

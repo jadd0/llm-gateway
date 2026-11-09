@@ -5,6 +5,21 @@ export interface Price {
   inPerMillion: number;
   /** Micro-USD per 1,000,000 completion tokens. */
   outPerMillion: number;
+  /**
+   * The rates a request pays when its prompt is longer than `threshold` tokens. The provider bills the
+   * whole request at them (input and output both), not only the tokens past the threshold.
+   */
+  longContext?: { threshold: number; inPerMillion: number; outPerMillion: number };
+  /**
+   * Output tokens assumed (and, where the provider needs a number, sent) when the caller names no
+   * max_tokens. Absent: the gateway-wide DEFAULT_MAX_TOKENS.
+   */
+  defaultMaxTokens?: number;
+  /**
+   * The most output tokens the provider documents for the model. A request the gateway forwards without
+   * any output limit (the OpenAI adapter sends none) may generate this many, so its budget hold is sized on it.
+   */
+  maxOutputTokens?: number;
 }
 
 /** A real model's price with where it came from, so any figure can be checked against the provider. */
@@ -17,26 +32,56 @@ export interface PriceRow extends Price {
 
 const ANTHROPIC = 'https://platform.claude.com/docs/en/about-claude/pricing';
 const OPENAI = 'https://developers.openai.com/api/docs/pricing';
-const GOOGLE = 'https://ai.google.dev/gemini-api/docs/pricing';
+const GOOGLE = 'https://ai.google.dev/gemini-api/docs/pricing'; // redirects to aistudio.google.com/docs/pricing
 const AS_OF = '2026-11-09';
-const row = (source: string, inUsd: number, outUsd: number): PriceRow => ({
-  inPerMillion: Math.round(inUsd * 1_000_000),
-  outPerMillion: Math.round(outUsd * 1_000_000),
+const usd = (v: number) => Math.round(v * 1_000_000);
+const row = (
+  source: string,
+  inUsd: number,
+  outUsd: number,
+  extra: { longContext?: { threshold: number; inUsd: number; outUsd: number }; defaultMaxTokens?: number; maxOutputTokens?: number } = {},
+): PriceRow => ({
+  inPerMillion: usd(inUsd),
+  outPerMillion: usd(outUsd),
+  ...(extra.longContext
+    ? { longContext: { threshold: extra.longContext.threshold, inPerMillion: usd(extra.longContext.inUsd), outPerMillion: usd(extra.longContext.outUsd) } }
+    : {}),
+  ...(extra.defaultMaxTokens !== undefined ? { defaultMaxTokens: extra.defaultMaxTokens } : {}),
+  ...(extra.maxOutputTokens !== undefined ? { maxOutputTokens: extra.maxOutputTokens } : {}),
   asOf: AS_OF,
   source,
 });
 
+// Thinking models spend output tokens on reasoning before the answer, so the gateway-wide default (1024)
+// truncates them. None of the provider pages read documents a default for these models (Anthropic requires
+// max_tokens; OpenAI and Google state only the model maximum), so the gateway picks this one.
+const THINKING_DEFAULT_MAX_TOKENS = 4096;
+
+// Model pages read 2026-11-09: "128,000 max output tokens" for both OpenAI models,
+// https://developers.openai.com/api/docs/models/gpt-6-astra and https://developers.openai.com/api/docs/models/gpt-5-nano
+const OPENAI_MAX_OUTPUT = 128_000;
+
 // Static table, read from each provider's pricing page on the date in each row. Each provider has its
-// current flagship and its smallest text model. Standard (short-context) rates: a prompt past a model's
-// long-context threshold (Claude Haiku 5.5 over 100k tokens, Gemini 3.1 Pro over 200k, GPT-6 Astra over
-// 272k) is billed higher by the provider and is under-priced here. Exact model names only: a dated
-// snapshot of a model is not priced until it is added.
+// current flagship and its smallest text model. A prompt past a model's long-context threshold is billed
+// at the higher tier by the provider: Claude Haiku 5.5 over 100,000 tokens ($0.50 in / $2.50 out), Gemini
+// 3.1 Pro over 200,000 ($4 / $18), GPT-6 Astra over 272,000 ($20 / $75). Models with no tier on their
+// page have none here. Exact model names only: a dated snapshot of a model is not priced until it is added.
 export const REAL_PRICES: Record<string, PriceRow> = {
-  'claude-fable-5-1': row(ANTHROPIC, 10, 50),
-  'claude-haiku-5-5': row(ANTHROPIC, 0.1, 0.5),
-  'gpt-6-astra': row(OPENAI, 10, 50),
-  'gpt-5-nano': row(OPENAI, 0.05, 0.4),
-  'gemini-3.1-pro-preview': row(GOOGLE, 2, 12),
+  'claude-fable-5-1': row(ANTHROPIC, 10, 50, { defaultMaxTokens: THINKING_DEFAULT_MAX_TOKENS }),
+  'claude-haiku-5-5': row(ANTHROPIC, 0.1, 0.5, {
+    longContext: { threshold: 100_000, inUsd: 0.5, outUsd: 2.5 },
+    defaultMaxTokens: THINKING_DEFAULT_MAX_TOKENS,
+  }),
+  'gpt-6-astra': row(OPENAI, 10, 50, {
+    longContext: { threshold: 272_000, inUsd: 20, outUsd: 75 },
+    defaultMaxTokens: THINKING_DEFAULT_MAX_TOKENS,
+    maxOutputTokens: OPENAI_MAX_OUTPUT,
+  }),
+  'gpt-5-nano': row(OPENAI, 0.05, 0.4, { maxOutputTokens: OPENAI_MAX_OUTPUT }),
+  'gemini-3.1-pro-preview': row(GOOGLE, 2, 12, {
+    longContext: { threshold: 200_000, inUsd: 4, outUsd: 18 },
+    defaultMaxTokens: THINKING_DEFAULT_MAX_TOKENS,
+  }),
   'gemini-3.1-flash-lite': row(GOOGLE, 0.25, 1.5),
 };
 
@@ -54,14 +99,31 @@ export function priceFor(model: string): Price | undefined {
   return PREFIX.find(([p]) => model.startsWith(p))?.[1];
 }
 
+/** The output tokens to assume for a model when the caller names none. */
+export function defaultMaxTokensFor(model: string, fallback: number): number {
+  return priceFor(model)?.defaultMaxTokens ?? fallback;
+}
+
+/**
+ * The most a model can generate when nothing limits it: its documented maximum, or `mockMax` for a mock-*
+ * model (which has no provider page). Undefined for a model with neither.
+ */
+export function maxOutputTokensFor(model: string, mockMax: number): number | undefined {
+  const exact = Object.hasOwn(EXACT, model) ? EXACT[model] : undefined;
+  if (exact) return exact.maxOutputTokens;
+  return model.startsWith('mock-') ? mockMax : undefined;
+}
+
 const perMillion = (tokens: number, price: number): number => Math.ceil((tokens * price) / 1_000_000);
 
 /**
  * Cost of a call in micro-USD: each side rounded up to the next micro-USD, so rounding never favours
- * the tenant. Token counts are whole numbers; the products stay far below 2^53.
+ * the tenant. Token counts are whole numbers; the products stay far below 2^53. A prompt longer than the
+ * model's long-context threshold pays the higher rates on both sides.
  */
 export function costMicros(price: Price, promptTokens: number, completionTokens: number): number {
-  return perMillion(promptTokens, price.inPerMillion) + perMillion(completionTokens, price.outPerMillion);
+  const rates = price.longContext && promptTokens > price.longContext.threshold ? price.longContext : price;
+  return perMillion(promptTokens, rates.inPerMillion) + perMillion(completionTokens, rates.outPerMillion);
 }
 
 /** "1.234500": micro-USD as a USD string, by integer arithmetic. */

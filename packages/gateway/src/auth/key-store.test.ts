@@ -345,4 +345,21 @@ describe('key store', () => {
     expect(warns).toHaveLength(1);
     expect(infos).toHaveLength(0);
   });
+
+  it('a valid cache-miss lookup does not wait for its token to be handed back', async () => {
+    const s = await seed();
+    let refunds = 0;
+    const store = keyStoreFromConfig(config, handle.db, redis, undefined, async () => ({
+      refused: false,
+      refund: () => new Promise<void>((resolve) => setTimeout(() => (refunds++, resolve()), 400)),
+    }));
+    const started = performance.now();
+    const tenant = await store.lookup(hashKey(config.apiKeyPepper, s.key), '203.0.113.5');
+    const took = performance.now() - started;
+    expect(tenant?.tenantId).toBe(s.tenantId);
+    expect(refunds).toBe(0); // still in flight when the lookup returned
+    expect(took).toBeLessThan(300);
+    await new Promise((r) => setTimeout(r, 500));
+    expect(refunds).toBe(1);
+  });
 });
