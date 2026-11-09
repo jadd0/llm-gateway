@@ -1,6 +1,6 @@
 import type { AddressInfo } from 'node:net';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createMockServer, type Settings } from '../src/server.ts';
+import { createMockServer, type Settings } from './server.ts';
 
 const settings: Settings = {
   latencyMs: 0,
