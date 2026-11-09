@@ -19,6 +19,7 @@ New rows go in the open table, **above** "Closing a residual". Ids are `R<n>`, n
 | R6 | Budget cap can be exceeded during a partial Redis outage: instances on the Postgres path and instances on Redis can't see each other's reservations, so overshoot is bounded by the minority path's in-flight worst cases | PR 5 plan (D-018) | PR 12 | Needs 3 real instances to measure; PR 12 measures the bound and decides whether to close it |
 | R7 | Settled spend is written to Postgres in-process after the response (3 retries, then an error log); a crash between the Redis settle and the Postgres write loses that record | PR 5 plan | PR 10 | The durable queue arrives in PR 10 |
 | R8 | Per-PR benchmark figures (PR 2 onwards, and PR 1's throughput sweep) were taken on the founder's laptop while other projects' test suites and a Docker VM shared the CPU (load ~11 on 10 cores seen 2026-11-09); PR 2's ceilings spread 60-233% and PR 3's overhead quadrupled vs PR 1. They are provisional | PR 2/PR 3 builds | PR 12 | PR 12 re-runs the full suite behind `bench/quiet.sh` (or on a dedicated machine) and only its figures go on the CV |
+| R9 | No protection against an unauthenticated flood of random well-formed keys: each costs a Postgres query plus a 60 s negative-cache entry in Redis; negative caching only helps repeated bad keys. Needs per-IP (pre-auth) limiting | PR 3 review | PR 12 | Per-IP limiting is outside v1's per-key scope; PR 12's load suite measures the cost and decides |
 
 ## Closing a residual
 
