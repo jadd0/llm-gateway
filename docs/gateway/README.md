@@ -5,10 +5,11 @@ Diagram: [chat-passthrough.html](chat-passthrough.html) (the OpenAI-format path)
 | File | Job |
 |---|---|
 | `config.ts` | Env parsed with zod; a blank value counts as unset |
-| `upstream.ts` | Picks the provider for a model and keeps one undici `Pool` per upstream origin (`UPSTREAM_CONNECTIONS` sockets, timeouts from `UPSTREAM_TIMEOUT_MS`); the base URL's path is joined in front of the request path |
+| `upstream.ts` | Picks the provider for a model and keeps one undici `Pool` per upstream origin (`UPSTREAM_CONNECTIONS` sockets, connect, headers and idle timeouts from `UPSTREAM_CONNECT_TIMEOUT_MS`, `UPSTREAM_HEADERS_TIMEOUT_MS`, `UPSTREAM_IDLE_TIMEOUT_MS`); the base URL's path is joined in front of the request path |
 | `providers/` | Router and one adapter per provider format; see [../providers/README.md](../providers/README.md) |
 | `app.ts` | `buildApp(config)`: Fastify with request logging off, the auth hook, and the Postgres and Redis handles |
-| `routes/chat.ts` | `POST /v1/chat/completions` |
+| `routes/chat.ts` | `POST /v1/chat/completions`: validates, then runs the attempt loop (retries, breaker, fallback; see [../resilience/](../resilience/README.md)) |
+| `resilience/` | Timeouts, retry policy, circuit breaker and fallback chains |
 | `server.ts` | Entry point, graceful shutdown on SIGTERM and SIGINT |
 
 ## Behaviour
@@ -24,14 +25,14 @@ Diagram: [chat-passthrough.html](chat-passthrough.html) (the OpenAI-format path)
   No compression, no chunk parsing, no collecting. If the client disconnects the upstream request is
   aborted, so a dropped client never holds a pooled socket.
 - **Non-streamed.** Status and content-type from the upstream, body passed as bytes.
-- **Failures.** Connection error gives 502, upstream timeout gives 504 (in the hang test, within about half a second of `UPSTREAM_TIMEOUT_MS`), both with
+- **Failures.** Retryable failures are retried and fall back along the model chain first (see [../resilience/](../resilience/README.md)). When nothing serves, a connection error gives 502 and an upstream timeout gives 504, both with
   `{"error":{"message":..., "type":"gateway_error"}}`. An upstream 4xx or 5xx is passed through unchanged.
 - **Timing.** Non-streamed responses carry `server-timing: gw-pre;dur=<ms>, gw-post;dur=<ms>, upstream;dur=<ms>`;
   streamed responses carry `server-timing: gw-pre;dur=<ms>`. `gw-pre` is request received to upstream request
   dispatched, `upstream` is dispatch to the upstream body fully copied into memory, `gw-post` is that point to the reply being
   handed to Fastify. Serialising and writing the reply happen after `gw-post` and are not in any field.
-- **Upstream headers.** `retry-after`, `x-request-id`, `openai-processing-ms` and every `x-ratelimit-*`
-  header are passed through, streamed and not; other upstream headers are dropped. When the gateway's own
+- **Upstream headers.** `retry-after`, `x-request-id`, `request-id`, `openai-processing-ms`, `server-timing`, every `x-ratelimit-*` and every `anthropic-ratelimit-*`
+  header are passed through, streamed and not, and also on rewritten error replies; other upstream headers are dropped. When the gateway's own
   rate limiter has set `x-ratelimit-*` headers (they describe the caller's key) the upstream's are dropped instead.
 - **Errors.** Fastify's own errors (415 unsupported content-type, oversized body) and unknown routes (404)
   use the same `invalid_request_error` shape.

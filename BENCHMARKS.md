@@ -168,3 +168,14 @@ the gateway to the mock's three formats, `mock-openai-1` (pass-through) against 
 usage. Files: `gateway-mock-{openai,anthropic,gemini}-1.json`. A short run on the build machine only proved the script
 works; it is not a result.
 
+
+## Resilience under outage (PR 7)
+
+Pending quiet run. `bash bench/quiet.sh bench/results/pr-7 && bash bench/run-chaos.sh` writes `chaos-fallback-on.json`,
+`chaos-fallback-off.json` and `summary.md` to `bench/results/pr-7/`; no figure is quoted here until that run is committed (R3).
+
+What the run measures: 200 req/s non-streamed plus 50 req/s streamed for 80 s against two mocks with realistic latency. The mock
+behind `mock-openai-1` is killed with SIGKILL at 20 s and a fresh one is started at 50 s. The run is done once with the chain
+`mock-openai-1>mock-anthropic-1` and once with no chain. `summary.md` gives, per phase (before, outage, after) and kind, the
+client success rate, p50 and p95, upstream calls per request and how many requests the fallback served. A short run on the build
+machine only proved the scripts work; it is not a result.

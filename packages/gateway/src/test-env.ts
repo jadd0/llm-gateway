@@ -26,11 +26,17 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
     GEMINI_API_KEY: '',
     MODEL_ROUTES: '',
     LOG_LEVEL: 'silent',
+    // A developer's old .env.local may still carry the removed single timeout; no test depends on it.
+    UPSTREAM_TIMEOUT_MS: '',
     API_KEY_PEPPER: randomBytes(24).toString('hex'),
     REDIS_KEY_PREFIX: `test-${randomBytes(6).toString('hex')}:`,
     AUTH_CACHE: 'redis',
     // Off unless a test asks for it, so tests of other parts are not subject to a spend cap.
     BUDGET_ENABLED: 'false',
+    // One attempt per model and a breaker that does not open, unless a test asks for retries and breaking, so
+    // tests of other parts see one upstream call per request.
+    RETRY_MAX_ATTEMPTS_PER_MODEL: '1',
+    BREAKER_MIN_FAILURES: '1000000',
     ...overrides,
     // Tests give the upstream's origin; OPENAI_BASE_URL needs a path, so /v1 is added when none is given.
     // The mock adds its own /v1 for the OpenAI format, so it gets the origin. Tests stand one stub in for

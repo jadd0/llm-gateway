@@ -15,6 +15,8 @@ and not a real provider's servers, and so outages can be triggered on demand.
 | `tokenDelayMs` | `MOCK_TOKEN_DELAY_MS` | gap between streamed tokens |
 | `completionTokens` | `MOCK_COMPLETION_TOKENS` | tokens per answer |
 | `errorRate` | `MOCK_ERROR_RATE` | fraction of requests answered with a 500 |
+| `fail_rate` | control only (sets `errorRate`) | fraction of requests answered with an error, mixed with successes |
+| `status` | control only | status of an injected error (default 500), used by `outage: error` and `fail_rate` |
 | `outage` | control only | `off`, `error` (always 500), `hang` (never answers), `reset` (drops the socket) |
 
 `GET /__control` returns the current settings; `POST /__control` with a JSON object merges new ones.

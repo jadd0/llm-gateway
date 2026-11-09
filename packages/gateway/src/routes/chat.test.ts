@@ -60,7 +60,7 @@ beforeAll(async () => {
   const seeded = await seedKey(handle.db, base);
   key = seeded.key;
   tenantId = seeded.tenantId;
-  app = buildApp(cfg({ OPENAI_BASE_URL: mockUrl, UPSTREAM_TIMEOUT_MS: '1000', LOG_LEVEL: 'silent' }));
+  app = buildApp(cfg({ OPENAI_BASE_URL: mockUrl, UPSTREAM_HEADERS_TIMEOUT_MS: '1000', UPSTREAM_IDLE_TIMEOUT_MS: '1000', LOG_LEVEL: 'silent' }));
   await app.listen({ port: 0, host: '127.0.0.1' });
   gw = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 });
@@ -524,7 +524,7 @@ describe('mid-stream failure logging', () => {
 
   const gatewayFor = async (port: number) => {
     const g = buildApp(
-      cfg({ OPENAI_BASE_URL: `http://127.0.0.1:${port}`, UPSTREAM_TIMEOUT_MS: '1000', LOG_LEVEL: 'warn' }),
+      cfg({ OPENAI_BASE_URL: `http://127.0.0.1:${port}`, UPSTREAM_HEADERS_TIMEOUT_MS: '1000', UPSTREAM_IDLE_TIMEOUT_MS: '1000', LOG_LEVEL: 'warn' }),
       { logStream },
     );
     await g.listen({ port: 0, host: '127.0.0.1' });
@@ -597,7 +597,15 @@ describe('mid-stream failure logging', () => {
       close: async () => {},
     } as unknown as Upstream;
     const app3 = Fastify({ logger: { level: 'warn', stream: logStream } });
-    app3.register(chatRoutes, { upstream, maxDurationMs: 240_000, defaultMaxTokens: 1024 });
+    const allow = async () => ({ allowed: true as const, permit: { target: 'openai', probe: false, source: 'local' as const } });
+    app3.register(chatRoutes, {
+      upstream,
+      breaker: { acquire: allow, record: async () => {} },
+      chains: [],
+      retry: { maxAttempts: 3, baseMs: 200, capMs: 2000, retryAfterMaxMs: 5000, minRemainingMs: 1000 },
+      maxDurationMs: 240_000,
+      defaultMaxTokens: 1024,
+    });
     await app3.listen({ port: 0, host: '127.0.0.1' });
     try {
       const url = `http://127.0.0.1:${(app3.server.address() as AddressInfo).port}`;

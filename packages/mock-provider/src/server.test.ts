@@ -43,6 +43,23 @@ describe('mock provider', () => {
     expect((await chat(false)).status).toBe(200);
   });
 
+  it('fail_rate mixes injected errors with successes and status sets their code', async () => {
+    const set = (patch: object) => fetch(`${base}/__control`, { method: 'POST', body: JSON.stringify(patch) });
+    try {
+      await set({ fail_rate: 1, status: 503 });
+      expect([(await chat(false)).status, (await chat(true)).status]).toEqual([503, 503]);
+      await set({ fail_rate: 0.5 });
+      const statuses = await Promise.all(Array.from({ length: 200 }, async () => (await chat(false)).status));
+      const failed = statuses.filter((s) => s === 503).length;
+      expect(new Set(statuses)).toEqual(new Set([200, 503]));
+      expect(failed).toBeGreaterThan(60);
+      expect(failed).toBeLessThan(140);
+    } finally {
+      await set({ fail_rate: 0, status: 500 });
+    }
+    expect((await chat(false)).status).toBe(200);
+  });
+
   it('streamed response emits completionTokens chunks then usage then [DONE]', async () => {
     const res = await chat(true);
     expect(res.headers.get('content-type')).toBe('text/event-stream');

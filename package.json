@@ -14,7 +14,8 @@
     "db:migrate": "npm run db:migrate -w @llm-gateway/gateway",
     "keys": "npm run keys -w @llm-gateway/gateway --",
     "smoke:providers": "node --env-file-if-exists=.env.local scripts/smoke-providers.ts",
-    "bench:providers": "bash bench/run-providers.sh"
+    "bench:providers": "bash bench/run-providers.sh",
+    "bench:chaos": "bash bench/run-chaos.sh"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

@@ -1,6 +1,7 @@
 import { z } from 'zod';
-import { parseUsd } from './pricing/prices.ts';
-import { DEFAULT_MODEL_ROUTES, parseModelRoutes, type ModelRoutes } from './providers/router.ts';
+import { parseUsd, priceFor } from './pricing/prices.ts';
+import { DEFAULT_MODEL_ROUTES, parseModelRoutes, routeModel, type ModelRoutes } from './providers/router.ts';
+import { checkChains, parseFallbacks, type Chains } from './resilience/fallback.ts';
 
 // A blank value in an env file (`KEY=`) means "not set", so the default applies.
 const blankAsUnset = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? undefined : v);
@@ -65,6 +66,10 @@ const schema = z
     GEMINI_API_KEY: z.preprocess(blankAsUnset, z.string().optional()),
     // The mock provider (all three of its formats). It needs no key.
     MOCK_BASE_URL: z.preprocess(blankAsUnset, z.url().default('http://127.0.0.1:9000')),
+    // The mock's Anthropic and Gemini formats may live on another origin (the chaos run kills one mock and
+    // keeps the other). Unset, they use MOCK_BASE_URL.
+    MOCK_ANTHROPIC_BASE_URL: z.preprocess(blankAsUnset, z.url().optional()),
+    MOCK_GEMINI_BASE_URL: z.preprocess(blankAsUnset, z.url().optional()),
     // Which provider serves a model: "prefix=provider" pairs, the longest matching prefix wins.
     MODEL_ROUTES: z.preprocess(
       blankAsUnset,
@@ -80,11 +85,43 @@ const schema = z
           return routes;
         }),
     ),
+    // Ordered fallback chains: "modelA>modelB>modelC;modelX>modelY". A request for the first model of a chain
+    // moves down it when that model cannot serve. Empty means no fallback.
+    MODEL_FALLBACKS: z.preprocess(
+      blankAsUnset,
+      z
+        .string()
+        .default('')
+        .transform((v, ctx): Chains => {
+          const chains = parseFallbacks(v);
+          if (typeof chains === 'string') {
+            ctx.addIssue({ code: 'custom', message: chains });
+            return [];
+          }
+          return chains;
+        }),
+    ),
     UPSTREAM_CONNECTIONS: int(256, 1),
-    UPSTREAM_TIMEOUT_MS: int(30_000, 1),
-    // A total deadline per upstream call. UPSTREAM_TIMEOUT_MS only limits silence, so a slow stream
-    // that keeps trickling bytes could otherwise outlive the budget hold that covers it.
+    // The old single timeout is refused: it set three different limits at once.
+    UPSTREAM_TIMEOUT_MS: z.preprocess(blankAsUnset, z.string().optional()),
+    // Per attempt: connecting, then waiting for response headers (a non-streamed completion sends none until
+    // it is finished), then silence between body bytes.
+    UPSTREAM_CONNECT_TIMEOUT_MS: int(5_000, 1),
+    UPSTREAM_HEADERS_TIMEOUT_MS: int(120_000, 1),
+    UPSTREAM_IDLE_TIMEOUT_MS: int(30_000, 1),
+    // A total deadline for the whole request, every attempt and backoff included. The per-attempt timeouts
+    // only limit silence, so a slow stream that keeps trickling bytes could otherwise outlive the budget hold.
     UPSTREAM_MAX_DURATION_MS: int(240_000, 1),
+    RETRY_MAX_ATTEMPTS_PER_MODEL: int(3, 1),
+    RETRY_BASE_MS: int(200, 1),
+    RETRY_CAP_MS: int(2_000, 1),
+    RETRY_AFTER_MAX_MS: int(5_000, 0),
+    RETRY_MIN_REMAINING_MS: int(1_000, 0),
+    BREAKER_WINDOW_MS: int(10_000, 1000),
+    BREAKER_MIN_FAILURES: int(5, 1),
+    BREAKER_FAILURE_RATIO: z.preprocess(blankAsUnset, z.coerce.number().gt(0).max(1).default(0.5)),
+    BREAKER_OPEN_MS: int(15_000, 1),
+    BREAKER_REDIS_TIMEOUT_MS: int(50, 1),
     LOG_LEVEL: z.preprocess(
       blankAsUnset,
       z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('warn'),
@@ -104,6 +141,19 @@ const schema = z
     BUDGET_EPOCH_REFRESH_MS: int(250, 10),
     BUDGET_OUTAGE_FAILURES: int(3, 1),
     BUDGET_SWEEP_INTERVAL_S: int(60, 1),
+  })
+  .refine((e) => e.UPSTREAM_TIMEOUT_MS === undefined, {
+    message:
+      'UPSTREAM_TIMEOUT_MS is gone: it set three limits at once. Use UPSTREAM_CONNECT_TIMEOUT_MS, UPSTREAM_HEADERS_TIMEOUT_MS and UPSTREAM_IDLE_TIMEOUT_MS',
+    path: ['UPSTREAM_TIMEOUT_MS'],
+  })
+  .superRefine((e, ctx) => {
+    const problem = checkChains(e.MODEL_FALLBACKS, {
+      routable: (m) => routeModel(e.MODEL_ROUTES, m) !== undefined,
+      priced: (m) => priceFor(m) !== undefined,
+      budgets: e.BUDGET_ENABLED === 'true',
+    });
+    if (problem) ctx.addIssue({ code: 'custom', message: problem, path: ['MODEL_FALLBACKS'] });
   })
   .refine((e) => e.AUTH_CACHE === 'none' || e.REDIS_URL !== undefined, {
     message: 'REDIS_URL is required when AUTH_CACHE=redis',
@@ -138,10 +188,25 @@ export interface Config {
   geminiBaseUrl: string;
   geminiApiKey: string | undefined;
   mockBaseUrl: string;
+  mockAnthropicBaseUrl: string;
+  mockGeminiBaseUrl: string;
   modelRoutes: ModelRoutes;
+  modelFallbacks: Chains;
   upstreamConnections: number;
-  upstreamTimeoutMs: number;
+  upstreamConnectTimeoutMs: number;
+  upstreamHeadersTimeoutMs: number;
+  upstreamIdleTimeoutMs: number;
   upstreamMaxDurationMs: number;
+  retryMaxAttemptsPerModel: number;
+  retryBaseMs: number;
+  retryCapMs: number;
+  retryAfterMaxMs: number;
+  retryMinRemainingMs: number;
+  breakerWindowMs: number;
+  breakerMinFailures: number;
+  breakerFailureRatio: number;
+  breakerOpenMs: number;
+  breakerRedisTimeoutMs: number;
   logLevel: string;
   databaseUrl: string;
   dbPoolSize: number;
@@ -181,10 +246,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     geminiBaseUrl: e.GEMINI_BASE_URL,
     geminiApiKey: e.GEMINI_API_KEY,
     mockBaseUrl: e.MOCK_BASE_URL,
+    mockAnthropicBaseUrl: e.MOCK_ANTHROPIC_BASE_URL ?? e.MOCK_BASE_URL,
+    mockGeminiBaseUrl: e.MOCK_GEMINI_BASE_URL ?? e.MOCK_BASE_URL,
     modelRoutes: e.MODEL_ROUTES,
+    modelFallbacks: e.MODEL_FALLBACKS,
     upstreamConnections: e.UPSTREAM_CONNECTIONS,
-    upstreamTimeoutMs: e.UPSTREAM_TIMEOUT_MS,
+    upstreamConnectTimeoutMs: e.UPSTREAM_CONNECT_TIMEOUT_MS,
+    upstreamHeadersTimeoutMs: e.UPSTREAM_HEADERS_TIMEOUT_MS,
+    upstreamIdleTimeoutMs: e.UPSTREAM_IDLE_TIMEOUT_MS,
     upstreamMaxDurationMs: e.UPSTREAM_MAX_DURATION_MS,
+    retryMaxAttemptsPerModel: e.RETRY_MAX_ATTEMPTS_PER_MODEL,
+    retryBaseMs: e.RETRY_BASE_MS,
+    retryCapMs: e.RETRY_CAP_MS,
+    retryAfterMaxMs: e.RETRY_AFTER_MAX_MS,
+    retryMinRemainingMs: e.RETRY_MIN_REMAINING_MS,
+    breakerWindowMs: e.BREAKER_WINDOW_MS,
+    breakerMinFailures: e.BREAKER_MIN_FAILURES,
+    breakerFailureRatio: e.BREAKER_FAILURE_RATIO,
+    breakerOpenMs: e.BREAKER_OPEN_MS,
+    breakerRedisTimeoutMs: e.BREAKER_REDIS_TIMEOUT_MS,
     logLevel: e.LOG_LEVEL,
     databaseUrl: e.DATABASE_URL,
     dbPoolSize: e.DB_POOL_SIZE,

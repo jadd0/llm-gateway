@@ -555,15 +555,27 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     const short = capped({ UPSTREAM_MAX_DURATION_MS: '300' });
     await short.listen({ port: 0, host: '127.0.0.1' });
     try {
-      for (const model of ['mock-json-hang', 'mock-500-hang']) {
-        const s = await fresh(1_000_000);
-        const r = sendRaw(short, s.key, body(model, { stream: true }));
-        await r.ended;
-        expect(r.text()).not.toContain('upstream_max_duration'); // nothing appended
-        expect(r.text()).not.toContain('data:');
-        // (The usage tap holds an incomplete event back, so a 200 body shows nothing; a 500 passes straight through.)
-        if (model === 'mock-500-hang') expect(r.text()).toBe('partial-body');
-      }
+      const s = await fresh(1_000_000);
+      const r = sendRaw(short, s.key, body('mock-json-hang', { stream: true }));
+      await r.ended;
+      expect(r.text()).not.toContain('upstream_max_duration'); // nothing appended
+      expect(r.text()).not.toContain('data:');
+      // (The usage tap holds an incomplete event back, so a 200 body shows nothing.)
+    } finally {
+      await short.close();
+    }
+  });
+
+  it('an error answer whose body never ends is cut at the deadline with a 504, streamed or not', async () => {
+    // An error answer is read in full before the client is told anything (it may be retried or rewritten), so a
+    // body that hangs is the deadline's to end.
+    const short = capped({ UPSTREAM_MAX_DURATION_MS: '300' });
+    await short.listen({ port: 0, host: '127.0.0.1' });
+    try {
+      const s = await fresh(1_000_000);
+      const r = sendRaw(short, s.key, body('mock-500-hang', { stream: true }));
+      await r.ended;
+      expect(r.text()).toContain('upstream_max_duration');
     } finally {
       await short.close();
     }
