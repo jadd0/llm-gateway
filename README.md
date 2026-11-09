@@ -73,8 +73,22 @@ outage mid-test.
 
 ## Getting started
 
-Setup instructions will land with the first runnable version. The stack is Node 24+, npm, and
-Docker Compose for Redis and Postgres.
+Needs Node 24+ (26 recommended), npm, Docker (for Redis and Postgres) and [k6](https://k6.io) for benchmarks.
+
+```
+npm ci
+cp .env.example .env.local
+docker compose up -d --wait      # Redis and Postgres+pgvector (not yet used by gateway code)
+npm run dev:mock                 # mock provider on :9000
+npm run dev:gateway              # gateway on :8080
+curl -N localhost:8080/v1/chat/completions \
+  -d '{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+npm run check                    # typecheck and tests
+npm run bench:baseline           # k6 baseline, writes bench/results/pr-1/
+```
+
+Per-part docs and diagrams are in [docs/](docs/README.md); measured numbers are in
+[BENCHMARKS.md](BENCHMARKS.md).
 
 ## Roadmap (out of scope for v1)
 
