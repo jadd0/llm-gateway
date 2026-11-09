@@ -194,6 +194,17 @@ export function errorEvent(message: string, type: string, code: string) {
   return { error: { message, type, code } };
 }
 
+export type AuthLog = { error(obj: object, msg: string): void };
+
+// The log line for a provider that refused the gateway's own key: the provider's error code, never its message,
+// which can echo part of the key.
+export function logAuthRejected(log: AuthLog | undefined, provider: string, providerCode: string | undefined, upstreamStatus?: number): void {
+  log?.error(
+    { provider, ...(upstreamStatus === undefined ? {} : { upstreamStatus }), providerCode },
+    'provider rejected the gateway credentials',
+  );
+}
+
 /** What a provider's mid-stream error means to an OpenAI client. */
 export type ProviderErrorKind = 'invalid_request' | 'rate_limit' | 'auth' | 'server';
 
@@ -201,13 +212,14 @@ export type ProviderErrorKind = 'invalid_request' | 'rate_limit' | 'auth' | 'ser
 // the same type and code its non-streamed twin would carry. Only a request the provider rejected as invalid
 // stays a client error; overload and provider faults are server errors; a rejected gateway credential is the
 // gateway's problem and says so without the provider's wording.
-export function providerStreamError(kind: ProviderErrorKind, message: string, providerCode: string, provider: string): string {
+export function providerStreamError(kind: ProviderErrorKind, message: string, providerCode: string, provider: string, log?: AuthLog): string {
   switch (kind) {
     case 'invalid_request':
       return sseData(errorEvent(message, 'invalid_request_error', providerCode));
     case 'rate_limit':
       return sseData(errorEvent(message, 'rate_limit_error', 'rate_limit_exceeded'));
     case 'auth':
+      logAuthRejected(log, provider, providerCode);
       return sseData(errorEvent(providerAuthMessage(provider), 'gateway_error', 'provider_auth_failed'));
     default:
       return sseData(errorEvent(message, 'server_error', providerCode));

@@ -8,7 +8,6 @@ import { budgetGuard } from './budget/plugin.ts';
 import { errorBody } from './errors.ts';
 import { createLimiter } from './ratelimit/limiter.ts';
 import { rateLimit } from './ratelimit/plugin.ts';
-import { routeModel } from './providers/router.ts';
 import { chatRoutes } from './routes/chat.ts';
 import { createRedis } from './redis.ts';
 import { createUpstream } from './upstream.ts';
@@ -104,7 +103,7 @@ export function buildApp(
       },
       defaultCapMicros: config.budgetDefaultMonthlyMicros,
       defaultMaxTokens: config.rateLimitDefaultMaxTokens,
-      isRoutable: (model) => routeModel(config.modelRoutes, model) !== undefined,
+      isRoutable: (model) => upstream.resolve(model) !== undefined,
     });
   }
   app.register(chatRoutes, {

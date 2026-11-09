@@ -111,6 +111,7 @@ class GeminiStream extends SseTranslator {
         typeof data.error.message === 'string' ? data.error.message : 'provider error',
         typeof data.error.status === 'string' ? data.error.status.toLowerCase() : 'provider_error',
         'gemini',
+        this.#opts.log,
       );
     }
     let out = '';

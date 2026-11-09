@@ -396,7 +396,7 @@ describe('translated streams and errors', { timeout: 60_000 }, () => {
     logLines.length = 0;
     for (const [model, provider] of [
       ['mock-openai-401', 'mock-openai'],
-      ['mock-anthropic-403', 'mock-anthropic'],
+      ['mock-anthropic-401', 'mock-anthropic'],
       ['mock-gemini-401', 'mock-gemini'],
     ] as const) {
       for (const stream of [false, true]) {
@@ -415,13 +415,26 @@ describe('translated streams and errors', { timeout: 60_000 }, () => {
     const entries = logLines.map((l) => JSON.parse(l)).filter((e) => e.msg === 'provider rejected the gateway credentials');
     expect(entries.map((e) => [e.provider, e.upstreamStatus])).toEqual([
       ['mock-openai', 401], ['mock-openai', 401],
-      ['mock-anthropic', 403], ['mock-anthropic', 403],
+      ['mock-anthropic', 401], ['mock-anthropic', 401],
       ['mock-gemini', 401], ['mock-gemini', 401],
     ]);
     expect(entries.every((e) => e.providerCode === 'invalid_api_key')).toBe(true);
     expect(logLines.join('\n')).not.toContain('sk-live');
     // The provider did no work: nothing is charged and nothing stays held.
     expect(await settledTo(s.tenantId, 0)).toEqual({ spent: 0, reserved: 0 });
+  });
+
+  it('a 403 is not read as a bad gateway key: the provider reply goes through', async () => {
+    const s = await fresh();
+    logLines.length = 0;
+    for (const [model, stream] of [['mock-openai-403', false], ['mock-openai-403', true], ['mock-anthropic-403', false], ['mock-gemini-403', false]] as const) {
+      const res = await post(urls.logged, { model, stream }, s.key);
+      const body = (await res.json()) as any;
+      expect(res.status, model).toBe(403);
+      expect(body.error.code, model).not.toBe('provider_auth_failed');
+      expect(body.error.type, model).not.toBe('gateway_error');
+    }
+    expect(logLines.map((l) => JSON.parse(l)).filter((e) => e.msg === 'provider rejected the gateway credentials')).toEqual([]);
   });
 
   it('Gemini is sent the same output cap the budget hold was sized on when the client names none', async () => {

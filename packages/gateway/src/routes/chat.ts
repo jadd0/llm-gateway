@@ -5,7 +5,7 @@ import { errorBody } from '../errors.ts';
 import { chatRequest } from '../request-body.ts';
 import { usageSettler, type UsageSettler } from '../usage/settle.ts';
 import { SseUsageTap, usageFromBody } from '../usage/sse-usage.ts';
-import { providerAuthMessage, tryJson } from '../providers/common.ts';
+import { logAuthRejected, providerAuthMessage, tryJson } from '../providers/common.ts';
 import type { Upstream } from '../upstream.ts';
 
 const TIMEOUT_CODES = new Set([
@@ -206,7 +206,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
     // The provider rejected the gateway's own credential. That is not the caller's doing and the provider's
     // wording is not the caller's business: they get a generic 502. The log keeps the status and the provider's
     // error code only, never its message, which can echo part of the key.
-    if (res.statusCode === 401 || res.statusCode === 403) {
+    if (res.statusCode === 401) {
       let errBody: Buffer;
       try {
         errBody = Buffer.from(await res.body.arrayBuffer());
@@ -217,10 +217,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
       }
       const e = (tryJson(errBody) as { error?: { code?: unknown; type?: unknown; status?: unknown } } | undefined)?.error;
       const providerCode = [e?.code, e?.type, e?.status].find((v): v is string => typeof v === 'string')?.slice(0, 64);
-      reply.log.error(
-        { provider: target.provider, upstreamStatus: res.statusCode, providerCode },
-        'provider rejected the gateway credentials',
-      );
+      logAuthRejected(reply.log, target.provider, providerCode, res.statusCode);
       return reply.code(502).send(errorBody(providerAuthMessage(target.provider), 'gateway_error', 'provider_auth_failed'));
     }
 
@@ -279,6 +276,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
           // Provider events are converted as they arrive; usage is reported by the translator.
           const translator = translated.streamTransform({
             includeUsage,
+            log: reply.log,
             onUsage: (usage) => {
               if (metered) settle.used(usage);
             },

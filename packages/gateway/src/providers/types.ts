@@ -50,6 +50,8 @@ export interface StreamOptions {
   includeUsage: boolean;
   /** Called once with the answer's usage when the provider reports it. */
   onUsage(usage: Usage): void;
+  /** Where a mid-stream rejection of the gateway's credentials is logged (provider and code only). */
+  log?: { error(obj: object, msg: string): void };
 }
 
 interface AdapterBase {

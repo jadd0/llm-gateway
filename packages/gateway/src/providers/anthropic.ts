@@ -39,6 +39,8 @@ interface AnthropicUsage {
 function errorKind(type: unknown): ProviderErrorKind {
   switch (type) {
     case 'invalid_request_error':
+    case 'not_found_error':
+    case 'request_too_large':
       return 'invalid_request';
     case 'rate_limit_error':
       return 'rate_limit';
@@ -110,6 +112,7 @@ class AnthropicStream extends SseTranslator {
           typeof e.message === 'string' ? e.message : 'provider error',
           typeof e.type === 'string' ? e.type : 'provider_error',
           'anthropic',
+          this.#opts.log,
         );
       }
       default:

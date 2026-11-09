@@ -159,6 +159,8 @@ describe('anthropic adapter', () => {
       ['api_error', 'server_error', 'api_error'],
       ['timeout_error', 'server_error', 'timeout_error'],
       ['authentication_error', 'gateway_error', 'provider_auth_failed'],
+      ['not_found_error', 'invalid_request_error', 'not_found_error'],
+      ['request_too_large', 'invalid_request_error', 'request_too_large'],
     ] as const;
     for (const [from, type, code] of kinds) {
       const sse = `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: from, message: 'provider words' } })}\n\n`;
@@ -166,6 +168,15 @@ describe('anthropic adapter', () => {
       expect(events.at(-1).error, from).toMatchObject({ type, code });
       if (code === 'provider_auth_failed') expect(events.at(-1).error.message).not.toContain('provider words');
     }
+  });
+
+  it('a mid-stream auth error is logged like the non-streamed one: provider and code, never the message', async () => {
+    const lines: Array<[object, string]> = [];
+    const log = { error: (o: object, m: string) => void lines.push([o, m]) };
+    const sse = `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: 'authentication_error', message: 'sk-live-SECRET' } })}\n\n`;
+    await run(adapter.translates ? adapter.streamTransform({ includeUsage: false, onUsage: () => {}, log }) : null!, Buffer.from(sse));
+    expect(lines).toEqual([[{ provider: 'anthropic', providerCode: 'authentication_error' }, 'provider rejected the gateway credentials']]);
+    expect(JSON.stringify(lines)).not.toContain('SECRET');
   });
 
   it('error statuses map (429 keeps retry-after; 529 → 503 for Anthropic)', () => {

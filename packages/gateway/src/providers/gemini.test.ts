@@ -161,6 +161,15 @@ describe('gemini adapter', () => {
     }
   });
 
+  it('a mid-stream auth error is logged like the non-streamed one: provider and code, never the message', async () => {
+    const lines: Array<[object, string]> = [];
+    const log = { error: (o: object, m: string) => void lines.push([o, m]) };
+    const sse = `data: ${JSON.stringify({ error: { code: 403, message: 'sk-live-SECRET', status: 'PERMISSION_DENIED' } })}\n\n`;
+    await run(a.streamTransform({ includeUsage: false, onUsage: () => {}, log }), Buffer.from(sse));
+    expect(lines).toEqual([[{ provider: 'gemini', providerCode: 'permission_denied' }, 'provider rejected the gateway credentials']]);
+    expect(JSON.stringify(lines)).not.toContain('SECRET');
+  });
+
   it('error statuses map (429 keeps its status and the body is OpenAI-shaped)', () => {
     expect(a.mapError(429, fixture('gemini-error-429.json'))).toEqual({
       status: 429,
