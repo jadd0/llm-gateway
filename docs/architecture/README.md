@@ -47,17 +47,3 @@ compared against rather than an impression. PR 3 added the key check and re-meas
   to first streamed byte at 200 req/s.
 - Throughput: last good step 10000 req/s through one gateway process, zero errors up to 20000 req/s, with
   p95 degrading from 12000 req/s. One run per step, laptop, k6 on the same machine.
-
-## Questions you should be able to answer
-
-1. **Why put a gateway between apps and providers at all?** One endpoint and one place for auth, limits,
-   budgets, caching and failover. The price is an extra hop, which is why the hop is measured: 0.233 ms p50
-   non-streamed in the baseline.
-2. **Why is the gateway stateless?** So instances scale horizontally; anything shared goes to Redis or
-   Postgres. Auth uses both: Postgres is the source of truth for keys, Redis only caches it.
-3. **What is built versus planned?** Built: passthrough, provider adapters (Anthropic, OpenAI, Gemini), the mock, tenants and API-key auth, per-key rate limits, per-tenant monthly budgets (see [../budgets/](../budgets/README.md)). Planned: everything dashed in the
-   diagram.
-4. **How do you know the numbers are the gateway's?** The mock removes provider variance, and each figure is
-   a difference against a direct-to-mock run at the same rate.
-5. **What is not known yet?** What limits throughput above 10000 req/s on this machine; see the
-   benchmarks page.

@@ -12,3 +12,7 @@ gate-logs/
 # Private planning notes, not for the public repo
 LLM_Gateway_Brief.pdf
 .env.local
+
+# Private: the product loop's working files and interview prep (linked into worktrees by scripts/link-private.sh)
+/.product
+/INTERVIEW_QUESTIONS.md

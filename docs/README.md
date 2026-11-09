@@ -12,16 +12,3 @@ One folder per part of the system. Each holds a `README.md` and a diagram drawn 
 - [benchmarks/](benchmarks/README.md): how overhead is measured, and why the rig runs natively.
 
 Flow registry for the diagram check: [diagrams/flows.md](diagrams/flows.md). Numbers live in [../BENCHMARKS.md](../BENCHMARKS.md).
-
-## Interview questions
-
-Each part ends with "Questions you should be able to answer", with answers:
-
-- [Architecture](architecture/README.md#questions-you-should-be-able-to-answer)
-- [Gateway (chat passthrough)](gateway/README.md#questions-you-should-be-able-to-answer)
-- [Auth (API keys)](auth/README.md#questions-you-should-be-able-to-answer)
-- [Rate limiter](rate-limiter/README.md#questions-you-should-be-able-to-answer)
-- [Budgets](budgets/README.md#questions-you-should-be-able-to-answer)
-- [Providers](providers/README.md#questions-you-should-be-able-to-answer)
-- [Benchmarks](benchmarks/README.md#questions-you-should-be-able-to-answer)
-- [Mock provider](mock-provider/README.md#questions-you-should-be-able-to-answer)

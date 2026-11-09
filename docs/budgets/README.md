@@ -124,28 +124,3 @@ the gateway won't start), so a gateway that crashes mid-request can't hold money
 
 Pending quiet run. See [../../BENCHMARKS.md](../../BENCHMARKS.md); no figure is quoted here until
 `bench/results/pr-5/` is committed (R3).
-
-## Questions you should be able to answer
-
-**Why reserve the worst case?** The output length isn't known until the call ends and a slow call can last minutes.
-Holding `max_tokens` worth of money means concurrent requests can't jointly outspend the cap, whatever they end up using.
-Settling to actual gives the unused part back.
-
-**Why not just check `balance > 0`?** Check-then-spend isn't atomic: 50 concurrent requests all see a positive balance
-and all go. The reserve is one Lua script, so the check and the hold can't be separated. Tests fire 50 at once at a cap
-that fits 7 and exactly 7 are admitted.
-
-**Why integer micro-dollars?** Floats can't add up cents exactly, and money that drifts can't be audited. Integers add
-exactly; costs round up so rounding never favours the tenant.
-
-**What happens if Redis dies mid-month?** The cap still holds. Every hold is also a row in Postgres, so the Postgres
-path counts the requests Redis had already admitted; when Redis returns, the balance is rebuilt from Postgres with
-those holds in it, and settles from before the outage land on the rebuilt balance exactly once. Tests kill Redis with
-holds in flight and flood: exactly the money that fits is admitted.
-
-**What's the epoch for?** Redis keys include it so a balance that missed spend while Redis was unreachable is never
-trusted again. It moves once per outage (compare-and-set), not once per gateway.
-
-**Where can the cap still be broken, and by how much?** By a low prompt estimate (about in-flight requests times their
-estimate error; one 10x-underestimate burst reached 3.12x), in a partial outage (R6, to be measured in PR 12), and a lost
-Postgres settle write under-counts a charge (R7).
