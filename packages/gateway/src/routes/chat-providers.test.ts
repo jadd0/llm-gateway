@@ -308,6 +308,22 @@ describe('providers through the gateway', { timeout: 60_000 }, () => {
     expect(await settledTo(s.tenantId, 0)).toEqual({ spent: 0, reserved: 0 });
   });
 
+  it('a model name that is not header-safe gets the normal 400 and no x-gateway-model header', async () => {
+    const s = await fresh();
+    const names = ['gpt\u0001x', 'mod\u00e8le-\u6a21\u578b', 'a'.repeat(70_000), 'x'.repeat(129)];
+    for (const model of names) {
+      for (const url of [urls.unmetered, urls.viaMock]) {
+        const res = await post(url, { model }, s.key);
+        expect(res.status, `${model.length} chars`).toBe(400);
+        expect(((await res.json()) as any).error.code).toBe('model_not_found');
+        expect(res.headers.get('x-gateway-model')).toBeNull();
+      }
+    }
+    // Control: a plain name is still echoed.
+    const plain = await post(urls.unmetered, { model: 'llama-3-70b' }, s.key);
+    expect(plain.headers.get('x-gateway-model')).toBe('llama-3-70b');
+  });
+
   it('unknown model returns 400 model_not_found; unsupported parameters 400 unsupported_parameter; both give the hold back', async () => {
     seen.length = 0;
     const s = await fresh();

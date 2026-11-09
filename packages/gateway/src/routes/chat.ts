@@ -72,6 +72,13 @@ const maxDurationEvent = `data: ${JSON.stringify({
   error: { message: 'upstream call exceeded the maximum duration', type: 'gateway_error', code: 'upstream_max_duration' },
 })}\n\n`;
 
+// The model name is client input. It is echoed in a header only when it is printable ASCII of a sane length:
+// anything else would make the header invalid (a 500) or oversized, and the body already says which model failed.
+const HEADER_SAFE_MODEL = /^[\x20-\x7e]{1,128}$/;
+function setModelHeader(reply: { header(name: string, value: string): unknown }, model: string): void {
+  if (HEADER_SAFE_MODEL.test(model)) reply.header('x-gateway-model', model);
+}
+
 export interface ChatRouteOptions {
   upstream: Upstream;
   breaker: Breaker;
@@ -118,7 +125,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     if (reply.statusCode < 400 || request.tenant === null || reply.hasHeader('x-gateway-attempts')) return;
     reply.header('x-gateway-attempts', '0');
     const body = Buffer.isBuffer(request.body) ? chatRequest(request) : undefined;
-    if (body?.ok) reply.header('x-gateway-model', body.value.model);
+    if (body?.ok) setModelHeader(reply, body.value.model);
   });
 
   app.post('/v1/chat/completions', { config: { rateLimited: true, budgeted: true } }, async (request, reply) => {
@@ -393,7 +400,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     }
 
     reply.header('x-gateway-attempts', String(attempts));
-    if (state.model !== undefined) reply.header('x-gateway-model', state.model);
+    if (state.model !== undefined) setModelHeader(reply, state.model);
 
     if (!served) {
       if (deadlineHit) {
