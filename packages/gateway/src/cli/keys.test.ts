@@ -54,7 +54,9 @@ afterAll(async () => {
   await handle.close();
 });
 
-describe('keys CLI', () => {
+// Each test spawns real CLI processes (node start-up, DB and Redis connects), and a revoke against an
+// unreachable Redis waits waitReady's full 2 s, so the 5 s default is too tight under load.
+describe('keys CLI', { timeout: 30_000 }, () => {
   it('create-key prints the key once and stores only its hash', async () => {
     const tenant = await newTenant();
     const { stdout, stderr } = await cli('create-key', tenant, 'ci');
@@ -109,6 +111,21 @@ describe('keys CLI', () => {
     const rows = await handle.db.select({ h: apiKeys.keyHash, r: apiKeys.revokedAt }).from(apiKeys);
     expect(rows.find((r) => r.h === hashA)!.r).not.toBeNull();
     expect(rows.find((r) => r.h === hashB)!.r).toBeNull();
+  });
+
+  it('revoke-key prefers the one active key when revoked keys share its prefix', async () => {
+    const tenant = await newTenant();
+    const [t] = await handle.db.select().from(tenants).where(eq(tenants.name, tenant));
+    const shared = `gw_${randomBytes(3).toString('hex')}`;
+    const activeHash = randomBytes(32).toString('hex');
+    await handle.db.insert(apiKeys).values([
+      { tenantId: t!.id, keyHash: randomBytes(32).toString('hex'), prefix: `${shared}OLD001`, revokedAt: new Date() },
+      { tenantId: t!.id, keyHash: activeHash, prefix: `${shared}LIVE01` },
+    ]);
+    const out = await cli('revoke-key', shared);
+    expect(out.stdout).toContain(`${shared}LIVE01`);
+    const [row] = await handle.db.select().from(apiKeys).where(eq(apiKeys.keyHash, activeHash));
+    expect(row!.revokedAt).not.toBeNull();
   });
 
   it('revoke-key is repeatable: a second run rewrites the tombstone, and a failed one can be retried', async () => {

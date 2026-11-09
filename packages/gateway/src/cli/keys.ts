@@ -50,7 +50,8 @@ export async function listKeys(db: Db['db'], tenantName?: string) {
     .orderBy(asc(tenants.name), asc(apiKeys.createdAt));
 }
 
-// Revokes exactly one key, found by display prefix; a prefix that matches several keys is refused.
+// Revokes exactly one key, found by display prefix. Active keys win: a prefix that matches one active key
+// revokes it even if revoked keys share the prefix. Otherwise a prefix matching several keys is refused.
 // Safe to repeat: an already revoked key gets its tombstone rewritten, which is how a revoke whose
 // Redis write failed is retried.
 export async function revokeKey(db: Db['db'], keyStore: KeyStore, prefixArg: string) {
@@ -59,15 +60,18 @@ export async function revokeKey(db: Db['db'], keyStore: KeyStore, prefixArg: str
     throw new CliError(`give at least ${MIN_REVOKE_PREFIX} characters of the key prefix`);
   }
   const matches = await db
-    .select({ keyHash: apiKeys.keyHash, prefix: apiKeys.prefix })
+    .select({ keyHash: apiKeys.keyHash, prefix: apiKeys.prefix, revokedAt: apiKeys.revokedAt })
     .from(apiKeys)
     .where(sql`starts_with(${apiKeys.prefix}, ${prefix})`);
   if (matches.length === 0) throw new CliError(`no key with prefix "${prefix}"`);
-  if (matches.length > 1) {
-    throw new CliError(`prefix "${prefix}" matches ${matches.length} keys; give more characters`);
+  const active = matches.filter((m) => m.revokedAt === null);
+  const candidates = active.length > 0 ? active : matches;
+  if (candidates.length > 1) {
+    throw new CliError(`prefix "${prefix}" matches ${candidates.length} keys; give more characters`);
   }
-  const result = await keyStore.revoke(matches[0]!.keyHash);
-  return { prefix: matches[0]!.prefix, ...result };
+  const target = candidates[0]!;
+  const result = await keyStore.revoke(target.keyHash);
+  return { prefix: target.prefix, ...result };
 }
 
 const USAGE = `usage:

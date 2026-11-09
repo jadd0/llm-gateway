@@ -39,8 +39,8 @@ export function isStarting(redis: Redis): boolean {
   return s !== undefined && !s.everReady && Date.now() - s.createdAt < s.startupGraceMs;
 }
 
-// Resolves true once the client is ready; false if it is not ready within timeoutMs or the connection
-// attempt fails first (close/end). Commands sent before 'ready' fail (no offline queue), so a
+// Resolves true once the client is ready; false if it is not ready within timeoutMs or the client gives
+// up for good ('end'). A single failed attempt ('close') is not final: ioredis retries, so keep waiting. Commands sent before 'ready' fail (no offline queue), so a
 // short-lived caller such as the CLI waits first.
 export function waitReady(redis: Redis, timeoutMs: number): Promise<boolean> {
   if (redis.status === 'ready') return Promise.resolve(true);
@@ -48,7 +48,6 @@ export function waitReady(redis: Redis, timeoutMs: number): Promise<boolean> {
     const done = (ok: boolean) => {
       clearTimeout(timer);
       redis.off('ready', onReady);
-      redis.off('close', onClosed);
       redis.off('end', onClosed);
       resolve(ok);
     };
@@ -56,7 +55,6 @@ export function waitReady(redis: Redis, timeoutMs: number): Promise<boolean> {
     const onClosed = () => done(false);
     const timer = setTimeout(() => done(false), timeoutMs);
     redis.on('ready', onReady);
-    redis.on('close', onClosed);
     redis.on('end', onClosed);
   });
 }
