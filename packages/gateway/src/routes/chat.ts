@@ -18,7 +18,7 @@ const TIMEOUT_CODES = new Set([
 
 const errorBody = (message: string, type: string) => ({ error: { message, type } });
 
-const ms = (n: number) => n.toFixed(1);
+const ms = (n: number) => n.toFixed(3);
 
 function upstreamFailure(reply: FastifyReply, err: unknown): FastifyReply {
   const code = (err as { code?: string }).code ?? '';
