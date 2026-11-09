@@ -180,11 +180,11 @@ const schema = z
     message: 'REDIS_URL is required when CACHE_ENABLED=true',
     path: ['REDIS_URL'],
   })
-  .refine((e) => e.CACHE_WAIT_MS <= e.UPSTREAM_MAX_DURATION_MS, {
+  .refine((e) => e.CACHE_ENABLED === 'false' || e.CACHE_WAIT_MS <= e.UPSTREAM_MAX_DURATION_MS, {
     message: 'CACHE_WAIT_MS must not be longer than UPSTREAM_MAX_DURATION_MS: no call outlasts that, so no one should wait longer for one',
     path: ['CACHE_WAIT_MS'],
   })
-  .refine((e) => e.CACHE_WAIT_MS >= e.CACHE_LOCK_MS, {
+  .refine((e) => e.CACHE_ENABLED === 'false' || e.CACHE_WAIT_MS >= e.CACHE_LOCK_MS, {
     message: 'CACHE_WAIT_MS must not be shorter than CACHE_LOCK_MS: a leader is renewing its lock for at least that long',
     path: ['CACHE_WAIT_MS'],
   })

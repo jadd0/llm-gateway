@@ -129,5 +129,7 @@ describe('response cache settings', () => {
     expect(loadConfig({ ...noRedis, CACHE_ENABLED: 'false' }).cacheEnabled).toBe(false);
     expect(() => loadConfig(env({ CACHE_LOCK_MS: '5000', CACHE_WAIT_MS: '2000' }))).toThrow(/CACHE_WAIT_MS must not be shorter than CACHE_LOCK_MS/);
     expect(() => loadConfig(env({ UPSTREAM_MAX_DURATION_MS: '60000', CACHE_WAIT_MS: '120000' }))).toThrow(/CACHE_WAIT_MS must not be longer than UPSTREAM_MAX_DURATION_MS/);
+    // With the cache off its wait is not in play, so a short upstream limit needs no cache setting.
+    expect(loadConfig(env({ CACHE_ENABLED: 'false', UPSTREAM_MAX_DURATION_MS: '300' })).upstreamMaxDurationMs).toBe(300);
   });
 });
