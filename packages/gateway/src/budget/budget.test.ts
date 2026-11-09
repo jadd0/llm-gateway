@@ -336,6 +336,46 @@ describe('budget', { timeout: 120_000 }, () => {
     expect((await redisBal(t, h.epoch)).reserved).toBe(100);
   });
 
+  describe('a refusal whose hold row cannot be dropped', () => {
+    const lapse = () => new Promise((r) => setTimeout(r, 1200)); // past a 1 s reservation TTL
+    const refusedRows = async (t: string) =>
+      Number((await handle.db.execute(sql`select count(*) as n from budget_reservations where tenant_id = ${t} and refused`)).rows[0]!.n);
+    const waitFor = async (check: () => Promise<boolean>) => {
+      const until = Date.now() + 5000;
+      while (!(await check()) && Date.now() < until) await new Promise((r) => setTimeout(r, 5));
+    };
+
+    it('the drop is retried in the background and the row goes', async () => {
+      const t = await newTenant();
+      let failures = 2;
+      const release: PgLedger['release'] = (id) => (failures-- > 0 ? Promise.reject(new Error('connection reset')) : pgl.release(id));
+      const b = await newBudget({ pgLedger: { ...pgl, release }, retryDelaysMs: [5, 5, 5] });
+      allowed(await b.reserve(req(t, 1000, 1000)));
+      const refusedId = randomUUID();
+      expect((await b.reserve({ ...req(t, 500, 1000), id: refusedId })).status).toBe('denied');
+      await waitFor(async () => (await count('budget_reservations', t)) === 1);
+      expect(failures).toBeLessThan(0);
+      expect(await count('budget_reservations', t)).toBe(1); // only the admitted request's hold
+    });
+
+    it('a row that cannot be deleted is marked refused: it counts against no cap and the sweeper never bills it', async () => {
+      const t = await newTenant();
+      const b = await newBudget({ pgLedger: { ...pgl, release: () => Promise.reject(new Error('connection reset')) }, retryDelaysMs: [1, 1, 1], reservationTtlS: 1 });
+      const live = allowed(await b.reserve(req(t, 600, 1000)));
+      const refusedId = randomUUID();
+      expect((await b.reserve({ ...req(t, 500, 1000), id: refusedId })).status).toBe('denied');
+      await waitFor(async () => (await refusedRows(t)) === 1);
+      expect(await refusedRows(t)).toBe(1);
+      expect((await pgl.snapshot(t, P)).holds.map((h) => h.id)).toEqual([live.id]); // the refused row is not a hold
+      await lapse();
+      const swept = (await chargeExpiredHolds(handle.db, 1000)).filter((c) => c.tenantId === t);
+      expect(swept.map((c) => c.id)).toEqual([live.id]); // the live one lapsed too; the refused one was not charged
+      expect(await count('spend_ledger', t)).toBe(1);
+      expect(await count('budget_reservations', t)).toBe(0);
+      expect(await pgSpent(t)).toBe(600);
+    });
+  });
+
   it('a failed Postgres hold insert refuses the request before Redis is asked, so nothing is held anywhere', async () => {
     const t = await newTenant();
     const pgLedger: PgLedger = { ...pgl, hold: () => Promise.reject(new Error('connection reset')) };

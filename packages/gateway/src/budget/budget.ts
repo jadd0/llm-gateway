@@ -236,6 +236,36 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
   const timer = setInterval(() => void refreshEpoch(), opts.epochRefreshMs);
   timer.unref();
 
+  // Drops a hold row that is not going to be used (the request was refused). If the delete fails the row is marked
+  // refused instead, so no cap counts it and the sweeper deletes it rather than charging its estimate, and the
+  // delete is retried in the background a few times. A hold that cannot be touched at all stays until the
+  // process that wrote it is gone, and is then charged like any other: Postgres is unreachable then, which also
+  // stops the sweeper.
+  let closed = false;
+  async function dropHold(id: string): Promise<void> {
+    try {
+      await pg.release(id);
+      return;
+    } catch (err) {
+      log?.warn(errInfo(err), 'budget hold could not be dropped, retrying in the background');
+    }
+    const p = (async () => {
+      for (const delay of [0, ...retryDelays]) {
+        if (delay) await sleep(delay);
+        if (closed) return;
+        await pg.markRefused(id).catch(() => {});
+        try {
+          await pg.release(id);
+          return;
+        } catch (err) {
+          log?.warn(errInfo(err), 'budget hold could not be dropped');
+        }
+      }
+    })();
+    pending.add(p);
+    void p.finally(() => pending.delete(p));
+  }
+
   async function withRetries<T>(fn: () => Promise<T>): Promise<T> {
     for (let attempt = 0; ; attempt++) {
       try {
@@ -368,7 +398,7 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
         const outcome = await redisReserve();
         if (outcome !== 'failed' && !outcome.allowed) {
           // Not needed after all. If it can't be dropped, the worker's sweeper charges it at its estimate once it lapses.
-          await pg.release(id).catch((e: unknown) => log?.warn(errInfo(e), 'budget hold could not be dropped'));
+          await dropHold(id);
           return { status: 'denied', remaining: outcome.remaining };
         }
         if (outcome !== 'failed') return hold('redis', usedEpoch, outcome.remaining);
@@ -382,12 +412,16 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
       // adopted yet) may have imported it as a hold: it is released there too, or it would sit in that balance
       // with nothing to settle it. The worker's reconcile catches what this misses.
       const cleanUp = async (): Promise<void> => {
+        const releaseAt = (e: number) => redisLedger.release(req.tenantId, period, e, id);
         const release = async () => {
           if (!redisMayHaveRun) return;
-          const latest = await pg.readEpoch().catch(() => usedEpoch);
-          for (const e of new Set([usedEpoch, epoch, latest])) await redisLedger.release(req.tenantId, period, e, id);
+          // The epochs this instance knows are released at once, while the newest is read; that one is released
+          // only if it is a different one.
+          const known = new Set([usedEpoch, epoch]);
+          const latest = pg.readEpoch().catch(() => usedEpoch);
+          await Promise.all([...[...known].map(releaseAt), latest.then((l) => (known.has(l) ? undefined : releaseAt(l)))]);
         };
-        await Promise.all([pg.release(id).catch((e: unknown) => log?.warn(errInfo(e), 'budget hold could not be dropped')), release()]);
+        await Promise.all([dropHold(id), release()]);
       };
       try {
         // Decided on Postgres. A hold written above for the Redis attempt is replaced, not counted twice.
@@ -454,6 +488,7 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
     mode: () => (onPostgres ? 'postgres' : 'redis'),
 
     async close() {
+      closed = true;
       clearInterval(timer);
       await Promise.allSettled([...pending, ...(bumping ? [bumping] : [])]);
     },
