@@ -14,8 +14,8 @@ export type Acquired =
   /**
    * This request goes upstream for everyone. `finish` must be called when its fill is written or abandoned.
    * A leader that ends with an answer of its own that is not in the cache under this key (a semantic hit) passes
-   * it as `shared`: followers in this process can read it with `shared()`. Followers in other processes only
-   * learn that the leader gave up and go upstream.
+   * a reference to it as `shared` (JSON-serialisable, small): followers read it with `shared()`, in this process
+   * from memory and in other processes from Redis, where it is written before the lock is released.
    * `closed` says the request is over (the reply finished or the client left): the lock stops being renewed,
    * and a leader that still has not finished is dropped after a few lock lifetimes.
    */
@@ -24,8 +24,8 @@ export type Acquired =
   | {
       role: 'follower';
       wait<T>(read: () => Promise<Lookup<T>>): Promise<T | undefined>;
-      /** After `wait` came back empty: what a leader of this process handed to `finish`, if anything. */
-      shared(): unknown;
+      /** After `wait` came back empty: what the leader handed to `finish`, if anything. Never throws. */
+      shared(): Promise<unknown>;
     }
   /** Redis could not say who leads: go upstream alone. */
   | { role: 'solo' };
@@ -204,10 +204,28 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
   const warn = (err: unknown, msg: string) =>
     opts.log?.warn({ errClass: (err as Error).name, code: (err as { code?: string }).code }, msg);
 
+  // How long the leader's hand-over stays readable: as long as a follower may still be waiting for it.
+  const sharedMs = Math.max(opts.waitMs, opts.lockMs);
+  const sharedKey = (key: string) => `${key}:shared`;
+
+  // What the leader of this flight handed over: in this process from memory, otherwise from Redis (the leader
+  // writes it before it releases the lock, so a follower that saw the lock go finds it). A Redis that does not
+  // answer, or a value that does not parse, is nothing shared.
+  const sharedOf = (key: string, flight: Flight) => async (): Promise<unknown> => {
+    if (flight.shared !== undefined) return flight.shared;
+    if (flight.kind !== 'remote') return undefined;
+    try {
+      const raw = await within(opts.redis.get(sharedKey(key)), opts.timeoutMs);
+      return raw ? JSON.parse(raw) : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
   return {
     async acquire(key) {
       const existing = flights.get(key);
-      if (existing) return { role: 'follower', wait: wait(key, existing), shared: () => existing.shared };
+      if (existing) return { role: 'follower', wait: wait(key, existing), shared: sharedOf(key, existing) };
 
       const flight = newFlight();
       flights.set(key, flight);
@@ -270,6 +288,8 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
           track(
             (async () => {
               try {
+                // Before the lock goes, so a follower in another process that sees the lock gone finds it.
+                if (shared !== undefined) await within(opts.redis.set(sharedKey(key), JSON.stringify(shared), 'PX', sharedMs), opts.timeoutMs);
                 await within(opts.redis.eval(UNLOCK, 1, lockKey, token), opts.timeoutMs);
                 await within(opts.redis.publish(channel, outcome), opts.timeoutMs);
               } catch (err) {
@@ -310,7 +330,7 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
         clearTimeout(giveUp);
         drop();
       });
-      return { role: 'follower', wait: wait(key, flight), shared: () => flight.shared };
+      return { role: 'follower', wait: wait(key, flight), shared: sharedOf(key, flight) };
     },
 
     async idle() {

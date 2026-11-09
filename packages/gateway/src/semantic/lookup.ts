@@ -9,6 +9,8 @@ import type { SemanticStore } from './store.ts';
 
 export interface SemanticHit {
   entry: CachedCompletion;
+  /** The response-cache key the entry is stored under. */
+  exactKey: string;
   /** Cosine similarity of the served prompt to the request's, at most 1. */
   similarity: number;
 }
@@ -103,7 +105,7 @@ export function createSemanticLookup(opts: SemanticLookupOptions): SemanticLooku
         void opts.store.remove(near.id).catch((err: unknown) => opts.log?.warn({ ...pgErrorInfo(err), op: 'remove' }, 'semantic row could not be removed'));
         return { status: 'miss' };
       }
-      return { status: 'hit', entry: { entry: found.entry, similarity: Math.min(1, near.similarity) } };
+      return { status: 'hit', entry: { entry: found.entry, exactKey: near.exactKey, similarity: Math.min(1, near.similarity) } };
     },
   };
 }

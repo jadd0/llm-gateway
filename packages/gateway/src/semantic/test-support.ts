@@ -23,10 +23,16 @@ export function stubEmbedder(table: Record<string, number[]>, name = 'voyage-4-l
   let release: (() => void) | undefined;
   let gate: Promise<void> | undefined;
   let gatePatientOnly = false;
+  const failing = new Map<string, number>();
   const embedder: Embedder = {
     async embed(text, options): Promise<Embedded | undefined> {
       calls.push({ text, patient: options?.patient === true });
       if (gate && (!gatePatientOnly || options?.patient)) await gate;
+      const left = failing.get(text) ?? 0;
+      if (left > 0) {
+        failing.set(text, left - 1);
+        return undefined;
+      }
       const vector = table[text];
       return vector ? { vector, embedder: name } : undefined;
     },
@@ -34,6 +40,10 @@ export function stubEmbedder(table: Record<string, number[]>, name = 'voyage-4-l
   return {
     embedder,
     calls,
+    /** The next `n` embeddings of this text come back empty, as an embedder that hiccuped would. */
+    failNext(text: string, n = 1) {
+      failing.set(text, n);
+    },
     /** Holds every answer (or, with `patientOnly`, only the fill's) until `release`. */
     hold(patientOnly = false) {
       gatePatientOnly = patientOnly;

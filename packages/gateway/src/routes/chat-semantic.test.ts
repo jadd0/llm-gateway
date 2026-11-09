@@ -30,6 +30,24 @@ const table: Record<string, number[]> = {};
 const stub = stubEmbedder(table);
 const tenantIds: string[] = [];
 
+// The gateway's config; a second gateway process is the same config with its own embedder.
+const appConfig = () =>
+  testConfig({
+    API_KEY_PEPPER: base.apiKeyPepper,
+    REDIS_KEY_PREFIX: prefix,
+    OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`,
+    CACHE_ENABLED: 'true',
+    SEMANTIC_ENABLED: 'true',
+    SEMANTIC_THRESHOLD: '0.95',
+    BUDGET_ENABLED: 'true',
+    BUDGET_REDIS_TIMEOUT_MS: '5000',
+    BUDGET_EPOCH_REFRESH_MS: '3600000',
+    RATE_LIMIT_REDIS_TIMEOUT_MS: '5000',
+    CACHE_REDIS_TIMEOUT_MS: '2000',
+    CACHE_REPLAY_CHUNK_CHARS: '4',
+  });
+const others: FastifyInstance[] = [];
+
 beforeAll(async () => {
   upstream = http.createServer((req, res) => {
     const chunks: Buffer[] = [];
@@ -57,28 +75,13 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
   handle = createDb({ databaseUrl: base.databaseUrl, poolSize: 8 });
   redis = new Redis(base.redisUrl!);
-  app = buildApp(
-    testConfig({
-      API_KEY_PEPPER: base.apiKeyPepper,
-      REDIS_KEY_PREFIX: prefix,
-      OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`,
-      CACHE_ENABLED: 'true',
-      SEMANTIC_ENABLED: 'true',
-      SEMANTIC_THRESHOLD: '0.95',
-      BUDGET_ENABLED: 'true',
-      BUDGET_REDIS_TIMEOUT_MS: '5000',
-      BUDGET_EPOCH_REFRESH_MS: '3600000',
-      RATE_LIMIT_REDIS_TIMEOUT_MS: '5000',
-      CACHE_REDIS_TIMEOUT_MS: '2000',
-      CACHE_REPLAY_CHUNK_CHARS: '4',
-    }),
-    { rateLimitClock: () => T0, cacheClock: () => T0, semanticEmbedder: stub.embedder },
-  );
+  app = buildApp(appConfig(), { rateLimitClock: () => T0, cacheClock: () => T0, semanticEmbedder: stub.embedder });
   await app.listen({ port: 0, host: '127.0.0.1' });
   gw = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 });
 
 afterAll(async () => {
+  for (const o of others) await o.close();
   await app.close();
   upstream.closeAllConnections();
   await new Promise((resolve) => upstream.close(resolve));
@@ -444,22 +447,72 @@ describe('semantic cache on POST /v1/chat/completions', () => {
     for (const k of await redis.keys(`${prefix}cache:${KEY_VERSION}:shared:*`)) await redis.del(k);
   });
 
-  it('followers of a leader whose semantic lookup missed do not ask again', async () => {
+  it('followers of a leader that went upstream and filled nothing ask the semantic cache themselves before going upstream', async () => {
     const t = await tenant();
-    const q = `bigout ${uniq()}`;
-    table[q] = angle(turn * 37 + 90);
+    const [a] = pair();
+    await seed(t, req(a));
+    // Same context, close in meaning to `a`; its answer is too big to cache, so its leader fills nothing and shares nothing.
+    const b = `what is the capital city of ${a.match(/capital of (\w+)\?/)![1]} bigout`;
+    table[b] = angle(turn * 37 + (Math.acos(0.98) * 180) / Math.PI);
+    // The leader's own lookup comes back empty (an embedder that hiccuped), so it goes upstream; the followers' work.
+    stub.failNext(b, 1);
     stub.hold();
     const before = calls;
-    const leader = post(t.key, req(q));
+    const leader = post(t.key, req(b));
     await new Promise((r) => setTimeout(r, 150));
-    const followers = [post(t.key, req(q)), post(t.key, req(q)), post(t.key, req(q))];
+    const followers = [post(t.key, req(b)), post(t.key, req(b))];
     await new Promise((r) => setTimeout(r, 150));
     stub.release();
     const results = await Promise.all([leader, ...followers]);
-    expect(results.map((r) => r.status)).toEqual([200, 200, 200, 200]);
-    // Nothing could be stored, so every request went upstream; but only the leader looked for a similar prompt.
-    expect(results.map((r) => r.headers.get('x-gateway-cache'))).toEqual(['miss', 'miss', 'miss', 'miss']);
-    expect(calls - before).toBe(4);
-    expect(stub.calls.filter((c) => c.text === q && !c.patient)).toHaveLength(1);
+    expect(results.map((r) => r.status)).toEqual([200, 200, 200]);
+    expect(results.map((r) => r.headers.get('x-gateway-cache'))).toEqual(['miss', 'semantic-hit', 'semantic-hit']);
+    expect(calls - before).toBe(1);
+    expect(stub.calls.filter((c) => c.text === b && !c.patient)).toHaveLength(3);
+  });
+
+  it('a leader served by a similar prompt serves the followers in another process too, with no upstream call', async () => {
+    const t = await tenant();
+    const [a, b] = pair();
+    await seed(t, req(a));
+    const stub2 = stubEmbedder(table);
+    const app2 = buildApp(appConfig(), { rateLimitClock: () => T0, cacheClock: () => T0, semanticEmbedder: stub2.embedder });
+    others.push(app2);
+    await app2.listen({ port: 0, host: '127.0.0.1' });
+    const gw2 = `http://127.0.0.1:${(app2.server.address() as AddressInfo).port}`;
+    const post2 = (body: object) =>
+      fetch(`${gw2}/v1/chat/completions`, { method: 'POST', headers: { 'content-type': 'application/json', authorization: `Bearer ${t.key}` }, body: JSON.stringify(body) });
+    stub.hold();
+    const before = calls;
+    const leader = post(t.key, req(b));
+    await new Promise((r) => setTimeout(r, 150));
+    // The same request in the other process: it can only wait for the leader there.
+    const followers = [post2(req(b)), post2(req(b))];
+    await new Promise((r) => setTimeout(r, 150));
+    stub.release();
+    const results = await Promise.all([leader, ...followers]);
+    expect(results.map((r) => r.headers.get('x-gateway-cache'))).toEqual(['semantic-hit', 'semantic-hit', 'semantic-hit']);
+    expect(calls - before).toBe(0);
+    // They were handed the leader's answer: neither asked an embedder.
+    expect(stub2.calls.filter((c) => c.text === b)).toHaveLength(0);
+    const sims = results.map((r) => r.headers.get('x-gateway-similarity'));
+    expect(new Set(sims).size).toBe(1);
+  });
+
+  it('a client that leaves during the semantic lookup lets the lock go at once', async () => {
+    const t = await tenant();
+    const q = `leaving ${uniq()}`;
+    table[q] = angle(turn * 37 + 120);
+    const locks = async () => (await redis.keys(`${prefix}*:lock`)).length;
+    expect(await locks()).toBe(0);
+    stub.hold();
+    const quitter = new AbortController();
+    const sent = fetch(`${gw}/v1/chat/completions`, { method: 'POST', signal: quitter.signal, headers: { 'content-type': 'application/json', authorization: `Bearer ${t.key}` }, body: JSON.stringify(req(q)) }).catch(() => undefined);
+    // The leader holds the lock while its embedding is awaited.
+    expect(await until(async () => (await locks()) === 1)).toBe(true);
+    quitter.abort();
+    await sent;
+    // Released with the lookup still pending, long before the lock would lapse (5 s) or the backstop would drop it.
+    expect(await until(async () => (await locks()) === 0, 1500)).toBe(true);
+    stub.release();
   });
 });
