@@ -125,7 +125,7 @@ the gateway won't start), so a gateway that crashes mid-request can't hold money
 Pending quiet run. See [../../BENCHMARKS.md](../../BENCHMARKS.md); no figure is quoted here until
 `bench/results/pr-5/` is committed (R3).
 
-## Likely interview questions
+## Questions you should be able to answer
 
 **Why reserve the worst case?** The output length isn't known until the call ends and a slow call can last minutes.
 Holding `max_tokens` worth of money means concurrent requests can't jointly outspend the cap, whatever they end up using.
