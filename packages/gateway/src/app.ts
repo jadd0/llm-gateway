@@ -3,6 +3,7 @@ import { auth } from './auth/plugin.ts';
 import { keyStoreFromConfig } from './auth/key-store.ts';
 import type { Config } from './config.ts';
 import { createDb } from './db/client.ts';
+import { budgetGuard } from './budget/plugin.ts';
 import { errorBody } from './errors.ts';
 import { createLimiter } from './ratelimit/limiter.ts';
 import { rateLimit } from './ratelimit/plugin.ts';
@@ -16,6 +17,8 @@ export function buildApp(
     logStream?: NodeJS.WritableStream;
     /** Pins the rate limiter's clock (ms). Tests only: production reads Redis TIME. */
     rateLimitClock?: () => number;
+    /** Pins the budget's clock (ms): the month it charges and the Redis scripts' expiry clock. Tests only. */
+    budgetClock?: () => number;
   } = {},
 ): FastifyInstance {
   const app = Fastify({
@@ -29,9 +32,12 @@ export function buildApp(
   const handle = createDb({ databaseUrl: config.databaseUrl, poolSize: config.dbPoolSize });
   // One client serves the key cache and the rate limiter. Its command timeout covers the limiter's
   // own timeout, so the limiter decides when to give up, not the socket.
-  const useRedis = config.redisUrl !== undefined && (config.authCache === 'redis' || config.rateLimitEnabled);
+  const useRedis =
+    config.redisUrl !== undefined && (config.authCache === 'redis' || config.rateLimitEnabled || config.budgetEnabled);
   const redis = useRedis
-    ? createRedis(config.redisUrl!, { commandTimeoutMs: Math.max(500, config.rateLimitRedisTimeoutMs) })
+    ? createRedis(config.redisUrl!, {
+        commandTimeoutMs: Math.max(500, config.rateLimitRedisTimeoutMs, config.budgetRedisTimeoutMs),
+      })
     : null;
   const keyStore = keyStoreFromConfig(config, handle.db, config.authCache === 'redis' ? redis : null, app.log);
   app.addHook('onClose', async () => {
@@ -72,6 +78,22 @@ export function buildApp(
       limiter,
       defaultRpm: config.rateLimitDefaultRpm,
       defaultTpm: config.rateLimitDefaultTpm,
+      defaultMaxTokens: config.rateLimitDefaultMaxTokens,
+    });
+  }
+  // After the rate limiter: a request over its limits is refused before any money is held for it.
+  if (config.budgetEnabled && redis !== null) {
+    app.register(budgetGuard, {
+      budget: {
+        db: handle.db,
+        redis,
+        keyPrefix: config.redisKeyPrefix,
+        reservationTtlS: config.budgetReservationTtlS,
+        redisTimeoutMs: config.budgetRedisTimeoutMs,
+        epochRefreshS: config.budgetEpochRefreshS,
+        ...(extra.budgetClock ? { clock: extra.budgetClock } : {}),
+      },
+      defaultCapMicros: config.budgetDefaultMonthlyMicros,
       defaultMaxTokens: config.rateLimitDefaultMaxTokens,
     });
   }

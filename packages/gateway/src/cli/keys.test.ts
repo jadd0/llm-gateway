@@ -8,7 +8,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { keyStoreFromConfig } from '../auth/key-store.ts';
 import { hashKey } from '../auth/keys.ts';
 import { createDb, type Db } from '../db/client.ts';
-import { apiKeys, tenants } from '../db/schema.ts';
+import { periodOf } from '../budget/period.ts';
+import { apiKeys, tenants, tenantSpend } from '../db/schema.ts';
 import { cleanup, testConfig } from '../test-env.ts';
 
 const run = promisify(execFile);
@@ -207,5 +208,48 @@ describe('keys CLI', { timeout: 30_000 }, () => {
 
     // Only a prefix matching nothing is an error.
     await expect(cli('revoke-key', 'gw_nomatch0000')).rejects.toThrow(/no key with prefix/);
+  });
+
+  it('set-budget then show-spend', async () => {
+    const tenant = await newTenant();
+    const key = (await cli('create-key', tenant)).stdout.trim();
+    const hash = hashKey(config.apiKeyPepper, key);
+    const store = keyStoreFromConfig(config, handle.db, redis);
+    expect((await store.lookup(hash))!.monthlyBudgetMicros).toBeNull(); // cached with no cap of its own
+
+    const set = await cli('set-budget', tenant, '--monthly-usd', '0.01');
+    expect(set.stdout).toContain('monthly budget $0.010000');
+    const [row] = await handle.db.select().from(tenants).where(eq(tenants.name, tenant));
+    expect(row!.monthlyBudgetMicros).toBe(10_000);
+    expect((await store.lookup(hash))!.monthlyBudgetMicros).toBe(10_000); // the cached entry was overwritten
+
+    const period = periodOf(Date.now());
+    expect((await cli('show-spend', tenant)).stdout).toContain(`${tenant} ${period}: spent $0.000000 (cap $0.010000)`);
+    await handle.db.insert(tenantSpend).values({ tenantId: row!.id, period, spentMicros: 1_234_567 });
+    await handle.db.insert(tenantSpend).values({ tenantId: row!.id, period: '2020-01', spentMicros: 5 });
+    expect((await cli('show-spend', tenant)).stdout).toContain('spent $1.234567');
+    expect((await cli('show-spend', tenant, '--period', '2020-01')).stdout).toContain('2020-01: spent $0.000005');
+
+    await cli('set-budget', tenant, '--monthly-usd', 'default');
+    expect((await handle.db.select().from(tenants).where(eq(tenants.name, tenant)))[0]!.monthlyBudgetMicros).toBeNull();
+    expect((await cli('show-spend', tenant)).stdout).toContain('(default cap)');
+  });
+
+  it('a budget that is not a plain USD amount is refused, as is an unknown tenant or period', async () => {
+    const tenant = await newTenant();
+    for (const bad of ['0.0000001', '1e3', '-5', '', 'ten', '1,5']) {
+      await expect(cli('set-budget', tenant, `--monthly-usd=${bad}`)).rejects.toMatchObject({
+        stderr: expect.stringContaining('--monthly-usd must be a USD amount'),
+      });
+    }
+    await expect(cli('set-budget', tenant)).rejects.toMatchObject({ stderr: expect.stringContaining('usage:') });
+    await expect(cli('set-budget', 'no-such-tenant', '--monthly-usd', '1')).rejects.toMatchObject({
+      stderr: expect.stringContaining('no tenant named'),
+    });
+    await expect(cli('show-spend', tenant, '--period', '2026-13')).rejects.toMatchObject({
+      stderr: expect.stringContaining('--period must look like'),
+    });
+    const [row] = await handle.db.select().from(tenants).where(eq(tenants.name, tenant));
+    expect(row!.monthlyBudgetMicros).toBeNull(); // nothing was written by the refused calls
   });
 });

@@ -1,9 +1,9 @@
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { errorBody } from '../errors.ts';
 import { chatRequest, type ChatBody } from '../request-body.ts';
-import type { RateLimitCharge } from '../ratelimit/plugin.ts';
+import { usageSettler, type UsageSettler } from '../usage/settle.ts';
 import { SseUsageTap, usageFromBody } from '../usage/sse-usage.ts';
 import type { Upstream } from '../upstream.ts';
 
@@ -29,10 +29,10 @@ function passthroughHeaders(upstream: Record<string, string | string[] | undefin
   return out;
 }
 
-function upstreamFailure(reply: FastifyReply, err: unknown, charge: RateLimitCharge | null): FastifyReply {
-  // `charge` is passed only when the provider did no work (no 2xx was received): then the whole estimate
-  // goes back. A 2xx whose body broke passes null, because the provider did generate it.
-  void charge?.settle(0);
+function upstreamFailure(reply: FastifyReply, err: unknown, refund: UsageSettler | null): FastifyReply {
+  // `refund` is passed only when the provider did no work (no 2xx was received): then everything held up
+  // front goes back. A 2xx whose body broke passes null, because the provider did generate it.
+  refund?.refund();
   const code = (err as { code?: string }).code ?? '';
   // Log the error class and code only; messages can carry request data.
   reply.log.warn({ errClass: (err as Error).name, code }, 'upstream request failed');
@@ -46,15 +46,15 @@ type Tap = 'none' | 'read' | 'strip';
 
 // What goes upstream for a request, and how the answer's usage is read. A streamed answer only carries
 // token counts if the provider is asked (stream_options.include_usage), and the counts correct the
-// up-front charge. The body is changed as little as possible:
+// up-front charges. The body is changed as little as possible:
 //   - the client already asked: forwarded untouched, usage read;
 //   - no stream_options: the option is spliced in after the opening brace, so nothing else in the bytes
 //     moves (no JSON round trip, big integers keep their precision); the usage-only chunk the client
 //     did not ask for is stripped from what it receives;
 //   - stream_options with include_usage not true: rewritten through JSON, usage chunk stripped;
 //   - stream_options of any other shape: forwarded untouched and not reconciled (the estimate stays).
-function forwardBody(parsed: ChatBody, raw: Buffer, limited: boolean): { body: Buffer; tap: Tap } {
-  if (!limited || parsed.stream !== true) return { body: raw, tap: 'none' };
+function forwardBody(parsed: ChatBody, raw: Buffer, metered: boolean): { body: Buffer; tap: Tap } {
+  if (!metered || parsed.stream !== true) return { body: raw, tap: 'none' };
   if (!('stream_options' in parsed)) {
     const open = raw.indexOf(0x7b);
     if (open < 0) return { body: raw, tap: 'none' };
@@ -78,7 +78,18 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
     done(null, body),
   );
 
-  app.post('/v1/chat/completions', { config: { rateLimited: true } }, async (request, reply) => {
+  app.post('/v1/chat/completions', { config: { rateLimited: true, budgeted: true } }, async (request, reply) => {
+    // Every way out of the handler ends the request's up-front charges. keep() is last and counts only
+    // if nothing above it (used, refund) already did: it is the case of no usage seen.
+    const settle = usageSettler(request);
+    try {
+      return await handleChat(request, reply, settle);
+    } finally {
+      settle.keep();
+    }
+  });
+
+  async function handleChat(request: FastifyRequest, reply: FastifyReply, settle: UsageSettler) {
     const started = performance.now();
 
     const checked = chatRequest(request);
@@ -92,10 +103,10 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
         );
     }
     const parsed = checked.value;
-    // Undefined when the rate limiter is not registered at all.
-    const charge = request.rateLimit ?? null;
+    // Usage is needed only when something was charged up front (either plugin may be off).
+    const metered = (request.rateLimit ?? null) !== null || (request.budget ?? null) !== null;
     const rawBody = request.body as Buffer;
-    const forward = forwardBody(parsed, rawBody, charge !== null);
+    const forward = forwardBody(parsed, rawBody, metered);
     const upstreamBody = forward.body;
 
     const abort = new AbortController();
@@ -126,13 +137,13 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
       });
     } catch (err) {
       if (abort.signal.aborted) return reply; // client already gone
-      return upstreamFailure(reply, err, charge);
+      return upstreamFailure(reply, err, settle);
     }
 
     // The provider refused or failed before any answer reached the client: nothing was used.
-    if (res.statusCode >= 300) void charge?.settle(0);
+    if (res.statusCode >= 300) settle.refund();
 
-    const extraHeaders = passthroughHeaders(res.headers, charge !== null);
+    const extraHeaders = passthroughHeaders(res.headers, request.rateLimit != null);
     const contentType = res.headers['content-type'];
     const type = Array.isArray(contentType) ? contentType[0] : contentType;
 
@@ -157,11 +168,11 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
       });
       reply.raw.flushHeaders();
       try {
-        if (charge !== null && res.statusCode < 300 && forward.tap !== 'none') {
+        if (metered && res.statusCode < 300 && forward.tap !== 'none') {
           // Once bytes are flowing a failure keeps the estimate charged: tokens were partly used.
           const tap = new SseUsageTap(
             (usage) => {
-              if (usage) void charge.settle(usage.totalTokens);
+              if (usage) settle.used(usage);
             },
             { stripUsageChunk: forward.tap === 'strip' },
           );
@@ -191,9 +202,9 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
       return upstreamFailure(reply, err, null);
     }
     const received = performance.now();
-    if (charge !== null && res.statusCode < 300) {
+    if (metered && res.statusCode < 300) {
       const usage = usageFromBody(payload);
-      if (usage) void charge.settle(usage.totalTokens);
+      if (usage) settle.used(usage);
     }
     const upstreamMs = received - dispatched;
     const preDispatchMs = dispatched - started;
@@ -210,5 +221,5 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
         `gw-pre;dur=${ms(preDispatchMs)}, gw-post;dur=${ms(postReceiptMs)}, upstream;dur=${ms(upstreamMs)}`,
       )
       .send(payload);
-  });
+  }
 };

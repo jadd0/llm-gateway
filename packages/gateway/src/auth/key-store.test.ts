@@ -1,5 +1,6 @@
 import { eq } from 'drizzle-orm';
-import { apiKeys } from '../db/schema.ts';
+import { apiKeys, tenants } from '../db/schema.ts';
+import { hashKey } from './keys.ts';
 import type { Redis } from 'ioredis';
 import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -21,12 +22,16 @@ let gate: { held: boolean; open: () => void; wait: Promise<void> } | null = null
 const storeFor = (r: Redis | null, log?: KeyStoreOptions['log']) =>
   keyStoreFromConfig(config, handle.db, r, log);
 
-const caller = (s: { tenantId: string; tenant: string; keyId: string }, limits: { rpm?: number; tpm?: number } = {}) => ({
+const caller = (
+  s: { tenantId: string; tenant: string; keyId: string },
+  limits: { rpm?: number; tpm?: number; budget?: number } = {},
+) => ({
   tenantId: s.tenantId,
   tenantName: s.tenant,
   keyId: s.keyId,
   rpmLimit: limits.rpm ?? null,
   tpmLimit: limits.tpm ?? null,
+  monthlyBudgetMicros: limits.budget ?? null,
 });
 
 const seed = async () => {
@@ -221,6 +226,43 @@ describe('key store', () => {
     expect(await redis.get(key)).toContain(s.tenantId);
   });
 
+  it('a cached entry from before budgets existed is a miss, so the real cap is read', async () => {
+    const s = await seed();
+    const key = `${config.redisKeyPrefix}apikey:${s.hash}`;
+    await redis.set(
+      key,
+      JSON.stringify({ tenantId: s.tenantId, tenantName: s.tenant, keyId: s.keyId, rpmLimit: null, tpmLimit: null }),
+      'EX',
+      60,
+    );
+    await handle.db.update(tenants).set({ monthlyBudgetMicros: 12_345 }).where(eq(tenants.id, s.tenantId));
+    queries = 0;
+    expect(await storeFor(redis).lookup(s.hash)).toEqual(caller(s, { budget: 12_345 }));
+    expect(queries).toBe(1);
+    expect(await redis.get(key)).toContain('"monthlyBudgetMicros":12345');
+  });
+
+  it("setBudget overwrites the cached entry of every active key of the tenant and not a revoked one's", async () => {
+    const a = await seed();
+    const { createKey } = await import('../cli/keys.ts');
+    const b = await createKey(handle.db, config.apiKeyPepper, a.tenant);
+    const c = await createKey(handle.db, config.apiKeyPepper, a.tenant);
+    const hashB = hashKey(config.apiKeyPepper, b.key);
+    const hashC = hashKey(config.apiKeyPepper, c.key);
+    const store = storeFor(redis);
+    for (const h of [a.hash, hashB, hashC]) expect((await store.lookup(h))!.monthlyBudgetMicros).toBeNull();
+    await store.revoke(hashC);
+    expect(await store.setBudget(a.tenantId, 5_000_000)).toEqual({ updated: true, cached: true });
+    queries = 0;
+    expect((await store.lookup(a.hash))!.monthlyBudgetMicros).toBe(5_000_000);
+    expect((await store.lookup(hashB))!.monthlyBudgetMicros).toBe(5_000_000);
+    expect(queries).toBe(0); // both served from the overwritten entries
+    expect(await store.lookup(hashC)).toBeNull(); // the tombstone survived
+    expect(await store.setBudget(a.tenantId, null)).toEqual({ updated: true, cached: true });
+    expect((await store.lookup(a.hash))!.monthlyBudgetMicros).toBeNull();
+    expect(await store.setBudget('00000000-0000-4000-8000-000000000000', 1)).toEqual({ updated: false, cached: false });
+  });
+
   it('a tombstone written after a corrupt value was read survives the fill', async () => {
     const s = await seed();
     const key = `${config.redisKeyPrefix}apikey:${s.hash}`;
@@ -245,7 +287,7 @@ describe('key store', () => {
   it('one warn per outage start: a failed write, then cache hits, then a read outage', async () => {
     const warns: Array<{ op: string }> = [];
     const infos: object[] = [];
-    const tenant = JSON.stringify({ tenantId: 't', tenantName: 'n', keyId: 'k', rpmLimit: null, tpmLimit: 7 });
+    const tenant = JSON.stringify({ tenantId: 't', tenantName: 'n', keyId: 'k', rpmLimit: null, tpmLimit: 7, monthlyBudgetMicros: null });
     let mode: 'miss' | 'hit' | 'down' = 'miss';
     const flaky = {
       status: 'ready',
@@ -261,7 +303,7 @@ describe('key store', () => {
     const hash = randomBytes(32).toString('hex');
     await store.lookup(hash); // miss: Postgres, then the fill fails
     mode = 'hit';
-    for (let i = 0; i < 5; i++) expect(await store.lookup(hash)).toEqual({ tenantId: 't', tenantName: 'n', keyId: 'k', rpmLimit: null, tpmLimit: 7 });
+    for (let i = 0; i < 5; i++) expect(await store.lookup(hash)).toEqual({ tenantId: 't', tenantName: 'n', keyId: 'k', rpmLimit: null, tpmLimit: 7, monthlyBudgetMicros: null });
     expect(warns.map((w) => w.op)).toEqual(['set']);
     mode = 'down';
     await store.lookup(hash);

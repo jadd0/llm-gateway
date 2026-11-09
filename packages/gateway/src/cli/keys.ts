@@ -1,13 +1,17 @@
 import { parseArgs } from 'node:util';
-import { asc, eq, sql } from 'drizzle-orm';
+import { and, asc, eq, sql } from 'drizzle-orm';
 import { loadCacheConfig, loadConfig, loadDbConfig, loadPepperConfig } from '../config.ts';
 import { createDb, type Db } from '../db/client.ts';
-import { apiKeys, tenants } from '../db/schema.ts';
+import { apiKeys, tenants, tenantSpend } from '../db/schema.ts';
+import { isPeriod, periodOf } from '../budget/period.ts';
+import { formatUsd, parseUsd } from '../pricing/prices.ts';
 import { generateKey, hashKey, keyPrefix, KEY_PREFIX_LENGTH } from '../auth/keys.ts';
 import { keyStoreFromConfig, type KeyStore } from '../auth/key-store.ts';
 import { createRedis } from '../redis.ts';
 
 export class CliError extends Error {}
+
+const DOLLAR = '$';
 
 const MIN_REVOKE_PREFIX = 6;
 
@@ -115,17 +119,54 @@ export async function setLimits(
   return { prefix: target.prefix, rpm: result.rpm, tpm: result.tpm, cached: result.cached };
 }
 
+// A budget is a USD amount ("10", "0.25") or "default" to fall back to the gateway-wide cap. Anything
+// else is refused rather than rounded, so "1e3" or "0.0000001" is never stored as something plausible.
+export function parseBudget(raw: string): number | null {
+  if (raw === 'default') return null;
+  const micros = parseUsd(raw);
+  if (micros === undefined) {
+    throw new CliError('--monthly-usd must be a USD amount like 10 or 0.25 (up to 6 decimals), or "default"');
+  }
+  return micros;
+}
+
+// Sets a tenant's monthly spend cap in micro-USD.
+export async function setBudget(db: Db['db'], keyStore: KeyStore, tenantName: string, micros: number | null) {
+  const [tenant] = await db.select({ id: tenants.id }).from(tenants).where(eq(tenants.name, tenantName));
+  if (!tenant) throw new CliError(`no tenant named "${tenantName}"`);
+  const r = await keyStore.setBudget(tenant.id, micros);
+  return { tenant: tenantName, micros, cached: r.cached };
+}
+
+// What a tenant has spent in a UTC month (default: this one), from the settled-spend record.
+export async function showSpend(db: Db['db'], tenantName: string, period = periodOf(Date.now())) {
+  if (!isPeriod(period)) throw new CliError('--period must look like 2026-11');
+  const [tenant] = await db
+    .select({ id: tenants.id, cap: tenants.monthlyBudgetMicros })
+    .from(tenants)
+    .where(eq(tenants.name, tenantName));
+  if (!tenant) throw new CliError(`no tenant named "${tenantName}"`);
+  const [row] = await db
+    .select({ spent: tenantSpend.spentMicros })
+    .from(tenantSpend)
+    .where(and(eq(tenantSpend.tenantId, tenant.id), eq(tenantSpend.period, period)));
+  return { tenant: tenantName, period, spentMicros: row?.spent ?? 0, capMicros: tenant.cap };
+}
+
 const USAGE = `usage:
   keys create-tenant <name>
   keys create-key <tenant> [label] [--rpm <n>] [--tpm <n>]
                                        prints the key once; it cannot be shown again
   keys set-limits <prefix> [--rpm <n|default>] [--tpm <n|default>]
+  keys set-budget <tenant> --monthly-usd <amount|default>
+  keys show-spend <tenant> [--period YYYY-MM]
   keys revoke-key <prefix>
   keys list-keys [tenant]`;
 
 function parseFlags(args: string[]) {
   try {
-    return parseArgs({ args, allowPositionals: true, options: { rpm: { type: 'string' }, tpm: { type: 'string' } } });
+    return parseArgs({ args, allowPositionals: true, options: { rpm: { type: 'string' }, tpm: { type: 'string' }, 'monthly-usd': { type: 'string' }, period: { type: 'string' } },
+    });
   } catch {
     throw new CliError(USAGE);
   }
@@ -205,6 +246,36 @@ async function main(argv: string[]) {
       } finally {
         redis?.disconnect();
       }
+      return;
+    }
+    case 'set-budget': {
+      const { values, positionals } = parseFlags(args);
+      if (!positionals[0] || values['monthly-usd'] === undefined) throw new CliError(USAGE);
+      const tenant = positionals[0];
+      const micros = parseBudget(values['monthly-usd']);
+      const config = loadCacheConfig();
+      const redis = config.authCache === 'redis' && config.redisUrl ? createRedis(config.redisUrl) : null;
+      try {
+        const r = await withDb(config.databaseUrl, (db) => setBudget(db, keyStoreFromConfig(config, db, redis), tenant, micros));
+        console.log(`${r.tenant}: monthly budget ${r.micros === null ? 'default' : DOLLAR + formatUsd(r.micros)}`);
+        if (config.authCache === 'redis' && (config.redisUrl === undefined || (redis !== null && !r.cached))) {
+          // The database has the new cap; a cached copy of a key keeps the old one until it expires.
+          throw new CliError(
+            `warning: the key cache was not refreshed, so the old cap can stay in effect for up to ${config.authCacheTtlS}s (AUTH_CACHE_TTL_S); set REDIS_URL / bring Redis up and run this command again`,
+          );
+        }
+      } finally {
+        redis?.disconnect();
+      }
+      return;
+    }
+    case 'show-spend': {
+      const { values, positionals } = parseFlags(args);
+      if (!positionals[0]) throw new CliError(USAGE);
+      const tenant = positionals[0];
+      const r = await withDb(loadDbConfig().databaseUrl, (db) => showSpend(db, tenant, values.period));
+      const cap = r.capMicros === null ? 'default cap' : 'cap ' + DOLLAR + formatUsd(r.capMicros);
+      console.log(`${r.tenant} ${r.period}: spent ${DOLLAR}${formatUsd(r.spentMicros)} (${cap})`);
       return;
     }
     case 'revoke-key': {
