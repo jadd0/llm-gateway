@@ -58,7 +58,7 @@ of every Redis balance key. Declaring an outage bumps it with a compare-and-set 
 began, so of three gateways that see the same outage one bumps and the other two adopt the new number. After recovery
 the new epoch's key doesn't exist and the next reserve rebuilds it from Postgres in one snapshot: `spent` and the charge
 count from `tenant_spend`, plus every live hold, so the rebuilt balance equals the record and still counts in-flight
-requests. A reservation also lapses on its own (`BUDGET_RESERVATION_TTL_S`, which must exceed `UPSTREAM_TIMEOUT_MS` or
+requests. A reservation also lapses on its own (`BUDGET_RESERVATION_TTL_S`, which must exceed `UPSTREAM_MAX_DURATION_MS` plus 30 s or
 the gateway won't start), so a gateway that crashes mid-request can't hold money forever.
 
 ## Other behaviour worth knowing
