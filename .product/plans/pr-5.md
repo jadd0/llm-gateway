@@ -140,8 +140,11 @@ create table budget_epoch (id int primary key check (id = 1), epoch bigint not n
   Postgres for that request alone (reserve); the instance stays on the Redis path.
 - **A lost balance moves the epoch.** An instance that has to rebuild a balance it had used successfully at the
   same epoch (Redis restarted empty) bumps the epoch with the same compare-and-set, at most once per observed
-  epoch, so every instance rebuilds from Postgres together; a new tenant or month does not bump. Failed bumps back
-  off exponentially (cap 2 s).
+  epoch, so every instance rebuilds from Postgres together; a new tenant or month does not bump. A balance counts
+  as used only when a reserve or a settle applied to it (a settle that finds none does not). All bumps (outage or
+  lost balances) share one single-flight attempt per instance; failed ones back off exponentially (cap 2 s).
+  The epoch row is created once at start; the refresh is a plain select. A failed epoch read after a settle
+  commits is not a failed settle (the instance's own epoch is used).
 - **Nothing is left behind by a refusal.** After a Redis reserve that may have run (no answer came back), any
   outcome other than an admission releases the id on the Redis key (best effort, idempotent) and deletes the
   Postgres row; so does a request that ends `unavailable` after its row was written. A settle reads the epoch

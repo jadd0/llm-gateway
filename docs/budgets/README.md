@@ -86,7 +86,10 @@ the gateway won't start), so a gateway that crashes mid-request can't hold money
   reads the epoch after its transaction commits, so it releases on the balance that a rebuild after the commit would
   have been built at. A rebuild creates the balance only from the Postgres snapshot, so ids without a Postgres row
   cannot survive an epoch change.
-- **Failed epoch bumps back off** (exponentially, at most 2 s) instead of an UPDATE per request.
+- **Epoch bumps are single-flight and back off** (exponentially, at most 2 s): an outage and any number of lost balances
+  share one attempt per instance, so a flush that empties many tenants' balances costs one bump. A settle only counts a
+  balance as "seen" when it applied to one that exists. The 250 ms refresh is a plain `select` (the epoch row is created
+  once when a budget starts), and a failed epoch read right after a settle commits does not fail the settle.
 - **A balance Redis lost** (a restart) is noticed when an instance has to rebuild a balance it had been using; it moves
   the epoch with the same compare-and-set, so all instances rebuild together. A new tenant or month, which also needs a
   rebuild, does not.
