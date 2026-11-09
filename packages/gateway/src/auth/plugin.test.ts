@@ -7,7 +7,7 @@ import { createMockServer, type Settings } from '../../../mock-provider/src/serv
 import { buildApp } from '../app.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
-import { createKeyStore } from './key-store.ts';
+import { keyStoreFromConfig } from './key-store.ts';
 import { generateKey, hashKey } from './keys.ts';
 
 const settings: Settings = { latencyMs: 0, tokenDelayMs: 0, completionTokens: 5, errorRate: 0, outage: 'off' };
@@ -65,14 +65,7 @@ describe('auth hook', () => {
     tenantIds.push(valid.tenantId);
     const revoked = await seedKey(handle.db, config);
     tenantIds.push(revoked.tenantId);
-    const store = createKeyStore({
-      db: handle.db,
-      redis,
-      keyPrefix: config.redisKeyPrefix,
-      cacheTtlS: config.authCacheTtlS,
-      negativeTtlS: config.authNegativeTtlS,
-      tombstoneTtlS: config.authTombstoneTtlS,
-    });
+    const store = keyStoreFromConfig(config, handle.db, redis);
     await store.revoke(revoked.hash);
 
     // Control: the valid key is accepted, so the 401s below are not a broken fixture.

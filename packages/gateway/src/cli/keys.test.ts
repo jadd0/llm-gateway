@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
 import { Redis } from 'ioredis';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { createKeyStore } from '../auth/key-store.ts';
+import { keyStoreFromConfig } from '../auth/key-store.ts';
 import { hashKey } from '../auth/keys.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { apiKeys, tenants } from '../db/schema.ts';
@@ -78,14 +78,7 @@ describe('keys CLI', () => {
     const a = (await cli('create-key', tenant)).stdout.trim();
     const b = (await cli('create-key', tenant)).stdout.trim();
     expect(a.slice(0, 12)).not.toBe(b.slice(0, 12));
-    const store = createKeyStore({
-      db: handle.db,
-      redis,
-      keyPrefix: config.redisKeyPrefix,
-      cacheTtlS: config.authCacheTtlS,
-      negativeTtlS: config.authNegativeTtlS,
-      tombstoneTtlS: config.authTombstoneTtlS,
-    });
+    const store = keyStoreFromConfig(config, handle.db, redis);
     const hashA = hashKey(config.apiKeyPepper, a);
     const hashB = hashKey(config.apiKeyPepper, b);
     // Both are valid and cached before the revoke.

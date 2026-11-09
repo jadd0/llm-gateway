@@ -1,6 +1,6 @@
 import Fastify, { LogController, type FastifyError, type FastifyInstance } from 'fastify';
 import { auth } from './auth/plugin.ts';
-import { createKeyStore } from './auth/key-store.ts';
+import { keyStoreFromConfig } from './auth/key-store.ts';
 import type { Config } from './config.ts';
 import { createDb } from './db/client.ts';
 import { errorBody } from './errors.ts';
@@ -22,19 +22,11 @@ export function buildApp(
   // The app owns its Postgres pool and Redis client and closes them with itself.
   const handle = createDb({ databaseUrl: config.databaseUrl, poolSize: config.dbPoolSize });
   const redis = config.authCache === 'redis' && config.redisUrl ? createRedis(config.redisUrl) : null;
-  const keyStore = createKeyStore({
-    db: handle.db,
-    redis,
-    keyPrefix: config.redisKeyPrefix,
-    cacheTtlS: config.authCacheTtlS,
-    negativeTtlS: config.authNegativeTtlS,
-    tombstoneTtlS: config.authTombstoneTtlS,
-    log: app.log,
-  });
+  const keyStore = keyStoreFromConfig(config, handle.db, redis, app.log);
   app.addHook('onClose', async () => {
-    await upstream.close();
-    await handle.close();
+    // Close everything even if one close fails.
     redis?.disconnect();
+    await Promise.allSettled([upstream.close(), handle.close()]);
   });
   // Fastify's own request errors (unsupported content-type, oversized body) and unknown routes
   // use the OpenAI error shape too.

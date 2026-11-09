@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDb, type Db } from '../db/client.ts';
 import { createRedis } from '../redis.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
-import { createKeyStore } from './key-store.ts';
+import { keyStoreFromConfig } from './key-store.ts';
 import type { Config } from '../config.ts';
 
 const config: Config = testConfig();
@@ -17,15 +17,7 @@ let queries = 0;
 let gate: { held: boolean; open: () => void; wait: Promise<void> } | null = null;
 
 const storeFor = (r: Redis | null, log?: { warn: () => void; info: () => void }) =>
-  createKeyStore({
-    db: handle.db,
-    redis: r,
-    keyPrefix: config.redisKeyPrefix,
-    cacheTtlS: config.authCacheTtlS,
-    negativeTtlS: config.authNegativeTtlS,
-    tombstoneTtlS: config.authTombstoneTtlS,
-    ...(log ? { log } : {}),
-  });
+  keyStoreFromConfig(config, handle.db, r, log);
 
 const seed = async () => {
   const s = await seedKey(handle.db, config);
@@ -115,7 +107,7 @@ describe('key store', () => {
     const live = await seed();
     const dead = await seed();
     const warns: object[] = [];
-    const deadRedis = createRedis('redis://127.0.0.1:1');
+    const deadRedis = createRedis('redis://127.0.0.1:1', { startupGraceMs: 0 });
     try {
       const store = storeFor(deadRedis, { warn: () => warns.push({}), info: () => {} });
       expect(await store.lookup(live.hash)).toEqual({ tenantId: live.tenantId, tenantName: live.tenant });
@@ -137,5 +129,59 @@ describe('key store', () => {
     await store.lookup(s.hash);
     await store.lookup(s.hash);
     expect(queries).toBe(2);
+  });
+
+  it('revoke right after the Redis client is created still tombstones', async () => {
+    const s = await seed();
+    const fresh = createRedis(config.redisUrl!);
+    try {
+      expect(fresh.status).not.toBe('ready');
+      expect(await storeFor(fresh).revoke(s.hash)).toEqual({ revoked: true, tombstoned: true });
+      expect(await redis.get(`${config.redisKeyPrefix}apikey:${s.hash}`)).toBe('revoked');
+    } finally {
+      fresh.disconnect();
+    }
+  });
+
+  it('a lookup on a client that is still connecting logs no outage', async () => {
+    const s = await seed();
+    const warns: object[] = [];
+    const fresh = createRedis(config.redisUrl!);
+    try {
+      const store = storeFor(fresh, { warn: () => warns.push({}), info: () => {} });
+      expect(await store.lookup(s.hash)).not.toBeNull(); // served from Postgres
+      expect(warns).toHaveLength(0);
+    } finally {
+      fresh.disconnect();
+    }
+  });
+
+  it('a corrupt cached value is treated as a miss and overwritten', async () => {
+    const s = await seed();
+    const key = `${config.redisKeyPrefix}apikey:${s.hash}`;
+    await redis.set(key, '{not json', 'EX', 60);
+    const warns: object[] = [];
+    const store = storeFor(redis, { warn: () => warns.push({}), info: () => {} });
+    queries = 0;
+    expect(await store.lookup(s.hash)).toEqual({ tenantId: s.tenantId, tenantName: s.tenant });
+    expect(queries).toBe(1);
+    expect(warns).toHaveLength(0);
+    expect(await redis.get(key)).toContain(s.tenantId);
+  });
+
+  it('writes failing while reads succeed log one warn, not one per request', async () => {
+    const warns: object[] = [];
+    const infos: object[] = [];
+    const readOnly = {
+      status: 'ready',
+      get: async () => null,
+      set: async () => {
+        throw Object.assign(new Error('READONLY'), { code: 'READONLY' });
+      },
+    } as unknown as Redis;
+    const store = storeFor(readOnly, { warn: () => warns.push({}), info: () => infos.push({}) });
+    for (let i = 0; i < 5; i++) expect(await store.lookup(randomBytes(32).toString('hex'))).toBeNull();
+    expect(warns).toHaveLength(1);
+    expect(infos).toHaveLength(0);
   });
 });

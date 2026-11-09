@@ -1,9 +1,9 @@
 import { and, asc, eq, isNull, sql } from 'drizzle-orm';
-import { loadConfig } from '../config.ts';
+import { loadConfig, loadDbConfig } from '../config.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { apiKeys, tenants } from '../db/schema.ts';
 import { generateKey, hashKey, keyPrefix, KEY_PREFIX_LENGTH } from '../auth/keys.ts';
-import { createKeyStore, type KeyStore } from '../auth/key-store.ts';
+import { keyStoreFromConfig, type KeyStore } from '../auth/key-store.ts';
 import { createRedis } from '../redis.ts';
 
 export class CliError extends Error {}
@@ -80,9 +80,16 @@ async function main(argv: string[]) {
   if (!command || !['create-tenant', 'create-key', 'revoke-key', 'list-keys'].includes(command)) {
     throw new CliError(USAGE);
   }
-  const config = loadConfig();
-  const handle = createDb({ databaseUrl: config.databaseUrl, poolSize: 2 });
-  const redis = config.authCache === 'redis' && config.redisUrl ? createRedis(config.redisUrl) : null;
+  // Database-only commands need nothing but the database settings.
+  const dbOnly = command === 'create-tenant' || command === 'list-keys';
+  const config = dbOnly ? undefined : loadConfig();
+  const dbConfig = config ?? loadDbConfig();
+  const handle = createDb({ databaseUrl: dbConfig.databaseUrl, poolSize: 2 });
+  // Only revoke-key talks to Redis.
+  const redis =
+    command === 'revoke-key' && config?.authCache === 'redis' && config.redisUrl
+      ? createRedis(config.redisUrl)
+      : null;
   try {
     switch (command) {
       case 'create-tenant': {
@@ -93,7 +100,7 @@ async function main(argv: string[]) {
       }
       case 'create-key': {
         if (!args[0]) throw new CliError(USAGE);
-        const k = await createKey(handle.db, config.apiKeyPepper, args[0], args[1]);
+        const k = await createKey(handle.db, config!.apiKeyPepper, args[0], args[1]);
         // stdout carries only the key so scripts can capture it; the rest goes to stderr.
         console.error(`key for ${k.tenant} (prefix ${k.prefix}); store it now, it is not recoverable:`);
         console.log(k.key);
@@ -101,20 +108,14 @@ async function main(argv: string[]) {
       }
       case 'revoke-key': {
         if (!args[0]) throw new CliError(USAGE);
-        const keyStore = createKeyStore({
-          db: handle.db,
-          redis,
-          keyPrefix: config.redisKeyPrefix,
-          cacheTtlS: config.authCacheTtlS,
-          negativeTtlS: config.authNegativeTtlS,
-          tombstoneTtlS: config.authTombstoneTtlS,
-        });
+        const keyStore = keyStoreFromConfig(config!, handle.db, redis);
         const r = await revokeKey(handle.db, keyStore, args[0]);
+        if (!r.revoked) throw new CliError(`${r.prefix}: already revoked or not found`);
         console.log(`revoked ${r.prefix}`);
         if (redis !== null && !r.tombstoned) {
           // Postgres is updated but the cache could not be told; a cached copy may live on.
           throw new CliError(
-            `redis unreachable: the key is revoked in Postgres but a cached copy can keep working for up to ${config.authCacheTtlS}s`,
+            `redis unreachable: the key is revoked in Postgres but a cached copy can keep working for up to ${config!.authCacheTtlS}s`,
           );
         }
         break;

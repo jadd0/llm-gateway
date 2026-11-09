@@ -79,3 +79,14 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     authTombstoneTtlS: e.AUTH_TOMBSTONE_TTL_S,
   };
 }
+
+const dbSchema = z.object({
+  DATABASE_URL: z.string().min(1),
+  DB_POOL_SIZE: int(20, 1),
+});
+
+// Only what a database-only command (migrations, list-keys) needs, so it runs without a pepper or Redis.
+export function loadDbConfig(env: NodeJS.ProcessEnv = process.env): { databaseUrl: string; dbPoolSize: number } {
+  const e = dbSchema.parse(env);
+  return { databaseUrl: e.DATABASE_URL, dbPoolSize: e.DB_POOL_SIZE };
+}
