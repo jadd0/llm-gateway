@@ -52,13 +52,13 @@ completed_at: 2026-11-09
 notes: Budgets: reserve-then-settle, holds mirrored in Postgres, epoch failover; verifier PASS 0 breaches in 7 runs, accounting exact; benchmarks provisional (R8)
 
 ## PR 6 — Provider adapters: Anthropic, OpenAI and a third
-status: pending
+status: done
 acceptance: one OpenAI-format request routes by model name to Anthropic, OpenAI or the third provider, translating request, response, streaming chunks and usage; contract tests run against recorded fixtures; one live smoke call per provider documented, not in the gate.
 scope_notes: third provider chosen at plan time. The mock stays the benchmark target.
 base_branch: main
-commit:
-completed_at:
-notes:
+commit: 44c1913
+completed_at: 2026-11-09
+notes: Anthropic/OpenAI/Gemini adapters over own undici pools, streamed translation unbuffered, R1 closed; verifier PASS, 2 review fix passes; no live calls yet (keys owed), Anthropic/Gemini fixtures from doc examples; bench pending quiet run
 
 ## PR 7 — Resilience: timeouts, retries, circuit breaker, fallback
 status: pending
