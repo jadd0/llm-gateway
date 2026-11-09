@@ -51,3 +51,7 @@ Format — one entry per decision under its category, newest last, ids never reu
   Src: founder in chat: "make main the main git branch and set up a public github repo for it" · Code: .gitignore
 - **D-007** 2026-11-08 · founder · active — Agents write all the code, including the rate limiter and circuit breaker; each PR ships a plain-language explanation the founder can defend in an interview. Why: founder in chat: "im not writing any code, no point."
   Src: chat 2026-11-08 · Code: none
+- **D-008** 2026-11-09 · founder · active — Tests sit beside the code they test as `<file>.test.ts`; no `test/` folders. Why: founder in chat: "tests should be in the smae folders as code."
+  Src: chat 2026-11-09 · Code: vitest.config.ts include
+- **D-009** 2026-11-09 · founder · active — Docs are organised as one folder per part (`docs/<part>/`), each with a plain-English README and an archify diagram explaining that part; this replaces per-PR explainers and a separate decisions folder. Why: founder in chat: "docs should be organised as folders in docs. ie docs/interpreter. each part should have an archify diagram explaining".
+  Src: chat 2026-11-09 · Code: docs/README.md

@@ -2,8 +2,9 @@
 
 Queue for /product. One `## PR <id> — title` block per PR, built in order (PRs stack). Every
 acceptance line ends in a check or a number from a committed run; no figure enters the README or
-BENCHMARKS.md without one. Every PR also ships `docs/explainers/pr-<n>.md`: what was built, why,
-and the interview questions it answers, in plain language (D-007).
+BENCHMARKS.md without one. Every PR creates or updates `docs/<part>/` for each part it touches: a
+plain-English README (what, why, decisions with their numbers, likely interview questions) and an
+archify diagram of that part (D-007, D-009). Tests sit beside the code they test (D-008).
 
 ## PR 1 — Skeleton, mock provider and streaming passthrough
 status: pending
@@ -16,7 +17,7 @@ notes:
 
 ## PR 2 — Framework comparison benchmark
 status: pending
-acceptance: the same trivial proxy route on raw node:http, Express 5 and Fastify, each load-tested by k6 under identical settings; req/s and p50/p95 for each committed with raw output and written up in docs/decisions/0001-framework.md.
+acceptance: the same trivial proxy route on raw node:http, Express 5 and Fastify, each load-tested by k6 under identical settings; req/s and p50/p95 for each committed with raw output and written up in docs/benchmarks/ (framework comparison section and diagram).
 scope_notes: bench code lives under bench/; does not change the gateway.
 base_branch: main
 commit:
