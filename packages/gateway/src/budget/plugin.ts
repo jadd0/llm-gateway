@@ -5,6 +5,7 @@ import { chatRequest } from '../request-body.ts';
 import { splitRequest } from '../usage/estimate.ts';
 import type { Usage } from '../usage/sse-usage.ts';
 import type { CacheHit } from '../cache/plugin.ts';
+import { assertNotCluster } from './redis-ledger.ts';
 import { createBudget, type Budget, type BudgetOptions, type Reservation } from './budget.ts';
 
 /** How a request ended, as the budget needs to know. */
@@ -70,6 +71,7 @@ export function costOfUsage(price: Price, usage: Usage): { prompt: number; compl
 const refundTokens = (request: FastifyRequest) => void request.rateLimit?.settle(0);
 
 const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) => {
+  await assertNotCluster(opts.budget.redis); // the settle script spans the balance and the spend stream
   const budget: Budget = await createBudget({ ...opts.budget, log: app.log });
   app.decorateRequest('budget', null);
   app.addHook('onClose', () => budget.close());
@@ -78,7 +80,8 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
     const price = priceFor(hit.model);
     const u = hit.usage === null ? undefined : hit.usage;
     const cost = price !== undefined && u !== undefined ? costOfUsage(price, u) : undefined;
-    hit.request?.reqlog.note({ promptTokens: cost?.prompt ?? 0, completionTokens: cost?.completion ?? 0, savedMicros: cost?.cost ?? 0 });
+    // The token counts of the log row are the cache plugin's, noted from the stored usage; only the saving needs a price.
+    hit.request?.reqlog.note({ savedMicros: cost?.cost ?? 0 });
     await budget.recordHit({
       tenantId: hit.tenantId,
       model: hit.model,

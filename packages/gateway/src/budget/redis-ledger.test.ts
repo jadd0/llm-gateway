@@ -35,7 +35,7 @@ const settleArgs = (t: string, id: string, cost: number, extra: Partial<SettleAr
   },
   ...extra,
 });
-const queued = async () => (await redis.xrange(`${prefix}requestlog`, '-', '+')).map(([, f]) => fromStreamFields(f));
+const queued = async () => (await redis.xrange(`${prefix}requestlog:spend`, '-', '+')).map(([, f]) => fromStreamFields(f));
 
 // Small deterministic generator, so a failing round can be replayed.
 function mulberry32(seed: number) {
@@ -127,7 +127,7 @@ describe('redis ledger', { timeout: 120_000 }, () => {
     const t = tenant();
     const a = args(t, 1000, 5000);
     expect((await l.reserve(a)).allowed).toBe(true);
-    const key = `${prefix}requestlog`;
+    const key = `${prefix}requestlog:spend`;
     const before = await redis.xlen(key).catch(() => 0);
     // A string where the stream should be makes XADD fail (WRONGTYPE) inside the script.
     await redis.del(key);
@@ -170,9 +170,10 @@ describe('redis ledger', { timeout: 120_000 }, () => {
     // Repeating it, or running it from a second worker, adds nothing.
     expect(await l.apply(1, both)).toBe('unchanged');
     expect(await bal(t)).toMatchObject({ spent: 1000, reserved: 0 });
-    // A charged-estimate for a lapsed hold the balance already released is added all the same.
-    expect(await l.apply(1, [{ tenantId: t, period: P, id: randomUUID(), costMicros: 40, force: true }])).toBe('changed');
-    expect(await bal(t)).toMatchObject({ spent: 1040, reserved: 0 });
+    // A charge for a request this balance holds no hold for is never added: with no hold there is no proof the
+    // balance has not charged it already (its own settle, or a rebuild that counted it).
+    expect(await l.apply(1, [{ tenantId: t, period: P, id: randomUUID(), costMicros: 40 }])).toBe('unchanged');
+    expect(await bal(t)).toMatchObject({ spent: 1000, reserved: 0 });
     // No balance, nothing to catch up.
     expect(await l.apply(1, [{ tenantId: tenant(), period: P, id: randomUUID(), costMicros: 5 }])).toBe('unchanged');
   });
@@ -188,21 +189,17 @@ describe('redis ledger', { timeout: 120_000 }, () => {
     expect((await l.reserve(args(t, 1000, 1000))).allowed).toBe(true);
   });
 
-  it('expired reservation is released without a settle', async () => {
+  it('a hold is not released by time: it stays until a settle, so a settle still queued cannot be outrun', async () => {
     const l = ledger();
     const t = tenant();
     const first = args(t, 600, 1000, { ttlMs: 1000 });
     expect((await l.reserve(first)).allowed).toBe(true);
-    expect((await l.reserve(args(t, 600, 1000))).allowed).toBe(false);
-    now = T0 + 999;
+    now = T0 + 1_000_000; // far past its expiry
     expect((await l.reserve(args(t, 600, 1000))).allowed).toBe(false); // still held
-    now = T0 + 1001;
-    expect((await l.reserve(args(t, 600, 1000))).allowed).toBe(true);
-    // Only the new hold remains; the lapsed one was released, not charged.
     expect(await bal(t)).toMatchObject({ spent: 0, reserved: 600 });
-    // A call that outlives its hold still settles: its real spend is charged, never lost.
+    // Its settle (or the sweeper's apply) is what releases it, and the real spend is charged.
     await l.settle(settleArgs(t, first.id, 400));
-    expect(await bal(t)).toMatchObject({ spent: 400, reserved: 600 });
+    expect(await bal(t)).toMatchObject({ spent: 400, reserved: 0 });
     now = T0;
   });
 

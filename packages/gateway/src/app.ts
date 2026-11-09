@@ -89,7 +89,7 @@ export function buildApp(
     config.logMode === 'inline'
       ? createInlineSink(handle.db, app.log)
       : redis !== null
-        ? createStreamSink({ redis, keyPrefix: config.redisKeyPrefix, bufferMax: config.logBufferMax, log: app.log })
+        ? createStreamSink({ redis, keyPrefix: config.redisKeyPrefix, bufferMax: config.logBufferMax, streamMax: config.logStreamMax, log: app.log })
         : nullSink;
   app.addHook('onClose', async () => {
     // Entries still being built, in flight or buffered are sent before Redis is let go.

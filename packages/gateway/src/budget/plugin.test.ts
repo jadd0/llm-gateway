@@ -486,6 +486,8 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     const entered = new Promise<void>((r) => (holdEntered = r));
     let openHold!: () => void;
     const holdGate = new Promise<void>((r) => (openHold = r));
+    let holdWritten!: () => void;
+    const written = new Promise<void>((r) => (holdWritten = r));
     const sockets: Socket[] = [];
     const gated = capped({}, {
       budgetPgLedger: {
@@ -493,7 +495,8 @@ describe('budget plugin', { timeout: 60_000 }, () => {
         hold: async (a: Parameters<typeof real.hold>[0]) => {
           holdEntered();
           await holdGate;
-          return real.hold(a);
+          await real.hold(a);
+          holdWritten();
         },
       },
     });
@@ -508,6 +511,7 @@ describe('budget plugin', { timeout: 60_000 }, () => {
       r.req.destroy();
       if (!sk.destroyed) await once(sk, 'close');
       openHold();
+      await written; // the hold exists now, so a balance of zero held means the refund has been applied to it
       await settledAt(s.tenantId, 0); // the route ran and ended the request: its refund reached Postgres and dropped the hold
       expect(hits).toBe(before);
       expect(await ledgerRows(s.tenantId)).toEqual([]);

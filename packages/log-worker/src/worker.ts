@@ -1,11 +1,12 @@
 import { Redis } from 'ioredis';
 import { chargeExpiredHolds } from '../../gateway/src/budget/pg-ledger.ts';
-import { applySettled } from '../../gateway/src/budget/redis-ledger.ts';
+import { applySettled, assertNotCluster } from '../../gateway/src/budget/redis-ledger.ts';
 import { createPgLedger } from '../../gateway/src/budget/pg-ledger.ts';
 import { loadConfig } from '../../gateway/src/config.ts';
 import { createDb, type Db } from '../../gateway/src/db/client.ts';
 import { applyBatch, catchUp } from './batch.ts';
-import { createGroup, type Raw } from './claim.ts';
+import { createGroup, entryKey, type Raw } from './claim.ts';
+import { reconcileHolds } from './reconcile.ts';
 
 export interface Logger {
   info(obj: object, msg: string): void;
@@ -23,7 +24,18 @@ export interface WorkerOptions {
   batchWaitMs: number;
   claimIdleMs: number;
   maxDeliveries: number;
+  /** How often lapsed holds are charged and orphaned Redis holds reconciled, on a timer of its own (seconds). */
   sweepS: number;
+  /** A hold is charged only this long after it lapsed (seconds). */
+  sweepGraceS?: number;
+  /** A Redis hold with no Postgres row is dropped once this far past its expiry (seconds). */
+  orphanGraceS?: number;
+  /** The request-log stream's length cap, for the warning at 80% of it. */
+  streamMax?: number;
+  /** How often the streams are trimmed and measured (ms). */
+  trimEveryMs?: number;
+  /** How long the budget epoch is cached before it is read again (ms). */
+  epochRefreshMs?: number;
   log: Logger;
   /** How long a Redis catch-up call may take before it is skipped. */
   redisTimeoutMs?: number;
@@ -37,10 +49,12 @@ export interface PassResult {
   applied: number;
   deadLettered: number;
   swept: number;
+  /** Redis holds the reconcile released this pass (phantoms and holds Postgres had already charged). */
+  reconciled: number;
 }
 
 export interface Worker {
-  /** One pass: take over idle entries, read new ones, write them, acknowledge them, trim. */
+  /** One pass: take over idle entries, read new ones, write them, acknowledge them; trim and sweep when due. */
   runOnce(): Promise<PassResult>;
   /** Runs passes until `stop()`. */
   start(): void;
@@ -58,13 +72,26 @@ export function createWorker(o: WorkerOptions): Worker {
   let stopping = false;
   let loop: Promise<void> | null = null;
   let lastSweep = Date.now();
+  let lastTrim = 0;
+  // The budget epoch, read from Postgres at most every epochRefreshMs: it changes only when Redis is lost.
+  const epochRefreshMs = o.epochRefreshMs ?? 1000;
+  const pgLedger = createPgLedger(o.db);
+  let epoch = 1;
+  let epochAt = 0;
+  const currentEpoch = async (): Promise<number> => {
+    if (Date.now() - epochAt >= epochRefreshMs) {
+      epoch = await pgLedger.readEpoch();
+      epochAt = Date.now();
+    }
+    return epoch;
+  };
 
   async function runOnce(): Promise<PassResult> {
     if (!ensured) {
       await group.ensure();
       ensured = true;
     }
-    const result: PassResult = { read: 0, applied: 0, deadLettered: 0, swept: 0 };
+    const result: PassResult = { read: 0, applied: 0, deadLettered: 0, swept: 0, reconciled: 0 };
 
     // Entries another consumer read and never acknowledged come first: its batch died with it.
     const reclaimed = await group.claimIdle(o.batchSize, o.claimIdleMs);
@@ -77,10 +104,10 @@ export function createWorker(o: WorkerOptions): Worker {
 
     if (reclaimed.length > 0) {
       // An entry that keeps coming back is poison: kept aside so it cannot block the stream.
-      const counts = await group.deliveries(reclaimed.map((r) => r.id));
+      const counts = await group.deliveries(reclaimed);
       const keep: Raw[] = [];
       for (const e of batch) {
-        const n = counts.get(e.id) ?? 0;
+        const n = counts.get(entryKey(e)) ?? 0;
         if (reclaimed.includes(e) && n > o.maxDeliveries) {
           await group.deadLetter(e, n);
           result.deadLettered++;
@@ -99,27 +126,43 @@ export function createWorker(o: WorkerOptions): Worker {
       result.applied = r.applied.length;
       for (const m of r.malformed) o.log.warn({ entryId: m.id, errClass: m.errClass }, 'log entry could not be read, left pending');
       for (const f of r.failed) o.log.warn({ entryId: f.id, errClass: f.errClass, code: f.code }, 'log entry could not be written, left pending');
-      await catchUp(o.db, o.redis, o.keyPrefix, r.settled, redisTimeoutMs).catch((err: unknown) =>
-        o.log.warn(errInfo(err), 'live balances could not be caught up'),
-      );
-      await group.trim().catch((err: unknown) => o.log.warn(errInfo(err), 'stream trim failed'));
+      if (r.settled.length > 0) {
+        await currentEpoch()
+          .then((e) => catchUp(o.redis, o.keyPrefix, e, r.settled, redisTimeoutMs))
+          .catch((err: unknown) => o.log.warn(errInfo(err), 'live balances could not be caught up'));
+      }
     }
 
-    // The safety net for settles that never arrived: only with nothing queued and nothing in flight, so an entry
-    // that is merely late is not charged its estimate first.
-    if (!stopping && Date.now() - lastSweep >= o.sweepS * 1000 && batch.length === 0) {
+    // Trimmed and measured on an interval, not every batch: XINFO and XPENDING per batch are wasted work.
+    if (Date.now() - lastTrim >= (o.trimEveryMs ?? 5000)) {
+      lastTrim = Date.now();
+      await group.trim().catch((err: unknown) => o.log.warn(errInfo(err), 'stream trim failed'));
+      if (o.streamMax !== undefined) {
+        const n = await group.lengths().catch(() => null);
+        if (n !== null && n.log > o.streamMax * 0.8) {
+          o.log.warn({ length: n.log, max: o.streamMax, spendLength: n.spend }, 'request log stream is over 80% of LOG_STREAM_MAX: the worker is behind, the oldest log entries will be dropped');
+        }
+      }
+    }
+
+    // The safety net for settles that never arrived. On a timer of its own, whether or not the worker is busy:
+    // under steady traffic the stream is never empty, so waiting for quiet would let lapsed holds pile up. What
+    // keeps a late settle from being charged its estimate first is the grace, not idleness.
+    if (!stopping && Date.now() - lastSweep >= o.sweepS * 1000) {
       lastSweep = Date.now();
-      const b = await group.backlog();
-      if (b.lag === 0 && b.pending === 0) {
-        const charged = await chargeExpiredHolds(o.db, 1000);
+      try {
+        const charged = await chargeExpiredHolds(o.db, 1000, (o.sweepGraceS ?? 0) * 1000);
         result.swept = charged.length;
+        const e = await currentEpoch();
         if (charged.length > 0) {
           o.log.warn({ holds: charged.length }, 'expired holds charged at their estimate');
-          const epoch = await createPgLedger(o.db).readEpoch();
-          await applySettled(o.redis, o.keyPrefix, epoch, charged, redisTimeoutMs).catch((err: unknown) =>
-            o.log.warn(errInfo(err), 'live balances could not be caught up'),
-          );
+          await applySettled(o.redis, o.keyPrefix, e, charged, redisTimeoutMs);
         }
+        const rec = await reconcileHolds({ db: o.db, redis: o.redis, keyPrefix: o.keyPrefix, epoch: e, graceMs: (o.orphanGraceS ?? 600) * 1000, timeoutMs: redisTimeoutMs });
+        result.reconciled = rec.dropped + rec.charged;
+        if (result.reconciled > 0) o.log.warn(rec, 'redis holds with no postgres hold row released');
+      } catch (err) {
+        o.log.warn(errInfo(err), 'hold sweep failed, retried next interval');
       }
     }
     return result;
@@ -160,10 +203,12 @@ if (import.meta.main) {
   const handle = createDb({ databaseUrl: config.databaseUrl, poolSize: 4 });
   const redis = new Redis(config.redisUrl, { maxRetriesPerRequest: 2 });
   redis.on('error', () => {});
+  await assertNotCluster(redis); // the settle script spans the balance and the spend stream
   const worker = createWorker({
     db: handle.db, redis, keyPrefix: config.redisKeyPrefix, group: config.logGroup, consumer: config.workerConsumer,
     batchSize: config.logBatchSize, batchWaitMs: config.logBatchWaitMs, claimIdleMs: config.logClaimIdleMs,
-    maxDeliveries: config.logMaxDeliveries, sweepS: config.logSweepS, log,
+    maxDeliveries: config.logMaxDeliveries, sweepS: config.logSweepS, sweepGraceS: config.logSweepGraceS,
+    orphanGraceS: config.budgetOrphanGraceS, streamMax: config.logStreamMax, epochRefreshMs: config.budgetEpochRefreshMs, log,
   });
   let closing = false;
   const shutdown = (signal: string) => {

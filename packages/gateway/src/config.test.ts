@@ -149,6 +149,7 @@ describe('request log settings', () => {
     expect(loadConfig(env({}))).toMatchObject({
       logMode: 'stream', logGroup: 'log-writers', logBatchSize: 500, logBatchWaitMs: 1000,
       logClaimIdleMs: 30_000, logMaxDeliveries: 5, logBufferMax: 10_000, logSweepS: 60,
+      logSweepGraceS: 60, logStreamMax: 1_000_000, budgetOrphanGraceS: 600,
     });
     expect(loadConfig(env({})).workerConsumer).toMatch(/-\d+$/);
     expect(loadConfig(env({ WORKER_CONSUMER: 'w1' })).workerConsumer).toBe('w1');

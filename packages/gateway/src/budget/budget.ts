@@ -367,7 +367,7 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
         }
         const outcome = await redisReserve();
         if (outcome !== 'failed' && !outcome.allowed) {
-          // Not needed after all. If it can't be dropped it lapses by itself, which only errs towards refusing.
+          // Not needed after all. If it can't be dropped, the worker's sweeper charges it at its estimate once it lapses.
           await pg.release(id).catch((e: unknown) => log?.warn(errInfo(e), 'budget hold could not be dropped'));
           return { status: 'denied', remaining: outcome.remaining };
         }
@@ -377,13 +377,17 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
       }
 
       // Anything but an admission leaves nothing behind: a Redis hold the failed attempt may have made is
-      // released (the request's settle would do it for an admitted one), and so is the Postgres row.
+      // released (the request's settle would do it for an admitted one), and so is the Postgres row. The row was
+      // written before Redis was asked, so a balance rebuilt meanwhile (at a newer epoch this instance has not
+      // adopted yet) may have imported it as a hold: it is released there too, or it would sit in that balance
+      // with nothing to settle it. The worker's reconcile catches what this misses.
       const cleanUp = async (): Promise<void> => {
-        const work = [
-          pg.release(id).catch((e: unknown) => log?.warn(errInfo(e), 'budget hold could not be dropped')),
-          ...(redisMayHaveRun ? [redisLedger.release(req.tenantId, period, usedEpoch, id)] : []),
-        ];
-        await Promise.all(work);
+        const release = async () => {
+          if (!redisMayHaveRun) return;
+          const latest = await pg.readEpoch().catch(() => usedEpoch);
+          for (const e of new Set([usedEpoch, epoch, latest])) await redisLedger.release(req.tenantId, period, e, id);
+        };
+        await Promise.all([pg.release(id).catch((e: unknown) => log?.warn(errInfo(e), 'budget hold could not be dropped')), release()]);
       };
       try {
         // Decided on Postgres. A hold written above for the Redis attempt is replaced, not counted twice.

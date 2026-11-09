@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import type { Redis } from 'ioredis';
-import { streamKey, toSpendFields, type SpendEntry } from '../requestlog/entry.ts';
+import { spendKey, toSpendFields, type SpendEntry } from '../requestlog/entry.ts';
 import { periodExpiryS, type Period } from './period.ts';
 
 // budget.lua holds five scripts, split on its "@script" markers.
@@ -46,8 +46,6 @@ export interface AppliedSettle {
   period: Period;
   id: string;
   costMicros: number;
-  /** True for a lapsed hold charged its estimate: added to spent even though the balance no longer holds it. */
-  force?: boolean;
 }
 
 /** What Postgres knows about a tenant's month: the record a lost balance is rebuilt from. */
@@ -55,7 +53,7 @@ export interface Snapshot {
   spent: number;
   /** How many charges `spent` includes (tenant_spend.charges). Informational: the balance does not use it. */
   charges: number;
-  /** Every unexpired hold, with the time it has left. */
+  /** Every hold row, lapsed ones too (negative time left): a lapsed hold may still have a settle queued, and is charged by the worker's sweeper, not forgotten. */
   holds: Array<{ id: string; amount: number; ttlMs: number }>;
 }
 
@@ -109,16 +107,33 @@ export async function applySettled(redis: Redis, keyPrefix: string, epoch: numbe
   const groups = new Map<string, { tenantId: string; period: Period; args: Array<string | number> }>();
   for (const s of settled) {
     const g = groups.get(`${s.tenantId}|${s.period}`) ?? { tenantId: s.tenantId, period: s.period, args: [] };
-    g.args.push(s.id, s.costMicros, s.force ? 1 : 0);
+    g.args.push(s.id, s.costMicros);
     groups.set(`${s.tenantId}|${s.period}`, g);
   }
   let changed = 0;
   for (const g of groups.values()) {
-    const b = `${keyPrefix}bud:{${g.tenantId}}:${g.period}:${epoch}`;
+    const b = balanceKey(keyPrefix, g.tenantId, g.period, epoch);
     const r = await withTimeout(c.budApply(b, `${b}:res`, `${b}:amt`, ...g.args), timeoutMs);
     if (r > 0) changed += r;
   }
   return changed;
+}
+
+/** The key of a tenant's balance for a month. Its hold zset is `<key>:res` and its hold amounts `<key>:amt`. The tag {tenantId} keeps them in one slot. */
+export const balanceKey = (keyPrefix: string, tenantId: string, period: string, epoch: number): string =>
+  `${keyPrefix}bud:{${tenantId}}:${period}:${epoch}`;
+
+/**
+ * Refuses a Redis Cluster. The settle script writes the spend stream and the tenant's balance in one call, and
+ * the stream key is not in the tenant's hash slot, so on a cluster the call fails with CROSSSLOT. Budgets support a
+ * single Redis (or a primary with replicas). Throws when the server reports cluster mode; a Redis that does not
+ * answer is not a reason to refuse to start (budgets fall back to Postgres while it is away).
+ */
+export async function assertNotCluster(redis: Redis): Promise<void> {
+  const info = await redis.info('cluster').catch(() => '');
+  if (/^cluster_enabled:1\s*$/m.test(info)) {
+    throw new Error('Redis Cluster is not supported: the budget settle script writes the spend stream and the balance in one call (see docs/budgets/README.md)');
+  }
 }
 
 // Defines the scripts on the client once; asking again for a client that has them changes nothing.
@@ -160,7 +175,7 @@ export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
 
   // The hash tag {tenantId} puts every key of a tenant's month in one Redis Cluster slot.
   const keys = (tenantId: string, period: Period, epoch: number) => {
-    const b = `${keyPrefix}bud:{${tenantId}}:${period}:${epoch}`;
+    const b = balanceKey(keyPrefix, tenantId, period, epoch);
     return [b, `${b}:res`, `${b}:amt`] as const;
   };
 
@@ -194,14 +209,14 @@ export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
 
     async settle(a) {
       const r = await within(
-        cmd.budSettle(...keys(a.tenantId, a.period, a.epoch), streamKey(keyPrefix), a.entry.id, a.entry.kind === 'charge' ? a.entry.costMicros : 0, ...toSpendFields(a.entry)),
+        cmd.budSettle(...keys(a.tenantId, a.period, a.epoch), spendKey(keyPrefix), a.entry.id, a.entry.kind === 'charge' ? a.entry.costMicros : 0, ...toSpendFields(a.entry)),
       );
       if (r[0] === -1) return 'rebuild';
       return r[0] === 1 ? 'changed' : 'unchanged';
     },
 
     async enqueue(entry) {
-      await within(redis.xadd(streamKey(keyPrefix), '*', ...toSpendFields(entry)));
+      await within(redis.xadd(spendKey(keyPrefix), '*', ...toSpendFields(entry)));
     },
 
     async apply(epoch, settled) {
@@ -213,7 +228,7 @@ export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
       try {
         await within(cmd.budRelease(...keys(tenantId, period, epoch), id));
       } catch {
-        // A hold that can't be released here lapses by itself.
+        // A hold that can't be released here is dropped by the worker's reconcile once it is past its expiry.
       }
     },
 

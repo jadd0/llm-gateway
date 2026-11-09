@@ -2,13 +2,13 @@ import type { Redis } from 'ioredis';
 import type { Db } from '../src/db/client.ts';
 import { applySpendBatch, createPgLedger } from '../src/budget/pg-ledger.ts';
 import { applySettled } from '../src/budget/redis-ledger.ts';
-import { fromStreamFields, streamKey, type SpendEntry } from '../src/requestlog/entry.ts';
+import { fromStreamFields, spendKey, type SpendEntry } from '../src/requestlog/entry.ts';
 
 // Stands in for the log worker in the gateway's own tests: applies every spend entry now in the stream to
 // Postgres with the same function the worker uses, catches the live balances up, and removes what it applied.
 // The real worker (batching, acks, redelivery, shutdown) is tested in packages/log-worker.
 export async function drainSpend(db: Db['db'], redis: Redis, keyPrefix: string): Promise<number> {
-  const key = streamKey(keyPrefix);
+  const key = spendKey(keyPrefix);
   const rows = await redis.xrange(key, '-', '+');
   const spend: SpendEntry[] = [];
   for (const [, fields] of rows) {

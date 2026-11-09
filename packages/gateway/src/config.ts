@@ -169,6 +169,9 @@ const schema = z
     LOG_MAX_DELIVERIES: int(5, 1),
     LOG_BUFFER_MAX: int(10_000, 0),
     LOG_SWEEP_S: int(60, 1),
+    LOG_SWEEP_GRACE_S: int(60, 0),
+    LOG_STREAM_MAX: int(1_000_000, 1),
+    BUDGET_ORPHAN_GRACE_S: int(600, 0),
     WORKER_CONSUMER: z.preprocess(blankAsUnset, z.string().default(`${hostname()}-${process.pid}`)),
   })
   .refine((e) => e.OPENAI_BASE_URL_ALLOW_ROOT === 'true' || new URL(e.OPENAI_BASE_URL).pathname.replace(/\/+$/, '') !== '', {
@@ -309,7 +312,14 @@ export interface Config {
   logMaxDeliveries: number;
   /** Request-log entries held in memory while Redis is down; past this they are dropped and counted. */
   logBufferMax: number;
+  /** How often the worker sweeps lapsed holds and reconciles orphaned Redis holds (seconds). */
   logSweepS: number;
+  /** A hold is swept only this long after it lapsed, so a settle queued before it lapsed has been applied (seconds). */
+  logSweepGraceS: number;
+  /** Approximate cap on the request-log stream's length (XADD MAXLEN ~). Spend entries are never capped. */
+  logStreamMax: number;
+  /** A Redis hold with no Postgres hold row is dropped only once it is this far past its expiry (seconds). */
+  budgetOrphanGraceS: number;
   workerConsumer: string;
 }
 
@@ -388,6 +398,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     logMaxDeliveries: e.LOG_MAX_DELIVERIES,
     logBufferMax: e.LOG_BUFFER_MAX,
     logSweepS: e.LOG_SWEEP_S,
+    logSweepGraceS: e.LOG_SWEEP_GRACE_S,
+    logStreamMax: e.LOG_STREAM_MAX,
+    budgetOrphanGraceS: e.BUDGET_ORPHAN_GRACE_S,
     workerConsumer: e.WORKER_CONSUMER,
   };
 }

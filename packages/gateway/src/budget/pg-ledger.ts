@@ -61,10 +61,10 @@ export interface SettleRecord {
 export interface PgLedger {
   /** Settled spend for the period; 0 when nothing was recorded. */
   spent(tenantId: string, period: Period): Promise<number>;
-  /** Settled spend, charge count and every unexpired hold, read in one consistent snapshot. */
+  /** Settled spend, charge count and every hold row (lapsed ones included), read in one consistent snapshot. */
   snapshot(tenantId: string, period: Period): Promise<Snapshot>;
   /**
-   * Checks the cap and holds the money in one short transaction, counting every unexpired hold (those
+   * Checks the cap and holds the money in one short transaction, counting every hold row (those
    * placed by Redis-path requests too). The tenant's spend row is locked for the check only: the lock
    * is released when this returns, long before the provider answers.
    */
@@ -158,8 +158,8 @@ export function createPgLedger(db: Db['db']): PgLedger {
               eq(budgetReservations.tenantId, a.tenantId),
               eq(budgetReservations.period, a.period),
               sql`${budgetReservations.id} <> ${a.id}`,
-              // A lapsed hold is not counted but not deleted either: the log worker charges its estimate.
-              sql`${budgetReservations.expiresAt} > now()`,
+              // Lapsed holds count too: a hold row stays until its settle is applied or the worker's sweeper
+              // charges its estimate, and its settle may be queued, so it is money not yet in spent.
             ),
           );
         const reserved = Number(held?.held ?? 0);
@@ -193,17 +193,13 @@ export function createPgLedger(db: Db['db']): PgLedger {
               ttlMs: sql<string>`floor(extract(epoch from (${budgetReservations.expiresAt} - now())) * 1000)`,
             })
             .from(budgetReservations)
-            .where(
-              and(
-                eq(budgetReservations.tenantId, tenantId),
-                eq(budgetReservations.period, period),
-                sql`${budgetReservations.expiresAt} > now()`,
-              ),
-            );
+            .where(and(eq(budgetReservations.tenantId, tenantId), eq(budgetReservations.period, period)));
+          // Every row, lapsed or not: a row exists exactly until its charge is in the ledger, so a lapsed one is
+          // a settle still queued (or a hold waiting for the sweeper) and must count against the cap.
           return {
             spent: row?.spent ?? 0,
             charges: row?.charges ?? 0,
-            holds: holds.map((h) => ({ id: h.id, amount: h.amount, ttlMs: Math.max(1, Number(h.ttlMs)) })),
+            holds: holds.map((h) => ({ id: h.id, amount: h.amount, ttlMs: Number(h.ttlMs) })),
           };
         },
         { isolationLevel: 'repeatable read' },
@@ -339,15 +335,17 @@ export async function applySpendBatch(tx: Tx, entries: QueuedSpend[]): Promise<{
 
 /**
  * Charges the estimate of holds that lapsed with no settle (the gateway died, or its entry was lost), up to
- * `limit`, in one transaction. They are recorded as estimated charges with the model unknown: the hold knows
+ * `limit`, in one transaction. Only holds that lapsed more than `graceMs` ago: a settle queued before the hold
+ * lapsed has had that long to be applied, and a hold swept before then would be charged its estimate in place
+ * of the real cost. They are recorded as estimated charges with the model unknown: the hold knows
  * its amount and nothing else. A hold is never dropped uncharged. Returns what was charged.
  */
-export async function chargeExpiredHolds(db: Db['db'], limit: number): Promise<AppliedSettle[]> {
+export async function chargeExpiredHolds(db: Db['db'], limit: number, graceMs = 0): Promise<AppliedSettle[]> {
   return db.transaction(async (tx) => {
     const lapsed = await tx
       .select({ id: budgetReservations.id, tenantId: budgetReservations.tenantId, period: budgetReservations.period, amount: budgetReservations.amountMicros })
       .from(budgetReservations)
-      .where(sql`${budgetReservations.expiresAt} < now()`)
+      .where(sql`${budgetReservations.expiresAt} < now() - ${graceMs} * interval '1 millisecond'`)
       .orderBy(budgetReservations.expiresAt)
       .limit(limit)
       .for('update', { skipLocked: true });
@@ -359,6 +357,6 @@ export async function chargeExpiredHolds(db: Db['db'], limit: number): Promise<A
         promptTokens: 0, completionTokens: 0, costMicros: h.amount, estimated: true, savedMicros: 0,
       })),
     );
-    return settled.map((s) => ({ ...s, force: true }));
+    return settled;
   });
 }

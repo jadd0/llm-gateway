@@ -1,22 +1,22 @@
 import type { Redis } from 'ioredis';
-import { applySpendBatch, createPgLedger } from '../../gateway/src/budget/pg-ledger.ts';
+import { applySpendBatch } from '../../gateway/src/budget/pg-ledger.ts';
 import { applySettled } from '../../gateway/src/budget/redis-ledger.ts';
 import type { Db } from '../../gateway/src/db/client.ts';
 import { requestLog } from '../../gateway/src/db/schema.ts';
-import { fromStreamFields, type LogEntry, type SpendEntry } from '../../gateway/src/requestlog/entry.ts';
+import { fromStreamFields, toRequestLogRow, type LogEntry, type SpendEntry } from '../../gateway/src/requestlog/entry.ts';
 import type { Raw } from './claim.ts';
 
 type Tx = Parameters<Parameters<Db['db']['transaction']>[0]>[0];
 
 export interface Parsed {
-  id: string;
+  raw: Raw;
   log?: LogEntry;
   spend?: SpendEntry;
 }
 
 export interface BatchResult {
-  /** Stream ids that are in Postgres now and can be acknowledged. */
-  applied: string[];
+  /** Entries that are in Postgres now and can be acknowledged. */
+  applied: Raw[];
   /** Stream ids that could not be parsed. Left unacknowledged: they come back until the delivery limit sends them to the dead-letter stream. */
   malformed: Array<{ id: string; errClass: string }>;
   /** Stream ids whose transaction failed on its own. Left unacknowledged too. */
@@ -34,7 +34,7 @@ export function parse(raw: Raw[]): { parsed: Parsed[]; malformed: BatchResult['m
   for (const r of raw) {
     try {
       const e = fromStreamFields(r.fields);
-      parsed.push(e.kind === 'log' ? { id: r.id, log: e.entry } : { id: r.id, spend: e.entry });
+      parsed.push(e.kind === 'log' ? { raw: r, log: e.entry } : { raw: r, spend: e.entry });
     } catch (err) {
       malformed.push({ id: r.id, errClass: (err as Error).name });
     }
@@ -47,12 +47,7 @@ async function insertLogs(tx: Tx, entries: LogEntry[]): Promise<number> {
   const byId = new Map<string, LogEntry>();
   for (const e of entries) if (!byId.has(e.requestId)) byId.set(e.requestId, e);
   if (byId.size === 0) return 0;
-  const rows = [...byId.values()].map((e) => ({
-    requestId: e.requestId, createdAt: new Date(e.startedAt), tenantId: e.tenantId, keyId: e.keyId, model: e.model,
-    servedModel: e.servedModel, provider: e.provider, status: e.status, errorCode: e.errorCode, stream: e.stream,
-    promptTokens: e.promptTokens, completionTokens: e.completionTokens, costMicros: e.costMicros, savedMicros: e.savedMicros,
-    cache: e.cache, attempts: e.attempts, fallbackUsed: e.fallbackUsed, latencyMs: e.latencyMs, ttfbMs: e.ttfbMs, upstreamMs: e.upstreamMs,
-  }));
+  const rows = [...byId.values()].map(toRequestLogRow);
   const inserted = await tx.insert(requestLog).values(rows).onConflictDoNothing().returning({ id: requestLog.requestId });
   return inserted.length;
 }
@@ -76,7 +71,7 @@ export async function applyBatch(db: Db['db'], raw: Raw[]): Promise<BatchResult>
   if (parsed.length === 0) return result;
   try {
     const r = await db.transaction((tx) => applyIn(tx, parsed));
-    result.applied = parsed.map((p) => p.id);
+    result.applied = parsed.map((p) => p.raw);
     Object.assign(result, { ledgerRows: r.ledgerRows, logRows: r.logRows, settled: r.settled });
     return result;
   } catch {
@@ -85,21 +80,19 @@ export async function applyBatch(db: Db['db'], raw: Raw[]): Promise<BatchResult>
   for (const item of parsed) {
     try {
       const r = await db.transaction((tx) => applyIn(tx, [item]));
-      result.applied.push(item.id);
+      result.applied.push(item.raw);
       result.ledgerRows += r.ledgerRows;
       result.logRows += r.logRows;
       result.settled.push(...r.settled);
     } catch (err) {
-      result.failed.push({ id: item.id, errClass: (err as Error).name, ...((err as { code?: string }).code ? { code: (err as { code?: string }).code } : {}) });
+      result.failed.push({ id: item.raw.id, errClass: (err as Error).name, ...((err as { code?: string }).code ? { code: (err as { code?: string }).code } : {}) });
     }
   }
   return result;
 }
 
-/** Catches the live balances up with what was just written. Best effort: the balance is also rebuilt from Postgres when it is lost. */
-export async function catchUp(db: Db['db'], redis: Redis, keyPrefix: string, settled: BatchResult['settled'], timeoutMs: number): Promise<number> {
+/** Catches the live balances up with what was just written, on `epoch`. Best effort: the balance is also rebuilt from Postgres when it is lost. */
+export async function catchUp(redis: Redis, keyPrefix: string, epoch: number, settled: BatchResult['settled'], timeoutMs: number): Promise<number> {
   if (settled.length === 0) return 0;
-  const epoch = await createPgLedger(db).readEpoch();
   return applySettled(redis, keyPrefix, epoch, settled, timeoutMs);
 }
-

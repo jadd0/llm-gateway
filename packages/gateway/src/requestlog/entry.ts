@@ -3,6 +3,7 @@
 //   log    one per request: the row for request_log (written by the sink, after the response)
 //   spend  a settled hold, a refund, or a cache hit: the rows for spend_ledger / tenant_spend (written by the
 //          settle script in the same Redis call that changes the balance, so the two cannot come apart)
+// The two kinds travel in two streams (see streamKey, spendKey) so that trimming one can never remove the other.
 // Nothing here can carry prompt or completion text: the fields are ids, names of models and providers,
 // counts, money in micro-USD, and timings.
 
@@ -145,7 +146,25 @@ export function fromStreamFields(fields: string[]): StreamEntry {
   throw new Error('unknown entry kind');
 }
 
-/** The stream the gateway writes and the log worker reads, under the instance's key prefix. */
+/**
+ * The stream of request-log entries, under the instance's key prefix. It is length-capped (LOG_STREAM_MAX), so
+ * under a worker outage the oldest log entries are dropped rather than Redis memory growing without bound.
+ */
 export const streamKey = (keyPrefix: string): string => `${keyPrefix}requestlog`;
+/**
+ * The stream of spend entries (settled holds, refunds, cache hits). Never length-capped: an entry here is
+ * money, and is removed only once the worker has written it to Postgres.
+ */
+export const spendKey = (keyPrefix: string): string => `${keyPrefix}requestlog:spend`;
 /** Entries the worker gave up on after too many deliveries. */
 export const deadKey = (keyPrefix: string): string => `${keyPrefix}requestlog:dead`;
+
+/** The `request_log` row for an entry: shared by the worker's batch insert and the inline sink. */
+export function toRequestLogRow(e: LogEntry) {
+  return {
+    requestId: e.requestId, createdAt: new Date(e.startedAt), tenantId: e.tenantId, keyId: e.keyId, model: e.model,
+    servedModel: e.servedModel, provider: e.provider, status: e.status, errorCode: e.errorCode, stream: e.stream,
+    promptTokens: e.promptTokens, completionTokens: e.completionTokens, costMicros: e.costMicros, savedMicros: e.savedMicros,
+    cache: e.cache, attempts: e.attempts, fallbackUsed: e.fallbackUsed, latencyMs: e.latencyMs, ttfbMs: e.ttfbMs, upstreamMs: e.upstreamMs,
+  };
+}

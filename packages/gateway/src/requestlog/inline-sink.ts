@@ -1,5 +1,6 @@
 import type { Db } from '../db/client.ts';
 import { requestLog } from '../db/schema.ts';
+import { toRequestLogRow } from './entry.ts';
 import type { Sink } from './sink.ts';
 
 /**
@@ -13,12 +14,7 @@ export function createInlineSink(db: Db['db'], log?: { warn(obj: object, msg: st
       try {
         await db
           .insert(requestLog)
-          .values({
-            requestId: e.requestId, createdAt: new Date(e.startedAt), tenantId: e.tenantId, keyId: e.keyId, model: e.model,
-            servedModel: e.servedModel, provider: e.provider, status: e.status, errorCode: e.errorCode, stream: e.stream,
-            promptTokens: e.promptTokens, completionTokens: e.completionTokens, costMicros: e.costMicros, savedMicros: e.savedMicros,
-            cache: e.cache, attempts: e.attempts, fallbackUsed: e.fallbackUsed, latencyMs: e.latencyMs, ttfbMs: e.ttfbMs, upstreamMs: e.upstreamMs,
-          })
+          .values(toRequestLogRow(e))
           .onConflictDoNothing();
       } catch (err) {
         failed++;

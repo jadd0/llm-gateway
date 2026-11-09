@@ -15,6 +15,8 @@ export interface Sink {
 export interface StreamSinkOptions {
   redis: Pick<Redis, 'xadd'>;
   keyPrefix: string;
+  /** Approximate length cap of the request-log stream (XADD MAXLEN ~): the oldest entries go first. Unset: no cap. */
+  streamMax?: number;
   /** Entries held in memory while Redis is down; more are dropped and counted. */
   bufferMax: number;
   /** How often a non-empty buffer is retried. */
@@ -34,6 +36,9 @@ const errInfo = (err: unknown) => ({ errClass: (err as Error)?.name, code: (err 
  */
 export function createStreamSink(o: StreamSinkOptions): Sink {
   const key = streamKey(o.keyPrefix);
+  // `~` lets Redis trim in whole blocks, which costs nothing per call. Only this stream is capped; spend has its own.
+  const cap: Array<string | number> = o.streamMax === undefined ? [] : ['MAXLEN', '~', o.streamMax];
+  const xadd = (fields: string[]) => (o.redis.xadd as (...a: Array<string | number>) => Promise<unknown>)(key, ...cap, '*', ...fields);
   const buffer: string[][] = [];
   const inFlight = new Set<Promise<void>>();
   let dropped = 0;
@@ -56,7 +61,7 @@ export function createStreamSink(o: StreamSinkOptions): Sink {
     flushing ??= (async () => {
       try {
         while (buffer.length > 0) {
-          await o.redis.xadd(key, '*', ...buffer[0]!);
+          await xadd(buffer[0]!);
           buffer.shift();
         }
       } catch {
@@ -83,7 +88,7 @@ export function createStreamSink(o: StreamSinkOptions): Sink {
       // Behind an older buffered entry: keep the order.
       if (buffer.length > 0) return hold(fields);
       const p: Promise<void> = Promise.resolve()
-        .then(() => o.redis.xadd(key, '*', ...fields))
+        .then(() => xadd(fields))
         .then(
           () => undefined,
           (err: unknown) => {
