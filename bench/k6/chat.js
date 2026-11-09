@@ -14,8 +14,8 @@ const RATE = Number(__ENV.RATE || 100);
 const WARMUP = Number(__ENV.WARMUP_S || 30);
 const DURATION = Number(__ENV.DURATION_S || 60);
 
-// The gateway's own view of its overhead, from the server-timing header (absent when direct).
-const gwMs = new Trend('gw_server_timing_ms');
+// Time the gateway spent before dispatching upstream, from the server-timing header (absent when direct).
+const gwPreMs = new Trend('gw_pre_server_timing_ms');
 const upstreamMs = new Trend('upstream_server_timing_ms');
 
 const common = {
@@ -43,7 +43,7 @@ export const options = {
     'http_req_waiting{phase:measure}': ['max>=0'],
     'http_req_failed{phase:measure}': ['rate>=0'],
     'http_reqs{phase:measure}': ['count>=0'],
-    'gw_server_timing_ms{phase:measure}': ['max>=0'],
+    'gw_pre_server_timing_ms{phase:measure}': ['max>=0'],
     'dropped_iterations{phase:measure}': ['count>=0'],
   },
 };
@@ -64,7 +64,7 @@ export default function () {
   if (timing) {
     const gw = /gw(?:-pre)?;dur=([\d.]+)/.exec(timing);
     const up = /upstream;dur=([\d.]+)/.exec(timing);
-    if (gw) gwMs.add(Number(gw[1]));
+    if (gw) gwPreMs.add(Number(gw[1]));
     if (up) upstreamMs.add(Number(up[1]));
   }
 }

@@ -33,19 +33,30 @@ start_gateway() {
   GW_PID=$!; PIDS+=("$GW_PID")
   wait_up "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" 404
 }
-wait_up() { # url [ok-status-for-GET]
+wait_up() { # url [expected-http-status, default 200]
+  local code
   for _ in $(seq 1 50); do
-    if curl -s -o /dev/null "$1"; then return 0; fi
+    code=$(curl -s -o /dev/null -w '%{http_code}' "$1" || true)
+    if [ "$code" = "${2:-200}" ]; then return 0; fi
     sleep 0.2
   done
-  echo "timed out waiting for $1" >&2; exit 1
+  echo "timed out waiting for $1 to answer ${2:-200} (last status: ${code:-none})" >&2; exit 1
 }
 stop() { kill "$MOCK_PID" "${GW_PID:-}" 2>/dev/null || true; wait "$MOCK_PID" "${GW_PID:-}" 2>/dev/null || true; GW_PID=""; }
 
 run_k6() { # name url stream rate warmup duration
   echo "== $1 ($2 stream=$3 rate=$4/s)"
+  rm -f "$OUT/$1.json"
+  local rc=0
   TARGET_URL="$2" STREAM="$3" RATE="$4" WARMUP_S="$5" DURATION_S="$6" \
-    k6 run --quiet --summary-export "$OUT/$1.json" "$ROOT/bench/k6/chat.js" >"$OUT/$1.log" 2>&1 || true
+    k6 run --quiet --summary-export "$OUT/$1.json" "$ROOT/bench/k6/chat.js" >"$OUT/$1.log" 2>&1 || rc=$?
+  # 99 is k6's "a threshold failed" exit code; any other non-zero code is a real failure.
+  if [ "$rc" -ne 0 ] && [ "$rc" -ne 99 ]; then
+    echo "k6 exited $rc for $1; see $OUT/$1.log" >&2; exit 1
+  fi
+  if [ ! -s "$OUT/$1.json" ]; then
+    echo "k6 did not write $OUT/$1.json" >&2; exit 1
+  fi
 }
 
 MOCK="http://127.0.0.1:$MOCK_PORT"

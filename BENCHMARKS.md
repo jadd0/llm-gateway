@@ -3,7 +3,11 @@
 Method and the reasons behind it: [docs/benchmarks/README.md](docs/benchmarks/README.md). Raw k6 summaries
 for every figure below are committed in [bench/results/pr-1/](bench/results/pr-1/); re-run with
 `npm run bench:baseline`. Every number here is read from those JSON files (`http_req_duration`,
-`http_req_waiting` and `gw_server_timing_ms`, measured phase only, tag `phase:measure`).
+`http_req_waiting` and the gateway's pre-dispatch time, measured phase only, tag `phase:measure`). The
+pre-dispatch metric was named `gw_server_timing_ms` when these runs were recorded; the committed JSON keeps
+that name, and the k6 script now calls it `gw_pre_server_timing_ms`. The header it was read from was `gw` for
+non-streamed responses and `gw-pre` for streamed ones; both measured the same thing (request received to
+upstream request dispatched), and both are now named `gw-pre`.
 
 ## Environment
 
@@ -40,8 +44,8 @@ as an overhead figure. Time to first byte is the streamed measure.
 
 ### Cross-check against the gateway's own timing
 
-The gateway reports `server-timing` (`gw` for non-streamed, `gw-pre` for streamed). That header measures
-only the gateway's in-process time: 0.008 ms p50 / 0.010 ms p95 (instant) and 0.010 ms p50 / 0.018 ms p95
+The gateway reports `server-timing` with a `gw-pre` field, its pre-dispatch time (request received to upstream
+request dispatched). That header measures only the gateway's own time before it calls the upstream: 0.008 ms p50 / 0.010 ms p95 (instant) and 0.010 ms p50 / 0.018 ms p95
 (realistic). It is not the overhead figure. k6's direct-versus-gateway difference, about 0.23 ms at p50, is
 the real overhead, because it includes the extra HTTP hop (parsing the request, an extra socket round trip,
 writing the response) that the header cannot see. The plan's check was that the two must not differ by more
