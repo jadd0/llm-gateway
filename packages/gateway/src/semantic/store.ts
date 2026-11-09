@@ -1,4 +1,4 @@
-import { eq, inArray, lte, sql } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.ts';
 import { semanticCache } from '../db/schema.ts';
 import type { GuardSignature } from './guards.ts';
@@ -148,13 +148,14 @@ export function createSemanticStore(db: Db['db'], options: SemanticStoreOptions 
     },
 
     async cleanupBatch(now, limit) {
-      const gone = await db.delete(semanticCache).where(
-        inArray(
-          semanticCache.id,
-          db.select({ id: semanticCache.id }).from(semanticCache).where(lte(semanticCache.expiresAt, now)).orderBy(semanticCache.expiresAt).limit(limit).for('update', { skipLocked: true }),
-        ),
-      ).returning({ id: semanticCache.id });
-      return gone.length;
+      // The batch is picked once (a MATERIALIZED CTE): written as a plain IN (subquery with LIMIT) Postgres may plan
+      // it as a join and pick again for each row, deleting more than `limit`.
+      const gone = await db.execute<{ id: string }>(sql`
+        WITH doomed AS MATERIALIZED (
+          SELECT id FROM semantic_cache WHERE expires_at <= ${now} ORDER BY expires_at LIMIT ${limit} FOR UPDATE SKIP LOCKED
+        )
+        DELETE FROM semantic_cache WHERE id IN (SELECT id FROM doomed) RETURNING id`);
+      return gone.rows.length;
     },
   };
 }
