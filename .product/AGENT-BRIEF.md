@@ -218,7 +218,9 @@ Every part of the system has `docs/<part>/` holding `README.md` and an archify d
 of that part, drawn from the code as built. A PR that adds a part creates its folder and lists it
 in `docs/README.md`; a PR that changes a part updates its README and redraws its diagram. Each
 README is plain English, at most a page: what it does, why it is built this way, the decisions
-and their measured numbers, and 3 to 5 likely interview questions with answers. Data-flow lines
+and their measured numbers, and 3 to 5 likely interview questions with answers under the exact heading
+`## Questions you should be able to answer`, linked from the "Interview questions" list in
+`docs/README.md`. Data-flow lines
 in `docs/diagrams/flows.md` (the kit registry, which stays put) point at diagrams in part folders.
 Why: founder's rule (D-009); the founder does not write the code (D-007), so the docs are how
 he explains every part in an interview.
