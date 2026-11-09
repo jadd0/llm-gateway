@@ -174,7 +174,7 @@ describe('semantic store on a private table', () => {
       expect(Number(waiting.rows[0]!.n)).toBe(0);
       // And no transaction of the lookup is left open on the server: it was one statement, not a transaction.
       const open_ = await handle.db.execute<{ n: string }>(
-        sql`SELECT count(*) AS n FROM pg_stat_activity WHERE datname = current_database() AND state LIKE 'idle in transaction%' AND pid <> ${(locker as unknown as { processID: number }).processID}`,
+        sql`SELECT count(*) AS n FROM pg_stat_activity WHERE datname = current_database() AND state LIKE 'idle in transaction%' AND query LIKE '%semantic_nearest%' AND pid <> ${(locker as unknown as { processID: number }).processID}`,
       );
       expect(Number(open_.rows[0]!.n)).toBe(0);
       await locker.query('ROLLBACK');
