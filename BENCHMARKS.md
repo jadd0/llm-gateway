@@ -121,3 +121,18 @@ What the figures say, and what they do not:
   that; the rest is not explained by these runs and may be machine noise, since the streamed first-byte
   figure moves with timer jitter. It was measured once per scenario.
 - The gateway's own `server-timing` `gw-pre` does not include the key check, because the hook runs before the route starts its clock.
+
+## Rate limiting (PR 4)
+
+Pending quiet run. `bash bench/run-ratelimit.sh`, started behind `bash bench/quiet.sh bench/results/pr-4`, writes the
+k6 summaries to `bench/results/pr-4/`; no figure is quoted here until that run is committed (R3).
+
+What the run measures:
+
+- **Overhead of the check:** the same arrival rate through the gateway with `RATE_LIMIT_ENABLED=false` and `true`,
+  using a key whose limits are never reached, instant non-streamed and realistic streamed. Files:
+  `gateway-{instant,realistic}-ratelimit-{off,on}.json`.
+- **Burst:** 1,000 requests at once at a key limited to 100 per minute, counting 200 versus 429
+  (`burst.json`, with `status_200`, `status_429`, `status_429_with_retry_after`). A 100-per-minute bucket gains a token
+  every 0.6 s, so a burst that takes longer than that admits one more; the run script checks the count against that bound.
+- **Estimate error:** the token estimate against the mock's reported usage.

@@ -26,7 +26,8 @@ Diagram: [chat-passthrough.html](chat-passthrough.html). Code: `packages/gateway
   dispatched, `upstream` is dispatch to the upstream body fully copied into memory, `gw-post` is that point to the reply being
   handed to Fastify. Serialising and writing the reply happen after `gw-post` and are not in any field.
 - **Upstream headers.** `retry-after`, `x-request-id`, `openai-processing-ms` and every `x-ratelimit-*`
-  header are passed through, streamed and not; other upstream headers are dropped.
+  header are passed through, streamed and not; other upstream headers are dropped. When the gateway's own
+  rate limiter has set `x-ratelimit-*` headers (they describe the caller's key) the upstream's are dropped instead.
 - **Errors.** Fastify's own errors (415 unsupported content-type, oversized body) and unknown routes (404)
   use the same `invalid_request_error` shape.
 - **Auth.** An `onRequest` hook (`auth/plugin.ts`) runs before the body is read: it takes the bearer key, looks
@@ -34,6 +35,9 @@ Diagram: [chat-passthrough.html](chat-passthrough.html). Code: `packages/gateway
   `Authorization` header is never forwarded; the upstream key comes from `OPENAI_API_KEY`. Because the hook
   runs before the route starts its clock, `gw-pre` in `server-timing` does not include the key check.
   See [../auth/README.md](../auth/README.md).
+- **Rate limit.** After auth and before the route, a `preHandler` (`ratelimit/plugin.ts`) charges the request to the
+  key's buckets or answers 429 / 400. A streamed request is sent upstream with `stream_options.include_usage=true`
+  and its bytes pass through a tap that reads the final usage; see [../rate-limiter/README.md](../rate-limiter/README.md).
 - **Binding.** The gateway listens on `GATEWAY_HOST`, default `127.0.0.1`.
 - **Logging.** Nothing logs per request. `LOG_LEVEL` defaults to `warn`; failures log error class and code only.
 

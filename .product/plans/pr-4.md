@@ -23,6 +23,10 @@ migration: next free number at generate time. Residuals owned by this PR: none.
 | `packages/gateway/src/usage/sse-usage.ts` | **new**. Pass-through stream tap that extracts `usage` from the final SSE chunk without buffering |
 | `packages/gateway/src/usage/sse-usage.test.ts` | **new** |
 | `packages/gateway/src/ratelimit/token-bucket.lua` | **new**. The script (see Invariants) |
+| `packages/gateway/src/ratelimit/token-bucket-adjust.lua` | **new**. The reconcile script (adds or subtracts, capped at capacity) |
+| `packages/gateway/src/request-body.ts` | **new**. Parses the JSON body once per request, shared by the limiter and the route |
+| `packages/gateway/src/redis.ts` | `createRedis` takes `commandTimeoutMs` so the limiter's own timeout governs |
+| `packages/gateway/src/test-env.ts` | `seedKey` takes per-key limits |
 | `packages/gateway/src/ratelimit/limiter.ts` | **new**. Loads the script (ioredis `defineCommand`), `take()`, `adjust()`, fail-open handling |
 | `packages/gateway/src/ratelimit/limiter.test.ts` | **new** |
 | `packages/gateway/src/ratelimit/plugin.ts` | **new**. Fastify `preHandler` after auth: take, set headers, 429/400; `onResponse`-side reconcile |
@@ -41,6 +45,7 @@ migration: next free number at generate time. Residuals owned by this PR: none.
 | `bench/results/pr-4/*.json` | **new** |
 | `BENCHMARKS.md` | "Rate limiting (PR 4)" section |
 | `docs/rate-limiter/README.md` | **new**. Plain English + the Lua script annotated line by line + interview Qs |
+| `docs/gateway/chat-passthrough.html`, `docs/auth/api-key-check.html` | labels updated for the rate-limit step and limits on the cached key |
 | `docs/rate-limiter/token-bucket.html` | **new**. Archify diagram: request → Lua (both buckets) → allow/deny → reconcile |
 | `docs/README.md`, `docs/architecture/README.md`, `docs/architecture/architecture.html`, `docs/gateway/README.md`, `docs/auth/README.md` | rate limiter built; request path updated |
 | `docs/diagrams/flows.md` | add the flow line below |

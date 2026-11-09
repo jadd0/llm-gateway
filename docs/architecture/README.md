@@ -14,17 +14,21 @@ hop (auth, limits, budgets, caching, failover, logging).
   errors and outages. See [../mock-provider/README.md](../mock-provider/README.md).
 - **Auth** (`packages/gateway/src/auth`): every request needs `Authorization: Bearer gw_...`. Keys are stored
   as HMAC-SHA256 hashes in Postgres and cached in Redis. See [../auth/README.md](../auth/README.md).
-- **Redis and Postgres+pgvector** (`docker-compose.yml`): Redis holds the key cache and Postgres holds
-  tenants and API keys. Vectors and the request log are not used yet.
+- **Rate limiter** (`packages/gateway/src/ratelimit`, `usage`): per-key token buckets for requests and tokens per
+  minute, kept in Redis by one Lua script so every gateway instance shares the count. See
+  [../rate-limiter/README.md](../rate-limiter/README.md).
+- **Redis and Postgres+pgvector** (`docker-compose.yml`): Redis holds the key cache and the rate-limit buckets;
+  Postgres holds tenants and API keys (with their limits). Vectors and the request log are not used yet.
 
 ## Planned (marked dashed in the diagram)
 
-Real provider adapters, Redis token-bucket limits, budgets, exact and semantic caches,
+Real provider adapters, budgets, exact and semantic caches,
 retries and circuit breaker, a batched request-log queue into Postgres, and the dashboard.
 
 ## Request flow today
 
-client, then the gateway's key check (Redis, or Postgres on a miss), then the mock, then back.
+client, then the gateway's key check (Redis, or Postgres on a miss), then the rate limit (one Redis script), then the
+mock, then back. A request over its limit is answered 429 before it reaches the mock.
 
 ## Why this design
 
@@ -48,7 +52,7 @@ compared against rather than an impression. PR 3 added the key check and re-meas
    non-streamed in the baseline.
 2. **Why is the gateway stateless?** So instances scale horizontally; anything shared goes to Redis or
    Postgres. Auth uses both: Postgres is the source of truth for keys, Redis only caches it.
-3. **What is built versus planned?** Built: passthrough, the mock, tenants and API-key auth. Planned: everything dashed in the
+3. **What is built versus planned?** Built: passthrough, the mock, tenants and API-key auth, per-key rate limits. Planned: everything dashed in the
    diagram.
 4. **How do you know the numbers are the gateway's?** The mock removes provider variance, and each figure is
    a difference against a direct-to-mock run at the same rate.
