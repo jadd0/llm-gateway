@@ -176,7 +176,7 @@ START_S=$(date +%s)
   echo "memory_gb: $(( $(sysctl -n hw.memsize) / 1073741824 ))"
   echo "os: $(sw_vers -productName) $(sw_vers -productVersion)"
   echo "node: $(node --version)"
-  echo "k6: $(k6 version | head -1)"
+  echo "k6: $(k6 version | sed -n 1p)"
   echo "nginx: $(nginx -v 2>&1)"
   echo "mode: $([ "$SMOKE" = 1 ] && echo 'SMOKE (tiny durations, numbers are meaningless)' || echo full)"
 } >"$FINAL/hardware.txt"
