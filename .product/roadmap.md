@@ -7,13 +7,13 @@ plain-English README (what, why, decisions with their numbers, likely interview 
 archify diagram of that part (D-007, D-009). Tests sit beside the code they test (D-008).
 
 ## PR 1 — Skeleton, mock provider and streaming passthrough
-status: pending
+status: done
 acceptance: `docker compose up` brings up Redis and Postgres+pgvector; `POST /v1/chat/completions` through the gateway returns the mock's response, streamed and non-streamed, with SSE chunks arriving unbuffered (test asserts the first chunk reaches the client before the last is sent); a committed k6 run of the mock direct vs through the gateway records gateway overhead p50/p95 and req/s in BENCHMARKS.md with hardware and versions.
 scope_notes: one upstream (the mock, OpenAI format). No auth, limits, caching, retries or logging pipeline. Gate goes green (first tests land here).
 base_branch: main
-commit:
-completed_at:
-notes:
+commit: ab90903
+completed_at: 2026-11-09
+notes: Gateway overhead 0.233/0.982 ms p50/p95 (instant, non-streamed), 0.238/0.254 ms TTFB (realistic, streamed); 10000 req/s last good step (single run per step). Residuals R1-R5 opened.
 
 ## PR 2 — Framework comparison benchmark
 status: pending
