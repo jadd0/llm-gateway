@@ -5181,7 +5181,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <path data-edge-from="lookup" data-edge-to="flight" data-edge-label="miss" data-edge-key="6" data-edge-id="e5" data-composition-points="533.2,129;549.2,129;549.2,166;600.2,166;600.2,217" d="M 533.2 129 L 549.2 129 L 549.2 166 L 600.2 166 L 600.2 217" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="flight" data-edge-to="route" data-edge-label="leader" data-edge-key="7" data-edge-id="e6" data-composition-points="673.2,243;689.2,243;689.2,290;607.2,290;607.2,341" d="M 673.2 243 L 689.2 243 L 689.2 290 L 607.2 290 L 607.2 341" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="flight" data-edge-to="replay" data-edge-label="follower hit" data-edge-key="8" data-edge-id="e7" data-composition-points="614.2,217;614.2,126;720,126" d="M 614.2 217 L 614.2 126 L 720 126" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
-        <path data-edge-from="route" data-edge-to="collect" data-edge-label="served (own model, 2xx only)" data-edge-key="9" data-edge-id="e8" data-composition-points="673.2,367;720,367" d="M 673.2 367 L 720 367" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="route" data-edge-to="collect" data-edge-label="served (own model, 2xx only, not a stream cut at the max duration)" data-edge-key="9" data-edge-id="e8" data-composition-points="673.2,367;720,367" d="M 673.2 367 L 720 367" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="collect" data-edge-to="entry" data-edge-label="SET + notify" data-edge-key="10" data-edge-id="e9" data-composition-points="786,393;786,420;467.2,420;467.2,269" d="M 786 393 L 786 420 L 467.2 420 L 467.2 269" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
 
         <!-- Nodes -->
@@ -5230,8 +5230,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <text data-detail="context" x="786" y="131" class="t-muted" font-size="8" text-anchor="middle">0 cost, rpm counted</text>
         </g>
 
-        <g id="node-reply" data-node-id="reply" data-node-label="Reply" tabindex="0" role="button" aria-label="Focus Reply, x-gateway-cache, Gateway request path" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="x-gateway-cache" data-node-context="Gateway request path">
-          <title>Reply · x-gateway-cache · Gateway request path</title>
+        <g id="node-reply" data-node-id="reply" data-node-label="Reply" tabindex="0" role="button" aria-label="Focus Reply, x-gateway-cache, unlogged on 402, Gateway request path" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="x-gateway-cache, unlogged on 402" data-node-context="Gateway request path">
+          <title>Reply · x-gateway-cache, unlogged on 402 · Gateway request path</title>
           <rect x="880" y="93" width="132" height="52" rx="6" class="c-mask"/>
           <rect x="880" y="93" width="132" height="52" rx="6" class="c-frontend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="frontend" class="semantic-sigil s-frontend" transform="translate(886 99) scale(0.6875)">
@@ -5241,7 +5241,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <circle cx="6.3" cy="4.8" r=".7" class="sigil-fill"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="946" y="114" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Reply</text>
-          <text data-detail="context" x="946" y="131" class="t-muted" font-size="8" text-anchor="middle">x-gateway-cache</text>
+          <text data-detail="context" x="946" y="131" class="t-muted" font-size="8" text-anchor="middle">x-gateway-cache, unlogged on 402</text>
         </g>
 
         <g id="node-entry" data-node-id="entry" data-node-label="Cache entry" tabindex="0" role="button" aria-label="Focus Cache entry, per tenant or shared, Redis" aria-pressed="false" data-node-kind="database" data-node-sublabel="per tenant or shared" data-node-context="Redis">
@@ -5281,15 +5281,15 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <text data-detail="context" x="607.2" y="379" class="t-muted" font-size="8" text-anchor="middle">retry, breaker, fallback</text>
         </g>
 
-        <g id="node-collect" data-node-id="collect" data-node-label="Collect served 2xx" tabindex="0" role="button" aria-label="Focus Collect served 2xx, stream passes through, Route and provider" aria-pressed="false" data-node-kind="backend" data-node-sublabel="stream passes through" data-node-context="Route and provider">
-          <title>Collect served 2xx · stream passes through · Route and provider</title>
+        <g id="node-collect" data-node-id="collect" data-node-label="Collect served 2xx" tabindex="0" role="button" aria-label="Focus Collect served 2xx, stream through, logged, Route and provider" aria-pressed="false" data-node-kind="backend" data-node-sublabel="stream through, logged" data-node-context="Route and provider">
+          <title>Collect served 2xx · stream through, logged · Route and provider</title>
           <rect x="720" y="341" width="132" height="52" rx="6" class="c-mask"/>
           <rect x="720" y="341" width="132" height="52" rx="6" class="c-backend" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="backend" class="semantic-sigil s-backend" transform="translate(726 347) scale(0.6875)">
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="786" y="362" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Collect served 2xx</text>
-          <text data-detail="context" x="786" y="379" class="t-muted" font-size="8" text-anchor="middle">stream passes through</text>
+          <text data-detail="context" x="786" y="379" class="t-muted" font-size="8" text-anchor="middle">stream through, logged</text>
         </g>
 
         <!-- Edge labels -->
@@ -5320,9 +5320,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="633.3000000000001" y="106" width="67.6" height="14" rx="3" class="c-mask"/>
           <text x="667.1" y="116" class="t-database" font-size="8" text-anchor="middle">follower hit</text>
         </g>
-        <g data-detail="context" data-edge-from="route" data-edge-to="collect" data-edge-label="served (own model, 2xx only)" data-edge-key="9" data-edge-id="e8">
+        <g data-detail="context" data-edge-from="route" data-edge-to="collect" data-edge-label="served (own model, 2xx only, not a stream cut at the max duration)" data-edge-key="9" data-edge-id="e8">
           <rect x="677.2" y="347" width="38.8" height="14" rx="3" class="c-mask"/>
-          <text x="696.6" y="357" class="t-muted" font-size="8" text-anchor="middle">served (own model, 2xx only)</text>
+          <text x="696.6" y="357" class="t-muted" font-size="8" text-anchor="middle">served (own model, 2xx only, not a stream cut at the max duration)</text>
         </g>
         <g data-detail="context" data-edge-from="collect" data-edge-to="entry" data-edge-label="SET + notify" data-edge-key="10" data-edge-id="e9">
           <rect x="592.8000000000001" y="400" width="67.6" height="14" rx="3" class="c-mask"/>

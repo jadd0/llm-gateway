@@ -5171,7 +5171,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
 
         <!-- Edge paths -->
         <path data-edge-from="request" data-edge-to="chain" data-edge-key="0" data-edge-id="e1" data-composition-points="180,119;208,119" d="M 180 119 L 208 119" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="fail" data-edge-to="settle" data-edge-label="refund unless billing" data-edge-key="1" data-edge-id="e10" data-composition-points="853.6,243;947.6,243;947.6,145" d="M 853.6 243 L 947.6 243 L 947.6 145" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="fail" data-edge-to="settle" data-edge-label="refund unless billing (a call in flight keeps its estimate)" data-edge-key="1" data-edge-id="e10" data-composition-points="853.6,243;947.6,243;947.6,145" d="M 853.6 243 L 947.6 243 L 947.6 145" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
         <path data-edge-from="chain" data-edge-to="breaker" data-edge-key="2" data-edge-id="e2" data-composition-points="340,119;368,119" d="M 340 119 L 368 119" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="breaker" data-edge-to="attempt" data-edge-label="allowed" data-edge-key="3" data-edge-id="e3" data-composition-points="500,112;551.6,112" d="M 500 112 L 551.6 112" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="attempt" data-edge-to="reply" data-edge-label="200" data-edge-key="4" data-edge-id="e4" data-composition-points="617.6,145;617.6,161;787.6,161;787.6,145" d="M 617.6 145 L 617.6 161 L 787.6 161 L 787.6 145" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
@@ -5281,8 +5281,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <text data-detail="context" x="617.6" y="255" class="t-muted" font-size="8" text-anchor="middle">then re-check the breaker</text>
         </g>
 
-        <g id="node-fail" data-node-id="fail" data-node-label="Final error" tabindex="0" role="button" aria-label="Focus Final error, last answer or 503, Retry and fallback" aria-pressed="false" data-node-kind="security" data-node-sublabel="last answer or 503" data-node-context="Retry and fallback">
-          <title>Final error · last answer or 503 · Retry and fallback</title>
+        <g id="node-fail" data-node-id="fail" data-node-label="Final error" tabindex="0" role="button" aria-label="Focus Final error, answer, 503, or 502 bad response, logged, Retry and fallback" aria-pressed="false" data-node-kind="security" data-node-sublabel="answer, 503, or 502 bad response, logged" data-node-context="Retry and fallback">
+          <title>Final error · answer, 503, or 502 bad response, logged · Retry and fallback</title>
           <rect x="721.6" y="217" width="132" height="52" rx="6" class="c-mask"/>
           <rect x="721.6" y="217" width="132" height="52" rx="6" class="c-security" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="security" class="semantic-sigil s-security" transform="translate(727.6 223) scale(0.6875)">
@@ -5290,14 +5290,14 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <path d="m5.8 8 1.5 1.5 3-3"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="787.6" y="238" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Final error</text>
-          <text data-detail="context" x="787.6" y="255" class="t-muted" font-size="8" text-anchor="middle">last answer or 503</text>
+          <text data-detail="context" x="787.6" y="255" class="t-muted" font-size="8" text-anchor="middle">answer, 503, or 502 bad response, logged</text>
         </g>
 
         <!-- Edge labels -->
 
-        <g data-detail="context" data-edge-from="fail" data-edge-to="settle" data-edge-label="refund unless billing" data-edge-key="1" data-edge-id="e10">
+        <g data-detail="context" data-edge-from="fail" data-edge-to="settle" data-edge-label="refund unless billing (a call in flight keeps its estimate)" data-edge-key="1" data-edge-id="e10">
           <rect x="881.2" y="223" width="38.8" height="14" rx="3" class="c-mask"/>
-          <text x="900.6" y="233" class="t-security" font-size="8" text-anchor="middle">refund unless billing</text>
+          <text x="900.6" y="233" class="t-security" font-size="8" text-anchor="middle">refund unless billing (a call in flight keeps its estimate)</text>
         </g>
 
         <g data-detail="context" data-edge-from="breaker" data-edge-to="attempt" data-edge-label="allowed" data-edge-key="3" data-edge-id="e3">

@@ -1,0 +1,13 @@
+{
+  "name": "@llm-gateway/log-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node --env-file-if-exists=../../.env.local src/worker.ts"
+  },
+  "dependencies": {
+    "drizzle-orm": "^0.45.4",
+    "ioredis": "^6.0.0",
+    "pg": "^8.23.1"
+  }
+}

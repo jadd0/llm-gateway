@@ -1,4 +1,4 @@
-import { bigint, boolean, char, check, index, integer, pgTable, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { bigint, boolean, char, check, index, integer, pgTable, primaryKey, smallint, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const tenants = pgTable('tenants', {
@@ -86,6 +86,9 @@ export const budgetReservations = pgTable(
     period: char('period', { length: 7 }).notNull(),
     amountMicros: bigint('amount_micros', { mode: 'number' }).notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    // True once the request was refused: the hold is not going to be used, so it counts against no cap and the
+    // sweeper deletes it rather than charging its estimate. Set when dropping the row failed.
+    refused: boolean('refused').notNull().default(false),
   },
   (t) => [
     index('budget_reservations_tenant_period_idx').on(t.tenantId, t.period),
@@ -103,4 +106,43 @@ export const budgetEpoch = pgTable(
     epoch: bigint('epoch', { mode: 'number' }).notNull(),
   },
   (t) => [check('budget_epoch_single_row', sql`${t.id} = 1`)],
+);
+
+// One row per request, whatever its outcome: who, which model, tokens, cost, timing, cache, fallback. Metadata
+// only; no prompt, completion, header or key is ever stored. Written by the log worker from the Redis stream,
+// so a redelivered entry is a no-op on the primary key. The ids are not foreign keys: a log row outlives
+// the tenant or key it names, and a failed lookup (null tenant) is itself a row.
+export const requestLog = pgTable(
+  'request_log',
+  {
+    requestId: uuid('request_id').primaryKey(),
+    // Request start by the gateway's clock.
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull(),
+    tenantId: uuid('tenant_id'),
+    keyId: uuid('key_id'),
+    model: text('model'),
+    servedModel: text('served_model'),
+    provider: text('provider'),
+    status: smallint('status').notNull(),
+    errorCode: text('error_code'),
+    stream: boolean('stream').notNull(),
+    promptTokens: integer('prompt_tokens'),
+    completionTokens: integer('completion_tokens'),
+    costMicros: bigint('cost_micros', { mode: 'number' }).notNull().default(0),
+    savedMicros: bigint('saved_micros', { mode: 'number' }).notNull().default(0),
+    // hit | miss | bypass | uncacheable | unavailable | refresh; null when the cache was not consulted.
+    cache: text('cache'),
+    attempts: smallint('attempts').notNull().default(0),
+    fallbackUsed: boolean('fallback_used').notNull().default(false),
+    // Gateway in to last byte out.
+    latencyMs: integer('latency_ms').notNull(),
+    ttfbMs: integer('ttfb_ms'),
+    // Sum of the upstream attempt times.
+    upstreamMs: integer('upstream_ms'),
+  },
+  (t) => [
+    // Time-ordered appends: a block-range index stays tiny and answers time-window scans.
+    index('request_log_created_brin').using('brin', t.createdAt),
+    index('request_log_tenant_time').on(t.tenantId, t.createdAt),
+  ],
 );

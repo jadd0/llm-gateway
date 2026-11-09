@@ -9,6 +9,7 @@ function fake() {
   const request = {
     rateLimit: { estimate: 100, settle: async (n: number) => void limiter.push(n) },
     budget: { estimate: 5, settle: async (o: unknown) => void budget.push(o) },
+    reqlog: { note() {} },
   } as unknown as FastifyRequest;
   return { request, limiter, budget };
 }
@@ -37,7 +38,7 @@ describe('usageSettler', () => {
   });
 
   it('works when neither consumer is registered', () => {
-    const request = { rateLimit: null, budget: null } as unknown as FastifyRequest;
+    const request = { rateLimit: null, budget: null, reqlog: { note() {} } } as unknown as FastifyRequest;
     const s = usageSettler(request);
     expect(() => {
       s.used(usage);

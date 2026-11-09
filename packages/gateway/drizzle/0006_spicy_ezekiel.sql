@@ -1,0 +1,1 @@
+ALTER TABLE "budget_reservations" ADD COLUMN "refused" boolean DEFAULT false NOT NULL;

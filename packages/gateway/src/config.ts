@@ -1,3 +1,4 @@
+import { hostname } from 'node:os';
 import { z } from 'zod';
 import { parseUsd, priceFor } from './pricing/prices.ts';
 import { DEFAULT_MODEL_ROUTES, parseModelRoutes, routeModel, type ModelRoutes } from './providers/router.ts';
@@ -149,7 +150,6 @@ const schema = z
     BUDGET_REDIS_TIMEOUT_MS: int(50, 1),
     BUDGET_EPOCH_REFRESH_MS: int(250, 10),
     BUDGET_OUTAGE_FAILURES: int(3, 1),
-    BUDGET_SWEEP_INTERVAL_S: int(60, 1),
     CACHE_ENABLED: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
     CACHE_TTL_S: int(3600, 1),
     CACHE_MAX_ENTRY_BYTES: int(262_144, 1),
@@ -159,6 +159,21 @@ const schema = z
     CACHE_WAIT_MS: int(120_000, 1),
     CACHE_REDIS_TIMEOUT_MS: int(50, 1),
     CACHE_REPLAY_CHUNK_CHARS: int(64, 1),
+    // stream: every request is queued in a Redis stream and written to Postgres by the log worker.
+    // inline: one awaited Postgres insert per request; the "before" of the logging benchmark, nothing else.
+    LOG_MODE: z.preprocess(blankAsUnset, z.enum(['stream', 'inline']).default('stream')),
+    LOG_GROUP: z.preprocess(blankAsUnset, z.string().min(1).default('log-writers')),
+    // At least 2: the worker's blocking read asks each of its two streams for half a batch.
+    LOG_BATCH_SIZE: int(500, 2),
+    LOG_BATCH_WAIT_MS: int(1000, 1),
+    LOG_CLAIM_IDLE_MS: int(30_000, 1),
+    LOG_MAX_DELIVERIES: int(5, 1),
+    LOG_BUFFER_MAX: int(10_000, 0),
+    LOG_SWEEP_S: int(60, 1),
+    LOG_SWEEP_GRACE_S: int(60, 0),
+    LOG_STREAM_MAX: int(1_000_000, 1),
+    BUDGET_ORPHAN_GRACE_S: int(600, 0),
+    WORKER_CONSUMER: z.preprocess(blankAsUnset, z.string().default(`${hostname()}-${process.pid}`)),
   })
   .refine((e) => e.OPENAI_BASE_URL_ALLOW_ROOT === 'true' || new URL(e.OPENAI_BASE_URL).pathname.replace(/\/+$/, '') !== '', {
     message:
@@ -192,6 +207,10 @@ const schema = z
   })
   .refine((e) => e.CACHE_ENABLED === 'false' || e.REDIS_URL !== undefined, {
     message: 'REDIS_URL is required when CACHE_ENABLED=true',
+    path: ['REDIS_URL'],
+  })
+  .refine((e) => e.LOG_MODE === 'inline' || e.REDIS_URL !== undefined, {
+    message: 'REDIS_URL is required when LOG_MODE=stream: the request log is queued in a Redis stream',
     path: ['REDIS_URL'],
   })
   .refine((e) => e.CACHE_ENABLED === 'false' || e.CACHE_WAIT_MS <= e.UPSTREAM_MAX_DURATION_MS, {
@@ -270,7 +289,6 @@ export interface Config {
   budgetRedisTimeoutMs: number;
   budgetEpochRefreshMs: number;
   budgetOutageFailures: number;
-  budgetSweepIntervalS: number;
   cacheEnabled: boolean;
   /** How long a cached answer lives. */
   cacheTtlS: number;
@@ -287,6 +305,23 @@ export interface Config {
   cacheRedisTimeoutMs: number;
   /** Characters (code points) per content chunk when a cached answer is replayed as a stream. */
   cacheReplayChunkChars: number;
+  logMode: 'stream' | 'inline';
+  logGroup: string;
+  logBatchSize: number;
+  logBatchWaitMs: number;
+  logClaimIdleMs: number;
+  logMaxDeliveries: number;
+  /** Request-log entries held in memory while Redis is down; past this they are dropped and counted. */
+  logBufferMax: number;
+  /** How often the worker sweeps lapsed holds and reconciles orphaned Redis holds (seconds). */
+  logSweepS: number;
+  /** A hold is swept only this long after it lapsed, so a settle queued before it lapsed has been applied (seconds). */
+  logSweepGraceS: number;
+  /** Approximate cap on the request-log stream's length (XADD MAXLEN ~). Spend entries are never capped. */
+  logStreamMax: number;
+  /** A Redis hold with no Postgres hold row is dropped only once it is this far past its expiry (seconds). */
+  budgetOrphanGraceS: number;
+  workerConsumer: string;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -347,7 +382,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     budgetRedisTimeoutMs: e.BUDGET_REDIS_TIMEOUT_MS,
     budgetEpochRefreshMs: e.BUDGET_EPOCH_REFRESH_MS,
     budgetOutageFailures: e.BUDGET_OUTAGE_FAILURES,
-    budgetSweepIntervalS: e.BUDGET_SWEEP_INTERVAL_S,
     cacheEnabled: e.CACHE_ENABLED === 'true',
     cacheTtlS: e.CACHE_TTL_S,
     cacheMaxEntryBytes: e.CACHE_MAX_ENTRY_BYTES,
@@ -357,6 +391,18 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cacheWaitMs: e.CACHE_WAIT_MS,
     cacheRedisTimeoutMs: e.CACHE_REDIS_TIMEOUT_MS,
     cacheReplayChunkChars: e.CACHE_REPLAY_CHUNK_CHARS,
+    logMode: e.LOG_MODE,
+    logGroup: e.LOG_GROUP,
+    logBatchSize: e.LOG_BATCH_SIZE,
+    logBatchWaitMs: e.LOG_BATCH_WAIT_MS,
+    logClaimIdleMs: e.LOG_CLAIM_IDLE_MS,
+    logMaxDeliveries: e.LOG_MAX_DELIVERIES,
+    logBufferMax: e.LOG_BUFFER_MAX,
+    logSweepS: e.LOG_SWEEP_S,
+    logSweepGraceS: e.LOG_SWEEP_GRACE_S,
+    logStreamMax: e.LOG_STREAM_MAX,
+    budgetOrphanGraceS: e.BUDGET_ORPHAN_GRACE_S,
+    workerConsumer: e.WORKER_CONSUMER,
   };
 }
 

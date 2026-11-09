@@ -22,6 +22,8 @@ lines verbatim; for any plan in the branch's diff, a flow line missing from this
 - Rate limit check and usage reconcile → `docs/rate-limiter/token-bucket.html` → `packages/gateway/src/{ratelimit/*.ts,ratelimit/token-bucket.lua,usage/*.ts}`
 - Budget reserve and settle → `docs/budgets/budget-flow.html` → `packages/gateway/src/budget/*.ts`
 - Spend recorded to Postgres → `docs/budgets/budget-flow.html` → `packages/gateway/src/budget/{budget.ts,pg-ledger.ts}`
+- Budget settle via the stream → `docs/budgets/budget-flow.html` → `packages/{gateway/src/budget/*,log-worker/src/batch.ts}`
+- Request log: gateway → Redis stream → log worker → Postgres → `docs/request-log/request-log.html` → `packages/{gateway/src/requestlog/*.ts,log-worker/src/*.ts}`
 - Chat completion attempts (retry, breaker, fallback) → `docs/resilience/request-attempts.html` → `packages/gateway/src/{routes/chat.ts,resilience/*.ts}`
 - Breaker state → `docs/resilience/breaker.html` → `packages/gateway/src/resilience/{breaker.ts,breaker.lua}`
 - Exact-match cache lookup, single-flight and fill → `docs/cache/cache-flow.html` → `packages/gateway/src/{cache/*.ts,routes/chat.ts}`

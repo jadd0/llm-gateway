@@ -16,7 +16,9 @@
     "smoke:providers": "node --env-file-if-exists=.env.local scripts/smoke-providers.ts",
     "bench:providers": "bash bench/run-providers.sh",
     "bench:chaos": "bash bench/run-chaos.sh",
-    "bench:cache": "bash bench/run-cache.sh"
+    "bench:cache": "bash bench/run-cache.sh",
+    "bench:logging": "bash bench/run-logging.sh",
+    "worker": "node --env-file-if-exists=.env.local packages/log-worker/src/worker.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

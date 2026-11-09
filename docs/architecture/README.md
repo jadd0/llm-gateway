@@ -21,15 +21,16 @@ hop (auth, limits, budgets, resilience, caching, logging).
   reserved atomically in Redis before the call and replaced by the actual cost after; Postgres records every charge and
   decides instead while Redis is down. See [../budgets/README.md](../budgets/README.md).
 - **Redis and Postgres+pgvector** (`docker-compose.yml`): Redis holds the key cache, the rate-limit buckets and the live
-  budget balances; Postgres holds tenants and API keys (with their limits and caps) and the spend record. Vectors and the request log are not used yet.
+  budget balances; Postgres holds tenants and API keys (with their limits and caps) and the spend record. The request log and the spend queue live in a Redis stream. Vectors are not used yet.
 
 - **Response cache** (`packages/gateway/src/cache`): identical `temperature: 0` requests are answered from Redis, scoped per
   tenant, with one upstream call per burst of identical misses. See [../cache/README.md](../cache/README.md).
+- **Request log** (`packages/gateway/src/requestlog`, `packages/log-worker`): every request becomes one entry in a Redis stream, and settled spend travels in the same stream; the log worker writes both to Postgres in batches. See [../request-log/README.md](../request-log/README.md).
 - **Resilience** (`packages/gateway/src/resilience`): timeouts, retries, a Redis-shared circuit breaker and fallback chains. See [../resilience/README.md](../resilience/README.md).
 
 ## Planned (marked dashed in the diagram)
 
-The semantic cache, a batched request-log queue into Postgres, and the dashboard.
+The semantic cache and the dashboard.
 
 ## Request flow today
 

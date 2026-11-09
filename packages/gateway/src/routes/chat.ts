@@ -4,6 +4,7 @@ import { pipeline } from 'node:stream/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { errorBody } from '../errors.ts';
 import { completionFromBody, StreamCollector } from '../cache/collect.ts';
+import { classifyClose } from '../requestlog/collector.ts';
 import { defaultMaxTokensFor } from '../pricing/prices.ts';
 import { chatRequest } from '../request-body.ts';
 import { usageSettler, type UsageSettler } from '../usage/settle.ts';
@@ -33,15 +34,19 @@ function passthroughHeaders(upstream: Record<string, string | string[] | undefin
   return out;
 }
 
-function upstreamFailure(reply: FastifyReply, err: unknown, refund: UsageSettler | null): FastifyReply {
+function upstreamFailure(reply: FastifyReply, err: unknown, refund: UsageSettler | null, kind: 'unreachable' | 'bad_response' = 'unreachable'): FastifyReply {
   // `refund` is passed only when the provider did no work (no 2xx was received): then everything held up
   // front goes back. A 2xx whose body broke passes null, because the provider did generate it.
   refund?.refund();
   const code = (err as { code?: string }).code ?? '';
+  reply.request.reqlog.note({ errorCode: isTimeout(err) ? 'upstream_timeout' : kind === 'bad_response' ? 'upstream_bad_response' : 'upstream_unreachable' });
   // Log the error class and code only; messages can carry request data.
   reply.log.warn({ errClass: (err as Error).name, code }, 'upstream request failed');
   if (isTimeout(err)) {
     return reply.code(504).send(errorBody('upstream timed out', 'gateway_error'));
+  }
+  if (kind === 'bad_response') {
+    return reply.code(502).send(errorBody('upstream sent a response that could not be read', 'gateway_error', 'upstream_bad_response'));
   }
   return reply.code(502).send(errorBody('upstream unreachable', 'gateway_error'));
 }
@@ -49,8 +54,9 @@ function upstreamFailure(reply: FastifyReply, err: unknown, refund: UsageSettler
 // Sits last in a streamed answer's pipeline. When the call's total deadline passes it drops the rest of the
 // answer and ends the stream, with one OpenAI-shaped error event first if the answer is an event stream
 // (any other kind of body is ended without adding anything to it).
-class DeadlineGuard extends Transform {
+export class DeadlineGuard extends Transform {
   #cut = false;
+  #ended = false;
   readonly #appendsEvent: boolean;
   constructor(appendsEvent: boolean) {
     super();
@@ -60,16 +66,22 @@ class DeadlineGuard extends Transform {
     if (this.#cut) done();
     else done(null, chunk);
   }
-  cutWith(event: string) {
-    if (this.#cut) return;
+  override _flush(done: () => void) {
+    this.#ended = true;
+    done();
+  }
+  /** Cuts the answer. False when there was nothing to cut: it was cut already, or it had all arrived. */
+  cutWith(event: string): boolean {
+    if (this.#cut || this.#ended) return false;
     this.#cut = true;
     // A blank line first closes any event the cut interrupted.
     if (this.#appendsEvent) this.push(`\n\n${event}`);
     this.push(null);
+    return true;
   }
 }
 
-const maxDurationEvent = `data: ${JSON.stringify({
+export const maxDurationEvent = `data: ${JSON.stringify({
   error: { message: 'upstream call exceeded the maximum duration', type: 'gateway_error', code: 'upstream_max_duration' },
 })}\n\n`;
 
@@ -207,6 +219,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
         );
     }
     const parsed = checked.value;
+    request.reqlog.note({ model: parsed.model, stream: parsed.stream === true });
     // Usage is needed only when something was charged up front (either plugin may be off).
     // The cache needs the answer's usage too, to price what a later hit saves.
     const metered = (request.rateLimit ?? null) !== null || (request.budget ?? null) !== null || request.cacheFill != null;
@@ -246,10 +259,12 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     let upstreamFailed = false;
     let upstreamDone = false;
     let upstreamStream: Readable | undefined;
+    // The request log's collector decides this from the same facts (classifyClose), so the two cannot disagree.
+    const upstreamState = () => ({ failed: upstreamFailed, alive: upstreamStream === undefined || upstreamDone || !upstreamStream.destroyed, cut: deadlineHit });
+    request.reqlog.upstreamState = upstreamState;
     reply.raw.on('close', () => {
       if (reply.raw.writableFinished) return;
-      clientGone =
-        !upstreamFailed && (upstreamStream === undefined || upstreamDone || !upstreamStream.destroyed);
+      clientGone = classifyClose({ finished: false, upstream: upstreamState() }) === 'client';
       abort.abort();
     });
 
@@ -268,11 +283,13 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     let relay: PassThrough | undefined;
     state.deadline = setTimeout(() => {
       deadlineHit = true;
+      // The gateway ending the call is noted where it does: a stream cut mid-way (which finishes cleanly, with an
+      // error event) below, a 504 in tooLong(). A timer that fires after the whole answer arrived changes nothing.
       // The provider may have worked and no usage will come: the estimate is charged now, not when the
       // (possibly stuck) response finishes.
       if (billing) settle.keep(state.model);
       if (guard) {
-        guard.cutWith(maxDurationEvent);
+        if (guard.cutWith(maxDurationEvent)) request.reqlog.note({ errorCode: 'upstream_max_duration' });
         abort.abort(); // the upstream goes at once; the relay below lets the response still finish cleanly
         // Nothing more may be written to the relay once it is ended (a write after end would reset the client
         // before the cut event), so the upstream is detached first.
@@ -284,8 +301,10 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
         abort.abort();
       }
     }, maxDurationMs);
-    const tooLong = () =>
-      reply.code(504).send(errorBody('upstream call exceeded the maximum duration', 'gateway_error', 'upstream_max_duration'));
+    const tooLong = () => {
+      request.reqlog.note({ errorCode: 'upstream_max_duration' });
+      return reply.code(504).send(errorBody('upstream call exceeded the maximum duration', 'gateway_error', 'upstream_max_duration'));
+    };
     const remainingMs = () => maxDurationMs - (performance.now() - dispatched);
 
     // The attempt loop. Over the chain, each model gets up to retry.maxAttempts attempts; an attempt is
@@ -350,6 +369,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
             });
             if (res.statusCode < 300) {
               seen.success = true;
+              request.reqlog.addUpstreamMs(performance.now() - attemptStarted);
               reply.log.info({ model, target: target.provider, outcome: res.statusCode, ms: ms(performance.now() - attemptStarted) }, 'upstream attempt');
               served = { model, target, forward, res };
               break models;
@@ -378,6 +398,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
             outcome = { kind: 'error', phase };
             lastFailure = { kind: 'error', model, err };
           }
+          request.reqlog.addUpstreamMs(performance.now() - attemptStarted);
           const signal = breakerSignal(outcome);
           if (signal === 'failure') seen.failure = true;
           else if (signal === 'answered') seen.answered = true;
@@ -446,6 +467,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
 
     const { res, target, forward } = served;
     state.model = served.model;
+    request.reqlog.note({ provider: target.provider, servedModel: served.model });
     const extraHeaders = passthroughHeaders(res.headers, request.rateLimit != null);
     const translated = target.adapter.translates ? target.adapter : undefined;
     const contentType = res.headers['content-type'];
@@ -472,6 +494,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
         'server-timing': `gw-pre;dur=${ms(dispatched - started)}`,
       });
       reply.raw.flushHeaders();
+      request.reqlog.firstByte();
       let observedUsage: Usage | undefined;
       // Reads the events as they pass to the client (and passes them on untouched) when the answer will be cached.
       const collector = request.cacheFill ? new StreamCollector(request.cacheFill.maxEntryBytes) : undefined;
@@ -543,7 +566,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
       if (abort.signal.aborted) return reply;
       // The provider answered 2xx and the body then broke: it did the work, so the estimate stays (as for a
       // stream that fails after bytes were sent).
-      return upstreamFailure(reply, err, null);
+      return upstreamFailure(reply, err, null, 'bad_response');
     }
     let type2 = type;
     if (translated) {
@@ -554,7 +577,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
         if (metered && answer.usage) settle.used(answer.usage, served.model);
       } catch (err) {
         // The provider answered 2xx and did the work, but its body is not one the adapter can read.
-        return upstreamFailure(reply, err, null);
+        return upstreamFailure(reply, err, null, 'bad_response');
       }
     }
     const received = performance.now();

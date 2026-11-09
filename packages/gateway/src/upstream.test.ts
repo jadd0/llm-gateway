@@ -3,7 +3,7 @@ import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it } from 'vitest';
 import { phaseOf } from './resilience/timeouts.ts';
 import { testConfig } from './test-env.ts';
-import { createUpstream } from './upstream.ts';
+import { createUpstream, describeProviders } from './upstream.ts';
 
 const servers: Server[] = [];
 afterEach(async () => {
@@ -70,5 +70,19 @@ describe('upstream pools', () => {
     const connect = await attempt(dead, { UPSTREAM_CONNECT_TIMEOUT_MS: SHORT, UPSTREAM_HEADERS_TIMEOUT_MS: LONG, UPSTREAM_IDLE_TIMEOUT_MS: LONG });
     expect(connect.phase).toBe('connect');
     expect(connect.ms).toBeLessThan(2000);
+  });
+});
+
+describe('describeProviders', () => {
+  it('names every provider with its base URL and whether it has what it needs to be called', () => {
+    const rows = describeProviders(
+      testConfig({ OPENAI_API_KEY: 'k', ANTHROPIC_API_KEY: '', GEMINI_API_KEY: '', OPENAI_BASE_URL: 'http://127.0.0.1:1/v1', MOCK_BASE_URL: 'http://127.0.0.1:2' }),
+    );
+    expect(rows.map((r) => [r.provider, r.configured])).toEqual([
+      ['openai', true], ['anthropic', false], ['gemini', false], ['mock-openai', true], ['mock-anthropic', true], ['mock-gemini', true],
+    ]);
+    expect(rows.find((r) => r.provider === 'openai')!.baseUrl).toBe('http://127.0.0.1:1/v1');
+    expect(rows.find((r) => r.provider === 'mock-openai')!.baseUrl).toBe('http://127.0.0.1:2');
+    expect(JSON.stringify(rows)).not.toContain('"k"'); // keys are never part of the line
   });
 });

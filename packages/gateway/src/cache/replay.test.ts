@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { openaiEvents } from '../providers/test-support.ts';
+import { openaiEvents } from '../../test/providers-support.ts';
 import { pieces, replayBody, replayStream, type CachedCompletion } from './replay.ts';
 
 const who = { id: 'chatcmpl-cache-fixed', created: 1_700_000_000 };

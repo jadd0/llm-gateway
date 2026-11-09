@@ -191,3 +191,16 @@ seen. Warm draws from 200 of 2 000 distinct prompts with a Zipf skew (s = 1.1), 
 non-streamed and streamed. Stampede sends 50 identical non-streamed requests at once and counts upstream calls. `summary.md` gives
 hit rate, p50 and p95 for hits and misses, and upstream calls. A short run on the build machine only proved the scripts work; it is
 not a result.
+
+## Request logging off the hot path (PR 10)
+
+Pending quiet run. `bash bench/quiet.sh bench/results/pr-10 && bash bench/run-logging.sh` writes `logging-inline-<n>.json`,
+`logging-stream-<n>.json`, `worker-stream-<n>.csv` and `summary.md` to `bench/results/pr-10/`; no figure is quoted here until that run
+is committed (R3).
+
+What the run measures: the same constant request rate (default 200 req/s, 60 s after a 10 s warm-up, cache off, budgets and rate limit
+on, mock provider with realistic latency) with `LOG_MODE=inline` (one awaited Postgres insert per request, on the request path) and
+`LOG_MODE=stream` (one `XADD`, the log worker writes batches), three repeats each. `summary.md` gives p50, p95 and p99 as median with
+range over the repeats, and for the worker the maximum stream lag, the maximum pending entries and rows written per second. A short run
+on the build machine only proved the scripts work; it is not a result.
+
