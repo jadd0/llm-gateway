@@ -17,7 +17,7 @@ migration: next free number at generate time. Residuals owned by this PR: none.
 | path | change |
 |---|---|
 | `packages/gateway/src/db/schema.ts` | `tenants.monthly_budget_micros`; new tables `tenant_spend`, `spend_ledger`, `budget_reservations`, `budget_epoch` |
-| `packages/gateway/drizzle/` | generated migration |
+| `packages/gateway/drizzle/0002_lean_wong.sql`, `packages/gateway/drizzle/meta/0002_snapshot.json`, `packages/gateway/drizzle/meta/_journal.json` | generated migration |
 | `packages/gateway/src/pricing/prices.ts` | **new**. Price table (micro-USD per 1M input / output tokens) and `costMicros(model, in, out)` |
 | `packages/gateway/src/pricing/prices.test.ts` | **new** |
 | `packages/gateway/src/budget/budget.lua` | **new**. `reserve`, `settle` and `init` scripts (see Invariants) |
@@ -47,6 +47,7 @@ migration: next free number at generate time. Residuals owned by this PR: none.
 | `BENCHMARKS.md` | "Budgets (PR 5)" section |
 | `docs/budgets/README.md` | **new**. Reserve-then-settle in plain English, the Lua annotated, failure modes, numbers, interview Qs |
 | `docs/budgets/budget-flow.html` | **new**. Archify diagram: reserve → call → settle, the Postgres fallback and the epoch |
+| `docs/gateway/chat-passthrough.html`, `docs/auth/api-key-check.html`, `docs/rate-limiter/token-bucket.html` | redrawn: the settle step, the cap in the key entry |
 | `docs/README.md`, `docs/architecture/*`, `docs/gateway/README.md`, `docs/rate-limiter/README.md` | budgets built; request path updated |
 | `docs/diagrams/flows.md` | add the flow lines below |
 
