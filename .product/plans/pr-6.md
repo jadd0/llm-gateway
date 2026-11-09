@@ -27,7 +27,9 @@ closed here.
 | `packages/gateway/src/providers/common.ts`, `packages/gateway/src/providers/test-support.ts` | **new**. Shared translation helpers (unsupported-parameter check, message flattening, OpenAI object builders, error shape); shared test helpers |
 | `packages/gateway/src/providers/sse.ts` | **new**. Incremental SSE parser: events split across chunks, multi-byte UTF-8 split across chunks |
 | `packages/gateway/src/providers/*.test.ts` | **new**. Beside each file above |
-| `packages/gateway/src/providers/fixtures/` | **new**. Recorded real responses (JSON and raw SSE) per provider, ids and headers stripped |
+| `packages/gateway/src/providers/fixtures/*` | **new**. Recorded real responses (JSON and raw SSE) per provider, ids and headers stripped |
+| `packages/gateway/src/app.ts` | passes the default output allowance to the chat route |
+| `docs/rate-limiter/token-bucket.html` | provider node sublabel updated (any format); restamps the diagram |
 | `packages/gateway/src/upstream.ts` | one undici Pool per provider origin; base URL path kept and joined (closes R1) |
 | `packages/gateway/src/routes/chat.ts` | route via router → adapter; translated streams piped through the adapter's transform, still unbuffered |
 | `packages/gateway/src/routes/chat.test.ts` | existing tests renamed to `mock-*` models and the fake upstream fitted to the new interface |
