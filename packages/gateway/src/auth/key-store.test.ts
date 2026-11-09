@@ -32,6 +32,7 @@ const caller = (
   rpmLimit: limits.rpm ?? null,
   tpmLimit: limits.tpm ?? null,
   monthlyBudgetMicros: limits.budget ?? null,
+  cacheShared: false,
 });
 
 const seed = async () => {
@@ -263,6 +264,20 @@ describe('key store', () => {
     expect(await store.setBudget('00000000-0000-4000-8000-000000000000', 1)).toEqual({ updated: false, cached: false });
   });
 
+  it('a cached entry from before the response cache (no sharing flag) is a miss that reads the real flag', async () => {
+    const s = await seed();
+    const key = `${config.redisKeyPrefix}apikey:${s.hash}`;
+    const store = storeFor(redis);
+    expect((await store.lookup(s.hash))!.cacheShared).toBe(false);
+    const { cacheShared: _dropped, ...old } = JSON.parse((await redis.get(key))!);
+    await redis.set(key, JSON.stringify(old), 'EX', 60);
+    expect(await store.setCacheShared(s.tenantId, true)).toEqual({ updated: true, cached: true });
+    await redis.set(key, JSON.stringify(old), 'EX', 60); // an old-format entry again
+    expect((await store.lookup(s.hash))!.cacheShared).toBe(true);
+    expect(await redis.get(key)).toContain('"cacheShared":true');
+    expect(await store.setCacheShared('00000000-0000-4000-8000-000000000000', true)).toEqual({ updated: false, cached: false });
+  });
+
   it('a tombstone written after a corrupt value was read survives the fill', async () => {
     const s = await seed();
     const key = `${config.redisKeyPrefix}apikey:${s.hash}`;
@@ -287,7 +302,7 @@ describe('key store', () => {
   it('one warn per outage start: a failed write, then cache hits, then a read outage', async () => {
     const warns: Array<{ op: string }> = [];
     const infos: object[] = [];
-    const tenant = JSON.stringify({ tenantId: 't', tenantName: 'n', keyId: 'k', rpmLimit: null, tpmLimit: 7, monthlyBudgetMicros: null });
+    const tenant = JSON.stringify({ tenantId: 't', tenantName: 'n', keyId: 'k', rpmLimit: null, tpmLimit: 7, monthlyBudgetMicros: null, cacheShared: false });
     let mode: 'miss' | 'hit' | 'down' = 'miss';
     const flaky = {
       status: 'ready',
@@ -303,7 +318,7 @@ describe('key store', () => {
     const hash = randomBytes(32).toString('hex');
     await store.lookup(hash); // miss: Postgres, then the fill fails
     mode = 'hit';
-    for (let i = 0; i < 5; i++) expect(await store.lookup(hash)).toEqual({ tenantId: 't', tenantName: 'n', keyId: 'k', rpmLimit: null, tpmLimit: 7, monthlyBudgetMicros: null });
+    for (let i = 0; i < 5; i++) expect(await store.lookup(hash)).toEqual({ tenantId: 't', tenantName: 'n', keyId: 'k', rpmLimit: null, tpmLimit: 7, monthlyBudgetMicros: null, cacheShared: false });
     expect(warns.map((w) => w.op)).toEqual(['set']);
     mode = 'down';
     await store.lookup(hash);

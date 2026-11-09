@@ -8,6 +8,8 @@ export const tenants = pgTable('tenants', {
   // Monthly spend cap in micro-USD (1 USD = 1,000,000). Null means the gateway-wide default
   // (BUDGET_DEFAULT_MONTHLY_USD).
   monthlyBudgetMicros: bigint('monthly_budget_micros', { mode: 'number' }),
+  // True when the tenant reads and writes the shared response-cache pool instead of its own (keys set-cache-sharing).
+  cacheShared: boolean('cache_shared').notNull().default(false),
 });
 
 export const apiKeys = pgTable(
@@ -60,6 +62,10 @@ export const spendLedger = pgTable('spend_ledger', {
   costMicros: bigint('cost_micros', { mode: 'number' }).notNull(),
   // True when no usage was seen and the reserved estimate was charged instead.
   estimated: boolean('estimated').notNull(),
+  // True for a response served from the cache: no provider work, cost_micros is 0.
+  cached: boolean('cached').notNull().default(false),
+  // For a cached row, what the same usage would have cost at the model that first served it.
+  savedMicros: bigint('saved_micros', { mode: 'number' }).notNull().default(0),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 

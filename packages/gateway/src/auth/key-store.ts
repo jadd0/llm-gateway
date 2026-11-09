@@ -15,6 +15,8 @@ export interface Tenant {
   tpmLimit: number | null;
   /** The tenant's monthly spend cap in micro-USD; null means the gateway-wide default. */
   monthlyBudgetMicros: number | null;
+  /** True when the tenant uses the shared response-cache pool instead of its own. */
+  cacheShared: boolean;
 }
 
 /** A limit that is left out is left as it is; null sets the key back to the gateway default. */
@@ -48,6 +50,11 @@ export interface KeyStore {
    * the old cap until its TTL runs out.
    */
   setBudget(tenantId: string, micros: number | null): Promise<{ updated: boolean; cached: boolean }>;
+  /**
+   * Writes the tenant's cache-sharing flag in Postgres, then overwrites the cached entry of each of its
+   * active keys. `updated` and `cached` mean what they do for `setBudget`.
+   */
+  setCacheShared(tenantId: string, shared: boolean): Promise<{ updated: boolean; cached: boolean }>;
 }
 
 export interface KeyStoreOptions {
@@ -103,6 +110,7 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
         rpmLimit: apiKeys.rpmLimit,
         tpmLimit: apiKeys.tpmLimit,
         monthlyBudgetMicros: tenants.monthlyBudgetMicros,
+        cacheShared: tenants.cacheShared,
       })
       .from(apiKeys)
       .innerJoin(tenants, eq(tenants.id, apiKeys.tenantId))
@@ -122,12 +130,41 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
       const tpmLimit = limit(v.tpmLimit);
       // An entry from before budgets existed has no such field: a miss, so the real cap is read.
       const monthlyBudgetMicros = limit(v.monthlyBudgetMicros);
-      if (rpmLimit === undefined || tpmLimit === undefined || monthlyBudgetMicros === undefined) return undefined;
-      return { tenantId: v.tenantId, tenantName: v.tenantName, keyId: v.keyId, rpmLimit, tpmLimit, monthlyBudgetMicros };
+      // Likewise an entry from before the response cache has no sharing flag: a miss, so the real one is read.
+      if (rpmLimit === undefined || tpmLimit === undefined || monthlyBudgetMicros === undefined || typeof v.cacheShared !== 'boolean') return undefined;
+      return { tenantId: v.tenantId, tenantName: v.tenantName, keyId: v.keyId, rpmLimit, tpmLimit, monthlyBudgetMicros, cacheShared: v.cacheShared };
     } catch {
       return undefined;
     }
   };
+
+  // A tenant-level setting is on the tenant but the cache is per key: rewrite every active key's entry from the
+  // row. False when Redis could not be told for any of them (or there is no Redis), in which case a cached copy
+  // keeps the old value until its TTL runs out.
+  async function refreshTenantKeys(tenantId: string): Promise<boolean> {
+    if (redis === null) return false;
+    const hashes = await db
+      .select({ keyHash: apiKeys.keyHash })
+      .from(apiKeys)
+      .where(and(eq(apiKeys.tenantId, tenantId), isNull(apiKeys.revokedAt)));
+    let cached = true;
+    if (hashes.length > 0 && !(await waitReady(redis, 2000))) {
+      redisFailed('set', new Error('redis not ready'));
+      return false;
+    }
+    for (const { keyHash } of hashes) {
+      const tenant = await fromPostgres(keyHash);
+      if (tenant === null) continue; // revoked since the list was read
+      try {
+        await redis.eval(SET_UNLESS_REVOKED, 1, redisKey(keyHash), REVOKED, JSON.stringify(tenant), opts.cacheTtlS);
+        redisOk('set');
+      } catch (err) {
+        redisFailed('set', err);
+        cached = false;
+      }
+    }
+    return cached;
+  }
 
   return {
     async lookup(hash) {
@@ -234,29 +271,17 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
         .where(eq(tenants.id, tenantId))
         .returning({ id: tenants.id });
       if (updated.length === 0) return { updated: false, cached: false };
-      if (redis === null) return { updated: true, cached: false };
-      // The cap is on the tenant but the cache is per key: rewrite every active key's entry from the row.
-      const hashes = await db
-        .select({ keyHash: apiKeys.keyHash })
-        .from(apiKeys)
-        .where(and(eq(apiKeys.tenantId, tenantId), isNull(apiKeys.revokedAt)));
-      let cached = true;
-      if (hashes.length > 0 && !(await waitReady(redis, 2000))) {
-        redisFailed('set', new Error('redis not ready'));
-        return { updated: true, cached: false };
-      }
-      for (const { keyHash } of hashes) {
-        const tenant = await fromPostgres(keyHash);
-        if (tenant === null) continue; // revoked since the list was read
-        try {
-          await redis.eval(SET_UNLESS_REVOKED, 1, redisKey(keyHash), REVOKED, JSON.stringify(tenant), opts.cacheTtlS);
-          redisOk('set');
-        } catch (err) {
-          redisFailed('set', err);
-          cached = false;
-        }
-      }
-      return { updated: true, cached };
+      return { updated: true, cached: await refreshTenantKeys(tenantId) };
+    },
+
+    async setCacheShared(tenantId, shared) {
+      const updated = await db
+        .update(tenants)
+        .set({ cacheShared: shared })
+        .where(eq(tenants.id, tenantId))
+        .returning({ id: tenants.id });
+      if (updated.length === 0) return { updated: false, cached: false };
+      return { updated: true, cached: await refreshTenantKeys(tenantId) };
     },
   };
 }
