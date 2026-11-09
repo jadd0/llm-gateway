@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createGeminiAdapter } from './gemini.ts';
-import { chatBody, clock, fixture, input, openaiEvents, run } from './test-support.ts';
+import { chatBody, clock, fixture, input, openaiEvents, run } from '../../test/providers-support.ts';
 import type { Usage } from '../usage/sse-usage.ts';
 
 const adapter = createGeminiAdapter({ clock });

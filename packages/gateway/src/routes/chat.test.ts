@@ -10,6 +10,8 @@ import { createOpenAiAdapter } from '../providers/openai.ts';
 import type { Upstream } from '../upstream.ts';
 import { chatRoutes } from './chat.ts';
 import { Redis } from 'ioredis';
+import { requestLogCollector } from '../requestlog/collector.ts';
+import { nullSink } from '../requestlog/sink.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
 
@@ -597,6 +599,7 @@ describe('mid-stream failure logging', () => {
       close: async () => {},
     } as unknown as Upstream;
     const app3 = Fastify({ logger: { level: 'warn', stream: logStream } });
+    app3.register(requestLogCollector, { sink: nullSink, mode: 'stream' });
     const allow = async () => ({ allowed: true as const, permit: { target: 'openai', probe: false, source: 'local' as const } });
     app3.register(chatRoutes, {
       upstream,

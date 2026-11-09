@@ -27,6 +27,7 @@ export interface UsageSettler {
 export function usageSettler(request: FastifyRequest): UsageSettler {
   return {
     used(usage, model) {
+      request.reqlog.note({ promptTokens: usage.promptTokens, completionTokens: Math.max(usage.completionTokens, usage.totalTokens - usage.promptTokens) });
       void request.rateLimit?.settle(usage.totalTokens);
       void request.budget?.settle({ kind: 'used', usage, ...(model !== undefined ? { model } : {}) });
     },

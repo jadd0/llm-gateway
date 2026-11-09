@@ -111,3 +111,19 @@ export function createUpstream(config: TargetConfig): Upstream {
     },
   };
 }
+
+/**
+ * Every provider the gateway can call, with its base URL and whether it can be used (a real provider needs its key;
+ * the mock needs none). The start-up log prints this so an operator sees what the process will actually talk to.
+ */
+export function describeProviders(config: TargetConfig): Array<{ provider: ProviderId; baseUrl: string; configured: boolean }> {
+  const row = (provider: ProviderId, baseUrl: string, configured: boolean) => ({ provider, baseUrl, configured });
+  return [
+    row('openai', config.upstreamBaseUrl, config.upstreamApiKey !== undefined),
+    row('anthropic', config.anthropicBaseUrl, config.anthropicApiKey !== undefined),
+    row('gemini', config.geminiBaseUrl, config.geminiApiKey !== undefined),
+    row('mock-openai', config.mockBaseUrl, true),
+    row('mock-anthropic', config.mockAnthropicBaseUrl, true),
+    row('mock-gemini', config.mockGeminiBaseUrl, true),
+  ];
+}

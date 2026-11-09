@@ -4,6 +4,7 @@ import { pipeline } from 'node:stream/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { errorBody } from '../errors.ts';
 import { completionFromBody, StreamCollector } from '../cache/collect.ts';
+import { classifyClose } from '../requestlog/collector.ts';
 import { chatRequest } from '../request-body.ts';
 import { usageSettler, type UsageSettler } from '../usage/settle.ts';
 import { SseUsageTap, usageFromBody, type Usage } from '../usage/sse-usage.ts';
@@ -37,6 +38,7 @@ function upstreamFailure(reply: FastifyReply, err: unknown, refund: UsageSettler
   // front goes back. A 2xx whose body broke passes null, because the provider did generate it.
   refund?.refund();
   const code = (err as { code?: string }).code ?? '';
+  reply.request.reqlog.note({ errorCode: isTimeout(err) ? 'upstream_timeout' : 'upstream_unreachable' });
   // Log the error class and code only; messages can carry request data.
   reply.log.warn({ errClass: (err as Error).name, code }, 'upstream request failed');
   if (isTimeout(err)) {
@@ -139,6 +141,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
         );
     }
     const parsed = checked.value;
+    request.reqlog.note({ model: parsed.model, stream: parsed.stream === true });
     // Usage is needed only when something was charged up front (either plugin may be off).
     // The cache needs the answer's usage too, to price what a later hit saves.
     const metered = (request.rateLimit ?? null) !== null || (request.budget ?? null) !== null || request.cacheFill != null;
@@ -178,10 +181,12 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     let upstreamFailed = false;
     let upstreamDone = false;
     let upstreamStream: Readable | undefined;
+    // The request log's collector decides this from the same facts (classifyClose), so the two cannot disagree.
+    const upstreamState = () => ({ failed: upstreamFailed, alive: upstreamStream === undefined || upstreamDone || !upstreamStream.destroyed });
+    request.reqlog.upstreamState = upstreamState;
     reply.raw.on('close', () => {
       if (reply.raw.writableFinished) return;
-      clientGone =
-        !upstreamFailed && (upstreamStream === undefined || upstreamDone || !upstreamStream.destroyed);
+      clientGone = classifyClose({ finished: false, upstream: upstreamState() }) === 'client';
       abort.abort();
     });
 
@@ -281,6 +286,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
             });
             if (res.statusCode < 300) {
               seen.success = true;
+              request.reqlog.addUpstreamMs(performance.now() - attemptStarted);
               reply.log.info({ model, target: target.provider, outcome: res.statusCode, ms: ms(performance.now() - attemptStarted) }, 'upstream attempt');
               served = { model, target, forward, res };
               break models;
@@ -309,6 +315,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
             outcome = { kind: 'error', phase };
             lastFailure = { kind: 'error', model, err };
           }
+          request.reqlog.addUpstreamMs(performance.now() - attemptStarted);
           const signal = breakerSignal(outcome);
           if (signal === 'failure') seen.failure = true;
           else if (signal === 'answered') seen.answered = true;
@@ -377,6 +384,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
 
     const { res, target, forward } = served;
     state.model = served.model;
+    request.reqlog.note({ provider: target.provider, servedModel: served.model });
     const extraHeaders = passthroughHeaders(res.headers, request.rateLimit != null);
     const translated = target.adapter.translates ? target.adapter : undefined;
     const contentType = res.headers['content-type'];
@@ -403,6 +411,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
         'server-timing': `gw-pre;dur=${ms(dispatched - started)}`,
       });
       reply.raw.flushHeaders();
+      request.reqlog.firstByte();
       let observedUsage: Usage | undefined;
       // Reads the events as they pass to the client (and passes them on untouched) when the answer will be cached.
       const collector = request.cacheFill ? new StreamCollector(request.cacheFill.maxEntryBytes) : undefined;
