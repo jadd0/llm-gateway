@@ -36,7 +36,7 @@ CREATE TABLE "rollup_state" (
 	CONSTRAINT "rollup_state_single_row" CHECK ("rollup_state"."id" = 1)
 );
 --> statement-breakpoint
-CREATE INDEX "request_log_errors_recent" ON "request_log" USING btree ("created_at" DESC NULLS LAST) WHERE "request_log"."status" >= 500;
+CREATE INDEX "request_log_errors_recent" ON "request_log" USING btree ("created_at" DESC NULLS LAST) WHERE "request_log"."status" >= 500 OR "request_log"."error_code" = 'upstream_stream_broken';
 --> statement-breakpoint
 -- Hand-written (drizzle-kit does not emit functions, roles or grants).
 -- Element-wise sum of two histograms; the shorter one counts as zeros.

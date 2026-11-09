@@ -1,5 +1,5 @@
 {
-  "id": "224385be-3ce9-4b4e-a1f0-e1192730558f",
+  "id": "7713e883-1872-4241-b03e-b7c1136647a8",
   "prevId": "0af29636-d6e6-4500-8d42-d084896f7616",
   "version": "7",
   "dialect": "postgresql",
@@ -419,7 +419,7 @@
             }
           ],
           "isUnique": false,
-          "where": "\"request_log\".\"status\" >= 500",
+          "where": "\"request_log\".\"status\" >= 500 OR \"request_log\".\"error_code\" = 'upstream_stream_broken'",
           "concurrently": false,
           "method": "btree",
           "with": {}

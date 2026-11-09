@@ -7,6 +7,7 @@ import { createDb, type Db } from '../../gateway/src/db/client.ts';
 import { applyBatch } from './batch.ts';
 import { createGroup, entryKey, type Raw } from './claim.ts';
 import { reconcileHolds } from './reconcile.ts';
+import { maintainRollups } from './rollup.ts';
 
 export interface Logger {
   info(obj: object, msg: string): void;
@@ -30,6 +31,12 @@ export interface WorkerOptions {
   sweepGraceS?: number;
   /** A Redis hold with no Postgres row is dropped once this far past its expiry (seconds). */
   orphanGraceS?: number;
+  /** An hour of rollups is folded into the hour table once it ended this long ago (minutes). Set both to fold and trim on the sweep timer. */
+  rollupFoldAfterMin?: number;
+  /** Folded minute rollups are deleted after this many hours. */
+  rollupMinuteRetentionH?: number;
+  /** The clock the rollup fold and retention read. Tests only. */
+  now?: () => Date;
   /** The request-log stream's length cap, for the warning at 80% of it. */
   streamMax?: number;
   /** How often the streams are trimmed and measured (ms). */
@@ -173,6 +180,15 @@ export function createWorker(o: WorkerOptions): Worker {
       } catch (err) {
         o.log.warn(errInfo(err), 'redis hold reconcile failed, retried next interval');
       }
+      // Off unless the options are given, so a worker that is not told its rollup retention never trims anything.
+      if (o.rollupFoldAfterMin !== undefined && o.rollupMinuteRetentionH !== undefined) {
+        try {
+          const m = await maintainRollups(o.db, (o.now ?? (() => new Date()))(), { foldAfterMin: o.rollupFoldAfterMin, minuteRetentionH: o.rollupMinuteRetentionH });
+          if (m.deleted > 0) o.log.info({ deleted: m.deleted }, 'folded minute rollups deleted');
+        } catch (err) {
+          o.log.warn(errInfo(err), 'rollup fold failed, retried next interval');
+        }
+      }
     }
     return result;
   }
@@ -217,7 +233,7 @@ if (import.meta.main) {
     db: handle.db, redis, keyPrefix: config.redisKeyPrefix, group: config.logGroup, consumer: config.workerConsumer,
     batchSize: config.logBatchSize, batchWaitMs: config.logBatchWaitMs, claimIdleMs: config.logClaimIdleMs,
     maxDeliveries: config.logMaxDeliveries, sweepS: config.logSweepS, sweepGraceS: config.logSweepGraceS,
-    orphanGraceS: config.budgetOrphanGraceS, streamMax: config.logStreamMax, log,
+    orphanGraceS: config.budgetOrphanGraceS, rollupFoldAfterMin: config.rollupFoldAfterMin, rollupMinuteRetentionH: config.rollupMinuteRetentionH, streamMax: config.logStreamMax, log,
   });
   let closing = false;
   const shutdown = (signal: string) => {

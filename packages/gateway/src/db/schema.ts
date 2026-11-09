@@ -145,15 +145,20 @@ export const requestLog = pgTable(
     index('request_log_created_brin').using('brin', t.createdAt),
     index('request_log_tenant_time').on(t.tenantId, t.createdAt),
     // The dashboard's "last errors" table reads the newest failures; this partial index keeps that read flat
-    // however large the log grows. Its predicate is ERROR_STATUS_MIN, the same line the rollups count errors by.
+    // however large the log grows. Its predicate is the one the rollups count errors by (see isError).
     index('request_log_errors_recent')
       .on(t.createdAt.desc())
-      .where(sql`${t.status} >= 500`),
+      .where(sql`${t.status} >= 500 OR ${t.errorCode} = 'upstream_stream_broken'`),
   ],
 );
 
-/** A request is an error from this status up (the gateway's 5xx, 504 deadline and 502 upstream failures). */
+/**
+ * What counts as an error everywhere (rollups, the last-errors table, the partial index above): a 5xx, or a stream
+ * that broke after a 200 was already sent. A client that left (499, client_closed) and refusals (4xx) are not errors.
+ */
 export const ERROR_STATUS_MIN = 500;
+export const STREAM_BROKEN_CODE = 'upstream_stream_broken';
+export const isError = (status: number, errorCode: string | null): boolean => status >= ERROR_STATUS_MIN || errorCode === STREAM_BROKEN_CODE;
 
 /** The tenant of a request that never authenticated, so rollup keys need no null. */
 export const NO_TENANT = '00000000-0000-0000-0000-000000000000';
