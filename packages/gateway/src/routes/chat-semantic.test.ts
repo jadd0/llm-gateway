@@ -37,7 +37,8 @@ beforeAll(async () => {
     req.on('end', () => {
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { model: string; stream?: boolean };
       calls += 1;
-      const text = `answer-${calls}`;
+      // An answer too big for the cache to keep: its leader fills nothing.
+      const text = JSON.stringify(body).includes('bigout') ? 'x'.repeat(300_000) : `answer-${calls}`;
       const usage = { prompt_tokens: 1, completion_tokens: 10, total_tokens: 11 };
       if (body.stream) {
         res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -441,5 +442,24 @@ describe('semantic cache on POST /v1/chat/completions', () => {
     expect(calls - before).toBe(2);
     await handle.db.delete(semanticCache).where(eq(semanticCache.scope, 'shared'));
     for (const k of await redis.keys(`${prefix}cache:${KEY_VERSION}:shared:*`)) await redis.del(k);
+  });
+
+  it('followers of a leader whose semantic lookup missed do not ask again', async () => {
+    const t = await tenant();
+    const q = `bigout ${uniq()}`;
+    table[q] = angle(turn * 37 + 90);
+    stub.hold();
+    const before = calls;
+    const leader = post(t.key, req(q));
+    await new Promise((r) => setTimeout(r, 150));
+    const followers = [post(t.key, req(q)), post(t.key, req(q)), post(t.key, req(q))];
+    await new Promise((r) => setTimeout(r, 150));
+    stub.release();
+    const results = await Promise.all([leader, ...followers]);
+    expect(results.map((r) => r.status)).toEqual([200, 200, 200, 200]);
+    // Nothing could be stored, so every request went upstream; but only the leader looked for a similar prompt.
+    expect(results.map((r) => r.headers.get('x-gateway-cache'))).toEqual(['miss', 'miss', 'miss', 'miss']);
+    expect(calls - before).toBe(4);
+    expect(stub.calls.filter((c) => c.text === q && !c.patient)).toHaveLength(1);
   });
 });
