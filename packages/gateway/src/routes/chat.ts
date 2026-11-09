@@ -54,8 +54,9 @@ function upstreamFailure(reply: FastifyReply, err: unknown, refund: UsageSettler
 // Sits last in a streamed answer's pipeline. When the call's total deadline passes it drops the rest of the
 // answer and ends the stream, with one OpenAI-shaped error event first if the answer is an event stream
 // (any other kind of body is ended without adding anything to it).
-class DeadlineGuard extends Transform {
+export class DeadlineGuard extends Transform {
   #cut = false;
+  #ended = false;
   readonly #appendsEvent: boolean;
   constructor(appendsEvent: boolean) {
     super();
@@ -65,16 +66,22 @@ class DeadlineGuard extends Transform {
     if (this.#cut) done();
     else done(null, chunk);
   }
-  cutWith(event: string) {
-    if (this.#cut) return;
+  override _flush(done: () => void) {
+    this.#ended = true;
+    done();
+  }
+  /** Cuts the answer. False when there was nothing to cut: it was cut already, or it had all arrived. */
+  cutWith(event: string): boolean {
+    if (this.#cut || this.#ended) return false;
     this.#cut = true;
     // A blank line first closes any event the cut interrupted.
     if (this.#appendsEvent) this.push(`\n\n${event}`);
     this.push(null);
+    return true;
   }
 }
 
-const maxDurationEvent = `data: ${JSON.stringify({
+export const maxDurationEvent = `data: ${JSON.stringify({
   error: { message: 'upstream call exceeded the maximum duration', type: 'gateway_error', code: 'upstream_max_duration' },
 })}\n\n`;
 
@@ -276,14 +283,13 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     let relay: PassThrough | undefined;
     state.deadline = setTimeout(() => {
       deadlineHit = true;
-      // The gateway ended the call, whether the answer is cut mid-stream (which finishes cleanly, with an error
-      // event) or refused with a 504: the request log says so rather than leaving a clean-looking row.
-      request.reqlog.note({ errorCode: 'upstream_max_duration' });
+      // The gateway ending the call is noted where it does: a stream cut mid-way (which finishes cleanly, with an
+      // error event) below, a 504 in tooLong(). A timer that fires after the whole answer arrived changes nothing.
       // The provider may have worked and no usage will come: the estimate is charged now, not when the
       // (possibly stuck) response finishes.
       if (billing) settle.keep(state.model);
       if (guard) {
-        guard.cutWith(maxDurationEvent);
+        if (guard.cutWith(maxDurationEvent)) request.reqlog.note({ errorCode: 'upstream_max_duration' });
         abort.abort(); // the upstream goes at once; the relay below lets the response still finish cleanly
         // Nothing more may be written to the relay once it is ended (a write after end would reset the client
         // before the cut event), so the upstream is detached first.
@@ -295,8 +301,10 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
         abort.abort();
       }
     }, maxDurationMs);
-    const tooLong = () =>
-      reply.code(504).send(errorBody('upstream call exceeded the maximum duration', 'gateway_error', 'upstream_max_duration'));
+    const tooLong = () => {
+      request.reqlog.note({ errorCode: 'upstream_max_duration' });
+      return reply.code(504).send(errorBody('upstream call exceeded the maximum duration', 'gateway_error', 'upstream_max_duration'));
+    };
     const remainingMs = () => maxDurationMs - (performance.now() - dispatched);
 
     // The attempt loop. Over the chain, each model gets up to retry.maxAttempts attempts; an attempt is
