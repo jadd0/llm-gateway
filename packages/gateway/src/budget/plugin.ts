@@ -1,6 +1,6 @@
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { errorBody } from '../errors.ts';
-import { costMicros, formatUsd, priceFor, type Price } from '../pricing/prices.ts';
+import { costMicros, defaultMaxTokensFor, formatUsd, priceFor, type Price } from '../pricing/prices.ts';
 import { chatRequest } from '../request-body.ts';
 import { estimateWorstCase } from '../usage/estimate.ts';
 import type { Usage } from '../usage/sse-usage.ts';
@@ -81,10 +81,16 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
         .send(errorBody(`Model "${model}" has no price, so a spend cap cannot be applied to it.`, 'invalid_request_error', 'model_not_priced'));
     }
 
-    const { prompt, output } = estimateWorstCase(body.value, opts.defaultMaxTokens);
-    // A fallback may land the request on a dearer model, so the hold is the worst case over the chain.
-    const chainPrices = (opts.chainFor?.(model) ?? [model]).map((m) => priceFor(m)).filter((p): p is Price => p !== undefined);
-    const estimate = Math.max(costMicros(price, prompt, output), ...chainPrices.map((p) => costMicros(p, prompt, output)));
+    // The output assumed for a caller who named no max_tokens is the one the adapter will send to that model.
+    const outputFor = (m: string) => estimateWorstCase(body.value, defaultMaxTokensFor(m, opts.defaultMaxTokens)).output;
+    const { prompt, output } = estimateWorstCase(body.value, defaultMaxTokensFor(model, opts.defaultMaxTokens));
+    // A fallback may land the request on a dearer model, so the hold is the worst case over the chain, each
+    // model at its own output allowance and its own tier for this prompt.
+    const chainCosts = (opts.chainFor?.(model) ?? [model]).flatMap((m) => {
+      const p = priceFor(m);
+      return p === undefined ? [] : [costMicros(p, prompt, outputFor(m))];
+    });
+    const estimate = Math.max(costMicros(price, prompt, output), ...chainCosts);
     const cap = request.tenant.monthlyBudgetMicros ?? opts.defaultCapMicros;
     const result = await budget.reserve({
       tenantId: request.tenant.tenantId, model, estimate, cap, promptTokens: prompt, completionTokens: output,

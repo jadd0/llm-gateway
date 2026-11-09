@@ -3,6 +3,7 @@ import { PassThrough, Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { errorBody } from '../errors.ts';
+import { defaultMaxTokensFor } from '../pricing/prices.ts';
 import { chatRequest } from '../request-body.ts';
 import { usageSettler, type UsageSettler } from '../usage/settle.ts';
 import { SseUsageTap, usageFromBody } from '../usage/sse-usage.ts';
@@ -156,7 +157,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     const prepare = (model: string, target: Target): { ok: true; forward: UpstreamRequest } | { ok: false; param: string; message: string } => {
       const body = model === parsed.model ? parsed : { ...parsed, model };
       const raw = model === parsed.model ? rawBody : Buffer.from(JSON.stringify(body));
-      const built = target.adapter.buildRequest({ body, raw, metered, defaultMaxTokens, apiKey: target.apiKey });
+      const built = target.adapter.buildRequest({ body, raw, metered, defaultMaxTokens: defaultMaxTokensFor(model, defaultMaxTokens), apiKey: target.apiKey });
       return built.ok ? { ok: true, forward: built.request } : built;
     };
     // The model asked for is checked before anything is sent: a request it cannot take is the client's to fix.

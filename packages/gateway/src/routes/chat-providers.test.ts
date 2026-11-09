@@ -6,6 +6,7 @@ import { Redis } from 'ioredis';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createMockServer, type Settings } from '../../../mock-provider/src/server.ts';
 import { buildApp } from '../app.ts';
+import { costMicros, defaultMaxTokensFor, formatUsd, priceFor } from '../pricing/prices.ts';
 import { estimateWorstCase } from '../usage/estimate.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
@@ -459,5 +460,37 @@ describe('translated streams and errors', { timeout: 60_000 }, () => {
     const sent = seen[0]!.body.generationConfig.maxOutputTokens;
     expect(sent).toBe(estimateWorstCase({ model: 'gemini-3.1-flash-lite', ...body }, base.rateLimitDefaultMaxTokens).output);
     expect(sent).toBe(base.rateLimitDefaultMaxTokens);
+  });
+
+  it('default cap per model is sent and equals the hold\'s output estimate', async () => {
+    const body = { messages: [{ role: 'user', content: 'hi' }] };
+    const sentCap = (b: any) => b.max_tokens ?? b.generationConfig?.maxOutputTokens;
+    for (const model of ['claude-fable-5-1', 'claude-haiku-5-5', 'gemini-3.1-pro-preview']) {
+      seen.length = 0;
+      const s = await fresh();
+      const res = await fetch(`${urls.viaStub}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
+        body: JSON.stringify({ model, ...body }),
+      });
+      expect(res.status, model).toBe(200);
+      expect(seen, model).toHaveLength(1);
+      const sent = sentCap(seen[0]!.body);
+      const { prompt, output } = estimateWorstCase({ model, ...body }, defaultMaxTokensFor(model, base.rateLimitDefaultMaxTokens));
+      expect(sent, model).toBe(output);
+      expect(sent, model).toBe(4096);
+      // The hold is the price of exactly that cap: the balance header shows the cap less the hold.
+      const hold = costMicros(priceFor(model)!, prompt, sent);
+      expect(res.headers.get('x-budget-remaining-usd'), model).toBe(formatUsd(base.budgetDefaultMonthlyMicros - hold));
+    }
+    // Control: a model with no per-model default keeps the gateway-wide one.
+    seen.length = 0;
+    const s = await fresh();
+    await fetch(`${urls.viaStub}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
+      body: JSON.stringify({ model: 'gemini-3.1-flash-lite', ...body }),
+    });
+    expect(sentCap(seen[0]!.body)).toBe(base.rateLimitDefaultMaxTokens);
   });
 });
