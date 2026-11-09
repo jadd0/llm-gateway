@@ -5,7 +5,8 @@
 // Three request formats, each at the path the real provider uses: OpenAI /v1/chat/completions,
 // Anthropic /v1/messages, Gemini /v1beta/models/<model>:generateContent and :streamGenerateContent.
 //   GET  /__control          -> current settings
-//   POST /__control {...}    -> merge new settings (e.g. {"outage":"error"})
+//   POST /__control {...}    -> merge new settings (e.g. {"outage":"error"}). Injected errors can be mixed with
+//                               successes: {"fail_rate":0.3,"status":503} answers 30% of requests with a 503.
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
@@ -16,7 +17,8 @@ export interface Settings {
   latencyMs: number; // time to first byte of the completion
   tokenDelayMs: number; // gap between streamed tokens
   completionTokens: number;
-  errorRate: number; // 0..1, fraction of requests answered with a 500
+  errorRate: number; // 0..1, fraction of requests answered with an error (control key: fail_rate)
+  errorStatus?: number; // status of an injected error, default 500 (control key: status)
   outage: Outage;
 }
 
@@ -78,11 +80,11 @@ function promptTokens(body: ChatBody): number {
   return Math.max(1, Math.ceil(chars / 4));
 }
 
-const failureBody = (format: Format) =>
+const failureBody = (format: Format, status: number) =>
   format === 'anthropic'
     ? { type: 'error', error: { type: 'api_error', message: 'mock provider failure' } }
     : format === 'gemini'
-      ? { error: { code: 500, message: 'mock provider failure', status: 'INTERNAL' } }
+      ? { error: { code: status, message: 'mock provider failure', status: 'INTERNAL' } }
       : { error: { message: 'mock provider failure', type: 'server_error' } };
 
 interface Call {
@@ -231,7 +233,8 @@ function handleChat(format: Format) {
       return;
     }
     if (settings.outage === 'error' || Math.random() < settings.errorRate) {
-      sendJson(res, 500, failureBody(format));
+      const status = settings.errorStatus ?? 500;
+      sendJson(res, status, failureBody(format, status));
       return;
     }
 
@@ -253,8 +256,10 @@ async function handleControl(
   res: ServerResponse,
 ): Promise<void> {
   if (req.method === 'POST') {
-    const patch = (await readJson(req)) as Partial<Settings>;
+    const { fail_rate: failRate, status, ...patch } = (await readJson(req)) as Partial<Settings> & { fail_rate?: number; status?: number };
     Object.assign(settings, patch);
+    if (failRate !== undefined) settings.errorRate = failRate;
+    if (status !== undefined) settings.errorStatus = status;
   }
   sendJson(res, 200, settings);
 }

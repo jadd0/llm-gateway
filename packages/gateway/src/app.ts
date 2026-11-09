@@ -10,6 +10,8 @@ import { createLimiter } from './ratelimit/limiter.ts';
 import { rateLimit } from './ratelimit/plugin.ts';
 import { chatRoutes } from './routes/chat.ts';
 import { createRedis } from './redis.ts';
+import { createBreaker } from './resilience/breaker.ts';
+import { chainFor } from './resilience/fallback.ts';
 import { createUpstream } from './upstream.ts';
 
 export function buildApp(
@@ -22,6 +24,8 @@ export function buildApp(
     budgetClock?: () => number;
     /** Replaces the budget's Postgres ledger. Tests only. */
     budgetPgLedger?: PgLedger;
+    /** Pins the circuit breaker's clock (ms). Tests only: production reads Redis TIME. */
+    breakerClock?: () => number;
     /** How long a client of a deadline-cut stream gets to take the last bytes. Tests only. */
     cutDrainMs?: number;
   } = {},
@@ -104,10 +108,37 @@ export function buildApp(
       defaultCapMicros: config.budgetDefaultMonthlyMicros,
       defaultMaxTokens: config.rateLimitDefaultMaxTokens,
       isRoutable: (model) => upstream.resolve(model) !== undefined,
+      chainFor: (model) => chainFor(config.modelFallbacks, model),
     });
   }
+  // Shared in Redis when there is one, so every gateway process sees the same open or closed provider; each
+  // process keeps its own in-memory breaker for as long as Redis cannot answer.
+  const breaker = createBreaker({
+    redis,
+    keyPrefix: config.redisKeyPrefix,
+    settings: {
+      windowMs: config.breakerWindowMs,
+      minFailures: config.breakerMinFailures,
+      failureRatio: config.breakerFailureRatio,
+      openMs: config.breakerOpenMs,
+    },
+    redisTimeoutMs: config.breakerRedisTimeoutMs,
+    // A probe that never reports back frees the breaker once the longest attempt it could be making has lapsed.
+    probeTtlMs: config.upstreamConnectTimeoutMs + config.upstreamHeadersTimeoutMs,
+    log: app.log,
+    ...(extra.breakerClock ? { clock: extra.breakerClock } : {}),
+  });
   app.register(chatRoutes, {
     upstream,
+    breaker,
+    chains: config.modelFallbacks,
+    retry: {
+      maxAttempts: config.retryMaxAttemptsPerModel,
+      baseMs: config.retryBaseMs,
+      capMs: config.retryCapMs,
+      retryAfterMaxMs: config.retryAfterMaxMs,
+      minRemainingMs: config.retryMinRemainingMs,
+    },
     maxDurationMs: config.upstreamMaxDurationMs,
     defaultMaxTokens: config.rateLimitDefaultMaxTokens,
     ...(extra.cutDrainMs ? { cutDrainMs: extra.cutDrainMs } : {}),
