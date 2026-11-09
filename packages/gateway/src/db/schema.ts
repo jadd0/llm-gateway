@@ -144,5 +144,50 @@ export const requestLog = pgTable(
     // Time-ordered appends: a block-range index stays tiny and answers time-window scans.
     index('request_log_created_brin').using('brin', t.createdAt),
     index('request_log_tenant_time').on(t.tenantId, t.createdAt),
+    // The dashboard's "last errors" table reads the newest failures; this partial index keeps that read flat
+    // however large the log grows. Its predicate is ERROR_STATUS_MIN, the same line the rollups count errors by.
+    index('request_log_errors_recent')
+      .on(t.createdAt.desc())
+      .where(sql`${t.status} >= 500`),
   ],
+);
+
+/** A request is an error from this status up (the gateway's 5xx, 504 deadline and 502 upstream failures). */
+export const ERROR_STATUS_MIN = 500;
+
+/** The tenant of a request that never authenticated, so rollup keys need no null. */
+export const NO_TENANT = '00000000-0000-0000-0000-000000000000';
+
+// Pre-aggregated request-log counts per (time bucket, tenant, model), written by the log worker in the same
+// transaction as the log rows they summarise. The dashboard reads only these. `rollup_minute` holds recent
+// minutes, `rollup_hour` all history. Latency is a histogram (counts per fixed log-scale bucket), never a
+// percentile, so any range can be merged exactly.
+const rollupColumns = () => ({
+  bucket: timestamp('bucket', { withTimezone: true }).notNull(),
+  tenantId: uuid('tenant_id').notNull(),
+  model: text('model').notNull().default(''),
+  requests: integer('requests').notNull(),
+  errors: integer('errors').notNull(),
+  cacheHits: integer('cache_hits').notNull(),
+  semanticHits: integer('semantic_hits').notNull(),
+  costMicros: bigint('cost_micros', { mode: 'number' }).notNull(),
+  savedMicros: bigint('saved_micros', { mode: 'number' }).notNull(),
+  promptTokens: bigint('prompt_tokens', { mode: 'number' }).notNull(),
+  completionTokens: bigint('completion_tokens', { mode: 'number' }).notNull(),
+  latencyHist: integer('latency_hist').array().notNull(),
+});
+
+export const rollupMinute = pgTable('rollup_minute', rollupColumns(), (t) => [primaryKey({ columns: [t.bucket, t.tenantId, t.model] })]);
+export const rollupHour = pgTable('rollup_hour', rollupColumns(), (t) => [primaryKey({ columns: [t.bucket, t.tenantId, t.model] })]);
+
+// One row. Minutes before `folded_through` are in rollup_hour and no longer written to rollup_minute: a batch
+// holding a row older than the mark adds it to the hour directly. The fold moves the mark forward under a row
+// lock that every batch takes shared, so a minute is counted in exactly one table.
+export const rollupState = pgTable(
+  'rollup_state',
+  {
+    id: integer('id').primaryKey(),
+    foldedThrough: timestamp('folded_through', { withTimezone: true }).notNull(),
+  },
+  (t) => [check('rollup_state_single_row', sql`${t.id} = 1`)],
 );

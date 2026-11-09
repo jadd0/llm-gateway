@@ -50,6 +50,13 @@
       "when": 1794254906967,
       "tag": "0006_spicy_ezekiel",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1794257389620,
+      "tag": "0007_rollups",
+      "breakpoints": true
     }
   ]
 }

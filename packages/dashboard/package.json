@@ -1,0 +1,22 @@
+{
+  "name": "@llm-gateway/dashboard",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --port ${DASHBOARD_PORT:-3200}",
+    "build": "next build",
+    "start": "next start --port ${DASHBOARD_PORT:-3200}"
+  },
+  "devDependencies": {
+    "@types/pg": "8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0"
+  },
+  "dependencies": {
+    "next": "16.4.6",
+    "pg": "8.23.1",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "recharts": "3.10.1"
+  }
+}
