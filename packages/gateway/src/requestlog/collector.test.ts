@@ -187,7 +187,7 @@ describe('request log collector', { timeout: 60_000 }, () => {
     expect(broke.status).toBe(402);
     await broke.text();
     const [ec] = await entriesOf(c.tenantId, 1);
-    expect(ec).toMatchObject({ status: 402, errorCode: 'budget_exhausted', model: 'mock-ok', costMicros: 0, cache: null }); // the cache looked and found nothing, but a refusal is no cache event
+    expect(ec).toMatchObject({ status: 402, errorCode: 'budget_exhausted', model: 'mock-ok', costMicros: 0, cache: null }); // the cache looked and found nothing, but the log row of a refusal has no cache outcome
 
     // 5xx from the provider with no fallback: the provider's own 500 goes through.
     const d = await fresh();

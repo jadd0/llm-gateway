@@ -15,6 +15,8 @@ export interface Notes {
   costMicros: number;
   savedMicros: number;
   errorCode: string;
+  /** The cache outcome for the log row when it is not the `x-gateway-cache` header's: null for a refusal that was no cache event. */
+  cache: string | null;
 }
 
 /** The state of the upstream response body when the client's connection closed. */
@@ -162,7 +164,7 @@ const collectorPlugin: FastifyPluginAsync<CollectorOptions> = async (app, opts) 
         completionTokens: s.notes.completionTokens ?? null,
         costMicros: s.notes.costMicros ?? 0,
         savedMicros: s.notes.savedMicros ?? 0,
-        cache: header('x-gateway-cache'),
+        cache: 'cache' in s.notes ? (s.notes.cache ?? null) : header('x-gateway-cache'),
         attempts,
         fallbackUsed: attempts > 0 && served !== null && model !== null && served !== model,
         latencyMs: Math.round(performance.now() - s.t0),
