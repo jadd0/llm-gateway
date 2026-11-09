@@ -56,6 +56,8 @@ const reset = (m: typeof mode = 'ok') => {
   mode = m;
 };
 
+const local2 = (): Embedder => ({ embed: async () => ({ vector: [1], embedder: 'voyage-4-nano' }) });
+
 describe('embedders', () => {
   it('voyage request shape (model, input_type, output_dimension, auth)', async () => {
     reset();
@@ -122,8 +124,7 @@ describe('embedders', () => {
   it('the primary is tried again once its back-off has passed', async () => {
     reset('error');
     let t = 1_000;
-    const local2: Embedder = { embed: async () => ({ vector: [1], embedder: 'voyage-4-nano' }) };
-    const both = fallbackEmbedder(voyage(), local2, { backoffMs: 5_000, clock: () => t });
+    const both = fallbackEmbedder(voyage(), local2(), { backoffMs: 5_000, clock: () => t });
     await both.embed('a');
     expect(seen).toHaveLength(1);
     t += 4_999;
@@ -155,14 +156,28 @@ describe('embedders', () => {
     expect(await dead.embed('x')).toBeUndefined();
   });
 
-  it('a patient caller waits longer and does not start the back-off', async () => {
+  it('a patient caller waits longer for the primary, but goes straight to local while the primary backs off', async () => {
     reset('slow');
-    const both = fallbackEmbedder(voyage({ timeoutMs: 60 }), local({ timeoutMs: 60 }), { backoffMs: 10_000 });
     // 400 ms reply: the request path (60 ms) gives up, the patient path (600 ms) waits for it.
+    const fresh = fallbackEmbedder(voyage({ timeoutMs: 60 }), local({ timeoutMs: 60 }), { backoffMs: 10_000 });
+    expect((await fresh.embed('x', { patient: true }))?.embedder).toBe('voyage-4-lite');
+
+    // A request that failed started the back-off: the fill does not wait on the primary either.
+    const both = fallbackEmbedder(voyage({ timeoutMs: 60 }), local({ timeoutMs: 60 }), { backoffMs: 10_000 });
     expect(await both.embed('x')).toBeUndefined();
     seen.length = 0;
-    const patient = await both.embed('x', { patient: true });
-    expect(patient?.embedder).toBe('voyage-4-lite');
+    await both.embed('x', { patient: true });
     expect(seen.length).toBeGreaterThan(0);
+    expect(seen.every((s) => s.path === '/api/embed')).toBe(true);
+  });
+
+  it('a patient failure starts the back-off for everyone', async () => {
+    reset('error');
+    const both = fallbackEmbedder(voyage(), local2(), { backoffMs: 10_000 });
+    await both.embed('x', { patient: true });
+    expect(seen).toHaveLength(1);
+    await both.embed('y');
+    await both.embed('z', { patient: true });
+    expect(seen).toHaveLength(1);
   });
 });

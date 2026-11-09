@@ -8,7 +8,7 @@ export interface Embedded {
 }
 
 export interface EmbedOptions {
-  /** A caller that is not on the request path (the fill) may wait ten times as long and neither reads nor sets the back-off. */
+  /** A caller that is not on the request path (the fill) may wait ten times as long. Both kinds of caller share the fallback's back-off. */
   patient?: boolean;
 }
 
@@ -185,7 +185,7 @@ export interface FallbackOptions {
 
 /**
  * The primary embedder, then the local one. Each has its own time limit (set on it), so the worst case is both
- * limits added. A primary that failed is skipped for `backoffMs`; with no primary every call goes local. When
+ * limits added. A primary that failed (on a request or a fill) is skipped by both for `backoffMs`; with no primary every call goes local. When
  * both fail the answer is undefined and the caller skips the semantic step.
  */
 export function fallbackEmbedder(primary: Embedder | undefined, local: Embedder, opts: FallbackOptions): Embedder {
@@ -193,10 +193,12 @@ export function fallbackEmbedder(primary: Embedder | undefined, local: Embedder,
   let skipPrimaryUntil = 0;
   return {
     async embed(text, options) {
-      if (primary && (options?.patient || now() >= skipPrimaryUntil)) {
+      // A patient caller waits longer for the primary, but while the primary is known to be down it goes straight
+      // to the local model like everyone else, and its own failure starts the same back-off.
+      if (primary && now() >= skipPrimaryUntil) {
         const got = await primary.embed(text, options);
         if (got) return got;
-        if (!options?.patient) skipPrimaryUntil = now() + opts.backoffMs;
+        skipPrimaryUntil = now() + opts.backoffMs;
       }
       return local.embed(text, options);
     },
