@@ -5174,9 +5174,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <!-- Edge paths -->
         <path data-edge-from="auth" data-edge-to="estimate" data-edge-key="0" data-edge-id="e1" data-composition-points="180,119;208,119" d="M 180 119 L 208 119" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="estimate" data-edge-to="take" data-edge-label="EVALSHA" data-edge-key="1" data-edge-id="e2" data-composition-points="274,145;274,243;328,243" d="M 274 145 L 274 243 L 328 243" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="take" data-edge-to="route" data-edge-label="allow / deny" data-edge-key="2" data-edge-id="e3" data-composition-points="394,217;394,166;514,166;514,145" d="M 394 217 L 394 166 L 514 166 L 514 145" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="take" data-edge-to="route" data-edge-label="allow, 429, 400" data-edge-key="2" data-edge-id="e3" data-composition-points="394,217;394,166;514,166;514,145" d="M 394 217 L 394 166 L 514 166 L 514 145" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="route" data-edge-to="provider" data-edge-label="forward" data-edge-key="3" data-edge-id="e4" data-composition-points="514,145;514,367;568,367" d="M 514 145 L 514 367 L 568 367" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="provider" data-edge-to="settle" data-edge-label="actual usage" data-edge-key="4" data-edge-id="e5" data-composition-points="634,341;634,290;754,290;754,269" d="M 634 341 L 634 290 L 754 290 L 754 269" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="provider" data-edge-to="settle" data-edge-label="usage, or 0 on failure" data-edge-key="4" data-edge-id="e5" data-composition-points="634,341;634,290;754,290;754,269" d="M 634 341 L 634 290 L 754 290 L 754 269" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
 
         <!-- Nodes -->
         <g id="node-auth" data-node-id="auth" data-node-label="Auth hook" tabindex="0" role="button" aria-label="Focus Auth hook, key, rpm, tpm, Gateway" aria-pressed="false" data-node-kind="security" data-node-sublabel="key, rpm, tpm" data-node-context="Gateway">
@@ -5255,17 +5255,17 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="279.2" y="223" width="43.6" height="14" rx="3" class="c-mask"/>
           <text x="301" y="233" class="t-backend" font-size="8" text-anchor="middle">EVALSHA</text>
         </g>
-        <g data-detail="context" data-edge-from="take" data-edge-to="route" data-edge-label="allow / deny" data-edge-key="2" data-edge-id="e3">
-          <rect x="420.2" y="146" width="67.6" height="14" rx="3" class="c-mask"/>
-          <text x="454" y="156" class="t-muted" font-size="8" text-anchor="middle">allow / deny</text>
+        <g data-detail="context" data-edge-from="take" data-edge-to="route" data-edge-label="allow, 429, 400" data-edge-key="2" data-edge-id="e3">
+          <rect x="413" y="146" width="82" height="14" rx="3" class="c-mask"/>
+          <text x="454" y="156" class="t-muted" font-size="8" text-anchor="middle">allow, 429, 400</text>
         </g>
         <g data-detail="context" data-edge-from="route" data-edge-to="provider" data-edge-label="forward" data-edge-key="3" data-edge-id="e4">
           <rect x="519.2" y="347" width="43.6" height="14" rx="3" class="c-mask"/>
           <text x="541" y="357" class="t-muted" font-size="8" text-anchor="middle">forward</text>
         </g>
-        <g data-detail="context" data-edge-from="provider" data-edge-to="settle" data-edge-label="actual usage" data-edge-key="4" data-edge-id="e5">
-          <rect x="660.2" y="270" width="67.6" height="14" rx="3" class="c-mask"/>
-          <text x="694" y="280" class="t-muted" font-size="8" text-anchor="middle">actual usage</text>
+        <g data-detail="context" data-edge-from="provider" data-edge-to="settle" data-edge-label="usage, or 0 on failure" data-edge-key="4" data-edge-id="e5">
+          <rect x="636.2" y="270" width="115.6" height="14" rx="3" class="c-mask"/>
+          <text x="694" y="280" class="t-muted" font-size="8" text-anchor="middle">usage, or 0 on failure</text>
         </g>
 
         <!-- Legend -->
