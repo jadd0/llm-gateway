@@ -506,7 +506,9 @@ describe('budget', { timeout: 120_000 }, () => {
     await flush(t); // Redis restarted empty
     expect(allowed(await b.reserve(req(t, 500, 2500))).path).toBe('redis'); // B rebuilds at e0 and admits 500
     // The rebuild moved the epoch on (in the background).
-    while ((await pgl.readEpoch()) === e0) await new Promise((r) => setTimeout(r, 5));
+    const waitUntil = Date.now() + 10_000;
+    while ((await pgl.readEpoch()) === e0 && Date.now() < waitUntil) await new Promise((r) => setTimeout(r, 5));
+    expect(await pgl.readEpoch()).toBeGreaterThan(e0);
     // A loses Redis and decides on Postgres, which counts B's 500: 500 + 1000 + 1000 fills the 2500 cap.
     faultsA.down = true;
     expect(allowed(await a.reserve(req(t, 1000, 2500))).path).toBe('postgres');
