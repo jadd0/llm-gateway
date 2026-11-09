@@ -2,7 +2,7 @@ import http, { type Server } from 'node:http';
 import { Readable } from 'node:stream';
 import type { AddressInfo } from 'node:net';
 import type { FastifyInstance } from 'fastify';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createMockServer, type Settings } from '../../../mock-provider/src/server.ts';
 import Fastify from 'fastify';
 import { buildApp } from '../app.ts';
@@ -246,7 +246,9 @@ describe('POST /v1/chat/completions', () => {
       res.end('{"error":{"message":"slow down","type":"rate_limit"}}');
     });
     const port = await listen(limited);
-    const app2 = buildApp(cfg({ OPENAI_BASE_URL: `http://127.0.0.1:${port}`, LOG_LEVEL: 'silent' }));
+    const app2 = buildApp(
+      cfg({ OPENAI_BASE_URL: `http://127.0.0.1:${port}`, LOG_LEVEL: 'silent', RATE_LIMIT_ENABLED: 'false' }),
+    );
     try {
       for (const stream of [false, true]) {
         const res = await app2.inject({
@@ -266,6 +268,127 @@ describe('POST /v1/chat/completions', () => {
       limited.closeAllConnections();
       await new Promise((resolve) => limited.close(resolve));
     }
+  });
+});
+
+describe('usage reconcile', { timeout: 30_000 }, () => {
+  // An upstream that records what it was sent and answers with a known usage (1000 + 2000 = 3000 tokens, enough to leave the bucket well below full: a nearly full bucket expires within milliseconds).
+  const FIXED_CLOCK = 1_700_000_000_000;
+  const TPM = 6000;
+  const ESTIMATE = 1 + 1024; // 'hi' is one token, plus the default max_tokens
+  const seen: Array<{ raw: string; json: any }> = [];
+  let mode: 'usage' | 'no-usage' | 'slow' = 'usage';
+  let up: Server;
+  let app3: FastifyInstance;
+  let gw3 = '';
+  let rc: Redis;
+  const tenants: string[] = [];
+
+  const usage = { prompt_tokens: 1000, completion_tokens: 2000, total_tokens: 3000 };
+
+  beforeAll(async () => {
+    up = http.createServer((req, res) => {
+      const parts: Buffer[] = [];
+      req.on('data', (c: Buffer) => parts.push(c));
+      req.on('end', () => {
+        const raw = Buffer.concat(parts).toString('utf8');
+        const json = JSON.parse(raw);
+        seen.push({ raw, json });
+        if (json.stream !== true) {
+          res.writeHead(200, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ id: 'x', choices: [], ...(mode === 'usage' ? { usage } : {}) }));
+          return;
+        }
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.write('data: {"id":"x","choices":[{"delta":{"content":"a"}}],"usage":null}\n\n');
+        if (mode === 'slow') return; // never finishes; the client leaves
+        if (mode === 'usage') res.write(`data: ${JSON.stringify({ id: 'x', choices: [], usage })}\n\n`);
+        res.end('data: [DONE]\n\n');
+      });
+    });
+    const port = await listen(up);
+    app3 = buildApp(cfg({ OPENAI_BASE_URL: `http://127.0.0.1:${port}`, RATE_LIMIT_REDIS_TIMEOUT_MS: '5000' }), {
+      rateLimitClock: () => FIXED_CLOCK,
+    });
+    await app3.listen({ port: 0, host: '127.0.0.1' });
+    gw3 = `http://127.0.0.1:${(app3.server.address() as AddressInfo).port}`;
+    rc = new Redis(base.redisUrl!);
+  });
+
+  afterAll(async () => {
+    await app3.close();
+    up.closeAllConnections();
+    await new Promise((resolve) => up.close(resolve));
+    await cleanup(handle.db, rc, tenants, base.redisKeyPrefix);
+    rc.disconnect();
+  });
+
+  beforeEach(() => {
+    seen.length = 0;
+    mode = 'usage';
+  });
+
+  // A fresh key per test, so each test reads a bucket nobody else has touched.
+  const freshKey = async () => {
+    const s = await seedKey(handle.db, base, { rpm: 1000, tpm: TPM });
+    tenants.push(s.tenantId);
+    return s;
+  };
+  const bucketTokens = async (keyId: string) =>
+    Number(await rc.hget(`${base.redisKeyPrefix}rl:{${keyId}}:tok`, 'tokens'));
+  const send = (key: string, body: string) =>
+    app3.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+      payload: body,
+    });
+
+  it('a non-streamed response corrects the charge from the usage in its body', async () => {
+    const s = await freshKey();
+    const body = payload();
+    const res = await send(s.key, body);
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-ratelimit-remaining-tokens']).toBe(String(TPM - ESTIMATE));
+    await vi.waitFor(async () => expect(await bucketTokens(s.keyId)).toBe(TPM - 3000));
+    expect(seen[0]!.raw).toBe(body); // forwarded byte for byte
+  });
+
+  it('a streamed response corrects the charge from the final chunk, and asks the upstream for it', async () => {
+    const s = await freshKey();
+    const res = await send(s.key, payload({ stream: true, stream_options: { other: 1 } }));
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-ratelimit-remaining-tokens']).toBe(String(TPM - ESTIMATE));
+    expect(res.body).toContain('data: [DONE]');
+    await vi.waitFor(async () => expect(await bucketTokens(s.keyId)).toBe(TPM - 3000));
+    expect(seen[0]!.json.stream_options).toEqual({ other: 1, include_usage: true });
+  });
+
+  it('with no usage in the answer the estimate stays charged', async () => {
+    const s = await freshKey();
+    mode = 'no-usage';
+    await send(s.key, payload());
+    await send(s.key, payload({ stream: true }));
+    // Both calls were admitted and nothing was refunded (each charged 1025).
+    await new Promise((r) => setTimeout(r, 200));
+    expect(await bucketTokens(s.keyId)).toBe(TPM - 2 * ESTIMATE);
+  });
+
+  it('a client that leaves mid-stream keeps the estimate charged, and nothing is refunded twice', async () => {
+    const s = await freshKey();
+    mode = 'slow';
+    const ctrl = new AbortController();
+    const res = await fetch(`${gw3}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
+      body: payload({ stream: true }),
+      signal: ctrl.signal,
+    });
+    expect(res.status).toBe(200);
+    await res.body!.getReader().read();
+    ctrl.abort();
+    await new Promise((r) => setTimeout(r, 300));
+    expect(await bucketTokens(s.keyId)).toBe(TPM - ESTIMATE); // clock pinned: exactly the estimate
   });
 });
 

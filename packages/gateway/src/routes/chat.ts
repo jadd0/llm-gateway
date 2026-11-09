@@ -3,6 +3,8 @@ import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { z } from 'zod';
 import { errorBody } from '../errors.ts';
+import { jsonBody } from '../request-body.ts';
+import { SseUsageTap, usageFromBody } from '../usage/sse-usage.ts';
 import type { Upstream } from '../upstream.ts';
 
 // Only the shape the gateway needs; every other field is forwarded untouched.
@@ -23,9 +25,12 @@ const ms = (n: number) => n.toFixed(3);
 // Upstream headers a client needs to react to (back-off, correlation, rate-limit state).
 const PASSTHROUGH = /^(retry-after|x-request-id|openai-processing-ms|x-ratelimit-.+)$/;
 
-function passthroughHeaders(upstream: Record<string, string | string[] | undefined>) {
+// When the gateway has set its own x-ratelimit-* headers they describe the caller's key, so the
+// upstream's (which describe the gateway's account) are dropped.
+function passthroughHeaders(upstream: Record<string, string | string[] | undefined>, ownLimits: boolean) {
   const out: Record<string, string | string[]> = {};
   for (const [name, value] of Object.entries(upstream)) {
+    if (ownLimits && name.startsWith('x-ratelimit-')) continue;
     if (value !== undefined && PASSTHROUGH.test(name)) out[name] = value;
   }
   return out;
@@ -49,21 +54,30 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
     done(null, body),
   );
 
-  app.post('/v1/chat/completions', async (request, reply) => {
+  app.post('/v1/chat/completions', { config: { rateLimited: true } }, async (request, reply) => {
     const started = performance.now();
 
-    let parsed: z.infer<typeof chatBody>;
-    try {
-      const result = chatBody.safeParse(JSON.parse((request.body as Buffer).toString('utf8')));
-      if (!result.success) {
-        return reply
-          .code(400)
-          .send(errorBody('body needs a string "model" and an array "messages"', 'invalid_request_error'));
-      }
-      parsed = result.data;
-    } catch {
-      return reply.code(400).send(errorBody('body is not valid JSON', 'invalid_request_error'));
+    const json = jsonBody(request);
+    if (!json.ok) return reply.code(400).send(errorBody('body is not valid JSON', 'invalid_request_error'));
+    const result = chatBody.safeParse(json.value);
+    if (!result.success) {
+      return reply
+        .code(400)
+        .send(errorBody('body needs a string "model" and an array "messages"', 'invalid_request_error'));
     }
+    const parsed = result.data;
+    // Undefined when the rate limiter is not registered at all.
+    const charge = request.rateLimit ?? null;
+    // A streamed answer only carries token counts if asked; the counts correct the up-front charge.
+    const upstreamBody =
+      charge !== null && parsed.stream === true
+        ? Buffer.from(
+            JSON.stringify({
+              ...parsed,
+              stream_options: { ...(parsed.stream_options as object | undefined), include_usage: true },
+            }),
+          )
+        : (request.body as Buffer);
 
     const abort = new AbortController();
     // 'close' on the response fires on client disconnect, on normal completion, and when a failed
@@ -73,11 +87,11 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
     let clientGone = false;
     let upstreamFailed = false;
     let upstreamDone = false;
-    let upstreamBody: Readable | undefined;
+    let upstreamStream: Readable | undefined;
     reply.raw.on('close', () => {
       if (reply.raw.writableFinished) return;
       clientGone =
-        !upstreamFailed && (upstreamBody === undefined || upstreamDone || !upstreamBody.destroyed);
+        !upstreamFailed && (upstreamStream === undefined || upstreamDone || !upstreamStream.destroyed);
       abort.abort();
     });
 
@@ -88,7 +102,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
         path: upstream.chatPath,
         method: 'POST',
         headers: upstream.headers,
-        body: request.body as Buffer,
+        body: upstreamBody,
         signal: abort.signal,
       });
     } catch (err) {
@@ -96,7 +110,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
       return upstreamFailure(reply, err);
     }
 
-    const extraHeaders = passthroughHeaders(res.headers);
+    const extraHeaders = passthroughHeaders(res.headers, charge !== null);
     const contentType = res.headers['content-type'];
     const type = Array.isArray(contentType) ? contentType[0] : contentType;
 
@@ -104,7 +118,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
       // Hijack so Fastify neither buffers nor serialises: bytes go from the upstream socket
       // to the client socket as they arrive.
       reply.hijack();
-      upstreamBody = res.body;
+      upstreamStream = res.body;
       res.body.once('end', () => {
         upstreamDone = true;
       });
@@ -112,6 +126,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
         if (!clientGone) upstreamFailed = true;
       });
       reply.raw.writeHead(res.statusCode, {
+        ...(reply.getHeaders() as Record<string, string | number | string[]>), // rate-limit headers set before the route ran
         ...extraHeaders,
         ...(type ? { 'content-type': type } : {}),
         'cache-control': 'no-cache',
@@ -120,7 +135,14 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
       });
       reply.raw.flushHeaders();
       try {
-        await pipeline(res.body, reply.raw);
+        if (charge !== null && res.statusCode < 300) {
+          const tap = new SseUsageTap((usage) => {
+            if (usage) void charge.settle(usage.totalTokens);
+          });
+          await pipeline(res.body, tap, reply.raw);
+        } else {
+          await pipeline(res.body, reply.raw);
+        }
       } catch (err) {
         // Upstream died or the client left mid-stream; pipeline already destroyed both ends.
         if (!clientGone) {
@@ -141,6 +163,10 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
       return upstreamFailure(reply, err);
     }
     const received = performance.now();
+    if (charge !== null && res.statusCode < 300) {
+      const usage = usageFromBody(payload);
+      if (usage) void charge.settle(usage.totalTokens);
+    }
     const upstreamMs = received - dispatched;
     const preDispatchMs = dispatched - started;
 

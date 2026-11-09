@@ -10,11 +10,11 @@ const states = new WeakMap<Redis, ClientState>();
 // One client per process. Commands fail fast while Redis is unreachable (no offline queue, short
 // command timeout) so callers can fall back to Postgres instead of stacking up behind a dead socket.
 // Reconnection is automatic with a capped back-off, so a Redis restart needs no gateway restart.
-export function createRedis(url: string, opts: { startupGraceMs?: number } = {}): Redis {
+export function createRedis(url: string, opts: { startupGraceMs?: number; commandTimeoutMs?: number } = {}): Redis {
   const redis = new Redis(url, {
     enableOfflineQueue: false,
     maxRetriesPerRequest: 1,
-    commandTimeout: 500,
+    commandTimeout: opts.commandTimeoutMs ?? 500,
     connectTimeout: 1000,
     retryStrategy: (attempt) => Math.min(attempt * 100, 1000),
   });
