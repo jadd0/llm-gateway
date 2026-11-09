@@ -4,6 +4,7 @@
 //   RATE        requests per second (constant arrival rate, not fixed users)
 //   WARMUP_S    seconds of warm-up, excluded from the measured window
 //   DURATION_S  seconds of measured load
+//   API_KEY     gateway API key, sent as "Authorization: Bearer <key>" when set
 import http from 'k6/http';
 import { check } from 'k6';
 import { Trend } from 'k6/metrics';
@@ -55,7 +56,9 @@ const body = JSON.stringify({
   stream: STREAM,
   messages: [{ role: 'user', content: 'Summarise the plot of Hamlet in one sentence.' }],
 });
-const params = { headers: { 'content-type': 'application/json' } };
+const headers = { 'content-type': 'application/json' };
+if (__ENV.API_KEY) headers.authorization = `Bearer ${__ENV.API_KEY}`;
+const params = { headers };
 
 export default function () {
   const res = http.post(`${TARGET}/v1/chat/completions`, body, params);

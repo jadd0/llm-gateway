@@ -10,7 +10,9 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
     "check": "npm run typecheck && npm test",
-    "bench:baseline": "bash bench/run-baseline.sh"
+    "bench:baseline": "bash bench/run-baseline.sh",
+    "db:migrate": "npm run db:migrate -w @llm-gateway/gateway",
+    "keys": "npm run keys -w @llm-gateway/gateway --"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",

@@ -8,7 +8,9 @@ import Fastify from 'fastify';
 import { buildApp } from '../app.ts';
 import type { Upstream } from '../upstream.ts';
 import { chatRoutes } from './chat.ts';
-import { loadConfig } from '../config.ts';
+import { Redis } from 'ioredis';
+import { createDb, type Db } from '../db/client.ts';
+import { cleanup, seedKey, testConfig } from '../test-env.ts';
 
 const settings: Settings = {
   latencyMs: 0,
@@ -18,6 +20,16 @@ const settings: Settings = {
   outage: 'off',
 };
 const defaults = { ...settings };
+
+// Every app in this file shares one pepper and Redis prefix so the one seeded key works on all of them.
+const base = testConfig();
+const cfg = (env: Record<string, string>) =>
+  testConfig({ API_KEY_PEPPER: base.apiKeyPepper, REDIS_KEY_PREFIX: base.redisKeyPrefix, ...env });
+let key = '';
+let tenantId = '';
+let handle: Db;
+let cleanupRedis: Redis;
+const auth = () => ({ authorization: `Bearer ${key}` });
 
 let mock: Server;
 let mockUrl = '';
@@ -42,9 +54,12 @@ beforeAll(async () => {
     }
   });
   mockUrl = `http://127.0.0.1:${await listen(mock)}`;
-  app = buildApp(
-    loadConfig({ OPENAI_BASE_URL: mockUrl, UPSTREAM_TIMEOUT_MS: '1000', LOG_LEVEL: 'silent' }),
-  );
+  handle = createDb({ databaseUrl: base.databaseUrl, poolSize: 2 });
+  cleanupRedis = new Redis(base.redisUrl!);
+  const seeded = await seedKey(handle.db, base);
+  key = seeded.key;
+  tenantId = seeded.tenantId;
+  app = buildApp(cfg({ OPENAI_BASE_URL: mockUrl, UPSTREAM_TIMEOUT_MS: '1000', LOG_LEVEL: 'silent' }));
   await app.listen({ port: 0, host: '127.0.0.1' });
   gw = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 });
@@ -53,6 +68,9 @@ afterAll(async () => {
   await app.close();
   mock.closeAllConnections();
   await new Promise((resolve) => mock.close(resolve));
+  await cleanup(handle.db, cleanupRedis, [tenantId], base.redisKeyPrefix);
+  cleanupRedis.disconnect();
+  await handle.close();
 });
 
 beforeEach(() => {
@@ -64,13 +82,15 @@ beforeEach(() => {
 const payload = (extra: object = {}) =>
   JSON.stringify({ model: 'm', messages: [{ role: 'user', content: 'hi' }], ...extra });
 
-const post = (body: string, init: RequestInit = {}) =>
-  fetch(`${gw}/v1/chat/completions`, {
+const post = (body: string, init: RequestInit = {}) => {
+  const { headers, ...rest } = init;
+  return fetch(`${gw}/v1/chat/completions`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', ...auth(), ...(headers as Record<string, string>) },
     body,
-    ...init,
+    ...rest,
   });
+};
 
 const until = async (cond: () => boolean, timeoutMs = 2000) => {
   const end = Date.now() + timeoutMs;
@@ -148,14 +168,12 @@ describe('POST /v1/chat/completions', () => {
   });
 
   it('upstream down returns 502 with an OpenAI-shaped error', async () => {
-    const down = buildApp(
-      loadConfig({ OPENAI_BASE_URL: 'http://127.0.0.1:1', LOG_LEVEL: 'silent' }),
-    );
+    const down = buildApp(cfg({ OPENAI_BASE_URL: 'http://127.0.0.1:1', LOG_LEVEL: 'silent' }));
     try {
       const res = await down.inject({
         method: 'POST',
         url: '/v1/chat/completions',
-        headers: { 'content-type': 'application/json' },
+        headers: { 'content-type': 'application/json', ...auth() },
         payload: payload(),
       });
       expect(res.statusCode).toBe(502);
@@ -200,7 +218,7 @@ describe('POST /v1/chat/completions', () => {
   });
 
   it('unknown route returns 404 in the OpenAI error shape', async () => {
-    const res = await fetch(`${gw}/v1/nope`);
+    const res = await fetch(`${gw}/v1/nope`, { headers: auth() });
     expect(res.status).toBe(404);
     expect(((await res.json()) as any).error.type).toBe('invalid_request_error');
   });
@@ -208,7 +226,7 @@ describe('POST /v1/chat/completions', () => {
   it('unknown POST route with an odd content-type returns 404, not 415', async () => {
     const res = await fetch(`${gw}/v1/embeddings`, {
       method: 'POST',
-      headers: { 'content-type': 'text/xml' },
+      headers: { 'content-type': 'text/xml', ...auth() },
       body: '<a/>',
     });
     expect(res.status).toBe(404);
@@ -228,15 +246,13 @@ describe('POST /v1/chat/completions', () => {
       res.end('{"error":{"message":"slow down","type":"rate_limit"}}');
     });
     const port = await listen(limited);
-    const app2 = buildApp(
-      loadConfig({ OPENAI_BASE_URL: `http://127.0.0.1:${port}`, LOG_LEVEL: 'silent' }),
-    );
+    const app2 = buildApp(cfg({ OPENAI_BASE_URL: `http://127.0.0.1:${port}`, LOG_LEVEL: 'silent' }));
     try {
       for (const stream of [false, true]) {
         const res = await app2.inject({
           method: 'POST',
           url: '/v1/chat/completions',
-          headers: { 'content-type': 'application/json' },
+          headers: { 'content-type': 'application/json', ...auth() },
           payload: payload({ stream }),
         });
         expect(res.statusCode).toBe(429);
@@ -284,7 +300,7 @@ describe('mid-stream failure logging', () => {
 
   const gatewayFor = async (port: number) => {
     const g = buildApp(
-      loadConfig({ OPENAI_BASE_URL: `http://127.0.0.1:${port}`, UPSTREAM_TIMEOUT_MS: '1000', LOG_LEVEL: 'warn' }),
+      cfg({ OPENAI_BASE_URL: `http://127.0.0.1:${port}`, UPSTREAM_TIMEOUT_MS: '1000', LOG_LEVEL: 'warn' }),
       { logStream },
     );
     await g.listen({ port: 0, host: '127.0.0.1' });
@@ -294,7 +310,7 @@ describe('mid-stream failure logging', () => {
   const openStream = async (url: string, signal?: AbortSignal) => {
     const res = await fetch(`${url}/v1/chat/completions`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...auth() },
       body: payload({ stream: true }),
       ...(signal ? { signal } : {}),
     });

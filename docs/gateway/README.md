@@ -6,7 +6,7 @@ Diagram: [chat-passthrough.html](chat-passthrough.html). Code: `packages/gateway
 |---|---|
 | `config.ts` | Env parsed with zod; a blank value counts as unset |
 | `upstream.ts` | One undici `Pool` per upstream origin, `UPSTREAM_CONNECTIONS` sockets, timeouts from `UPSTREAM_TIMEOUT_MS` |
-| `app.ts` | `buildApp(config)`: Fastify with request logging off |
+| `app.ts` | `buildApp(config)`: Fastify with request logging off, the auth hook, and the Postgres and Redis handles |
 | `routes/chat.ts` | `POST /v1/chat/completions` |
 | `server.ts` | Entry point, graceful shutdown on SIGTERM and SIGINT |
 
@@ -29,17 +29,23 @@ Diagram: [chat-passthrough.html](chat-passthrough.html). Code: `packages/gateway
   header are passed through, streamed and not; other upstream headers are dropped.
 - **Errors.** Fastify's own errors (415 unsupported content-type, oversized body) and unknown routes (404)
   use the same `invalid_request_error` shape.
-- **Binding.** The gateway listens on `GATEWAY_HOST`, default `127.0.0.1`. It has no auth yet and forwards
-  `OPENAI_API_KEY` upstream for any caller, so until auth lands (PR 3) keep it bound to localhost.
+- **Auth.** An `onRequest` hook (`auth/plugin.ts`) runs before the body is read: it takes the bearer key, looks
+  it up and either answers 401 or sets `request.tenant`. It covers unknown routes too. The client's
+  `Authorization` header is never forwarded; the upstream key comes from `OPENAI_API_KEY`. Because the hook
+  runs before the route starts its clock, `gw-pre` in `server-timing` does not include the key check.
+  See [../auth/README.md](../auth/README.md).
+- **Binding.** The gateway listens on `GATEWAY_HOST`, default `127.0.0.1`.
 - **Logging.** Nothing logs per request. `LOG_LEVEL` defaults to `warn`; failures log error class and code only.
 
 ## Run
 
 ```
 cp .env.example .env.local
+docker compose up -d --wait && npm run db:migrate
+npm run keys -- create-tenant acme && npm run keys -- create-key acme   # prints a gw_ key once
 npm run dev:mock      # port 9000
 npm run dev:gateway   # port 8080
-curl -N localhost:8080/v1/chat/completions -H 'content-type: application/json' -d '{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+curl -N localhost:8080/v1/chat/completions -H "authorization: Bearer $KEY" -H 'content-type: application/json' -d '{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ## Why this design
