@@ -35,8 +35,8 @@ notes:
 
 ## PR 4 — Distributed rate limiter (Redis Lua token bucket)
 status: pending
-acceptance: per-key token bucket enforced by one atomic Lua script in Redis; a test firing 1,000 concurrent requests at a key limited to 100 admits exactly 100 and returns 429 with Retry-After to the rest; refill rate verified over time; explainer walks the script line by line.
-scope_notes: per-key request limits only. Multi-instance proof is PR 12.
+acceptance: per-key token buckets for requests per minute and tokens per minute, enforced together by one atomic Lua script in Redis; a test firing 1,000 concurrent requests at a key limited to 100 requests/min admits exactly 100 and returns 429 with Retry-After to the rest, including when the requests are spread across 3 gateway app instances sharing one Redis; the token bucket is charged an estimate before the call and corrected to actual usage after (streamed and non-streamed); refill verified over time; Redis unavailable fails open; docs/rate-limiter/ walks the script line by line.
+scope_notes: rate limits only (requests and tokens per minute, D-015). Spend caps are PR 5; the nginx multi-instance proof is PR 12.
 base_branch: main
 commit:
 completed_at:
