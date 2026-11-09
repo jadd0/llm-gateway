@@ -32,6 +32,7 @@ export interface KeyStoreOptions {
   log?: { warn(obj: object, msg: string): void; info(obj: object, msg: string): void };
 }
 
+const DEL_IF_EQUAL = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
 const REVOKED = 'revoked';
 const UNKNOWN = 'unknown';
 
@@ -39,16 +40,16 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
   const { db, redis } = opts;
   const redisKey = (hash: string) => `${opts.keyPrefix}apikey:${hash}`;
 
-  // Reads and writes are tracked separately so a write that keeps failing while reads succeed (out of
-  // memory, read-only replica) is one outage, not a warn and an info on every request. The outage ends,
-  // and is logged as ended, only when both have succeeded again.
+  // A failed read is an outage (warned once, ended by the next successful read). A failed write is
+  // tracked on its own, so a write that keeps failing while reads succeed (out of memory, read-only
+  // replica) warns once instead of on every request, and a workload of pure cache hits still ends a
+  // read outage. A successful write ends the write outage.
   const down = { get: false, set: false };
   const redisFailed = (op: 'get' | 'set', err: unknown) => {
     // A client that has not finished its first connection is connecting, not down.
     if (redis !== null && isStarting(redis)) return;
-    const wasOutage = down.get || down.set;
+    if (down[op]) return;
     down[op] = true;
-    if (wasOutage) return;
     opts.log?.warn(
       { errClass: (err as Error).name, code: (err as { code?: string }).code, op },
       'redis unavailable, auth falling back to postgres',
@@ -57,7 +58,7 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
   const redisOk = (op: 'get' | 'set') => {
     if (!down[op]) return;
     down[op] = false;
-    if (!down.get && !down.set) opts.log?.info({}, 'redis available again');
+    opts.log?.info({ op }, 'redis available again');
   };
 
   async function fromPostgres(hash: string): Promise<Tenant | null> {
@@ -96,21 +97,21 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
         return fromPostgres(hash);
       }
       if (cached === REVOKED || cached === UNKNOWN) return null;
-      let corrupt = false;
+      let corrupt: string | undefined;
       if (cached !== null) {
         const hit = parseTenant(cached);
         if (hit) return hit;
-        corrupt = true; // not a value this store wrote: treat as a miss and replace it
+        corrupt = cached; // not a value this store wrote: treat as a miss and replace it
       }
 
       const tenant = await fromPostgres(hash);
       try {
         const value = tenant ? JSON.stringify(tenant) : UNKNOWN;
         const ttl = tenant ? opts.cacheTtlS : opts.negativeTtlS;
-        // NX: a fill never overwrites a revoke tombstone written after this request read Postgres.
-        // A corrupt entry is the one thing a fill may overwrite.
-        if (corrupt) await redis.set(key, value, 'EX', ttl);
-        else await redis.set(key, value, 'EX', ttl, 'NX');
+        // A corrupt entry is removed only if it is still the same corrupt string, so a tombstone
+        // written since the read survives. Every fill is NX: it never overwrites a tombstone.
+        if (corrupt !== undefined) await redis.eval(DEL_IF_EQUAL, 1, key, corrupt);
+        await redis.set(key, value, 'EX', ttl, 'NX');
         redisOk('set');
       } catch (err) {
         redisFailed('set', err);
@@ -127,15 +128,18 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
         .returning({ id: apiKeys.id });
       let tombstoned = false;
       if (redis !== null) {
-        try {
-          // A client created a moment ago may not be connected yet; commands sent before then fail.
-          await waitReady(redis, 2000);
-          // Plain SET (no NX): it must overwrite a cached "valid" entry.
-          await redis.set(redisKey(hash), REVOKED, 'EX', opts.tombstoneTtlS);
-          tombstoned = true;
-          redisOk('set');
-        } catch (err) {
-          redisFailed('set', err);
+        // A client created a moment ago may not be connected yet; commands sent before then fail.
+        if (!(await waitReady(redis, 2000))) {
+          redisFailed('set', new Error('redis not ready'));
+        } else {
+          try {
+            // Plain SET (no NX): it must overwrite a cached "valid" entry.
+            await redis.set(redisKey(hash), REVOKED, 'EX', opts.tombstoneTtlS);
+            tombstoned = true;
+            redisOk('set');
+          } catch (err) {
+            redisFailed('set', err);
+          }
         }
       }
       return { revoked: updated.length > 0, tombstoned };

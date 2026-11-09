@@ -6,6 +6,13 @@ const blankAsUnset = (v: unknown) => (typeof v === 'string' && v.trim() === '' ?
 const int = (def: number, min = 0) =>
   z.preprocess(blankAsUnset, z.coerce.number().int().min(min).default(def));
 
+const dbFields = {
+  DATABASE_URL: z.string().min(1),
+  DB_POOL_SIZE: int(20, 1),
+};
+// The server-side secret mixed into every key hash. The gateway refuses to start without it.
+const pepperField = { API_KEY_PEPPER: z.string().min(32) };
+
 const schema = z
   .object({
     GATEWAY_HOST: z.preprocess(blankAsUnset, z.string().default('127.0.0.1')),
@@ -18,13 +25,11 @@ const schema = z
       blankAsUnset,
       z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('warn'),
     ),
-    DATABASE_URL: z.string().min(1),
-    DB_POOL_SIZE: int(20, 1),
+    ...dbFields,
     REDIS_URL: z.preprocess(blankAsUnset, z.string().optional()),
     // Prepended to every Redis key so several gateways or test runs can share one Redis.
     REDIS_KEY_PREFIX: z.preprocess(blankAsUnset, z.string().default('')),
-    // The server-side secret mixed into every key hash. The gateway refuses to start without it.
-    API_KEY_PEPPER: z.string().min(32),
+    ...pepperField,
     AUTH_CACHE: z.preprocess(blankAsUnset, z.enum(['redis', 'none']).default('redis')),
     AUTH_CACHE_TTL_S: int(600, 1),
     AUTH_NEGATIVE_TTL_S: int(60, 1),
@@ -80,13 +85,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   };
 }
 
-const dbSchema = z.object({
-  DATABASE_URL: z.string().min(1),
-  DB_POOL_SIZE: int(20, 1),
-});
+// Only what a database-only command (migrations, create-tenant, list-keys) needs: no pepper, no Redis.
+export function loadDbConfig(env: NodeJS.ProcessEnv = process.env): { databaseUrl: string } {
+  return { databaseUrl: z.object(dbFields).parse(env).DATABASE_URL };
+}
 
-// Only what a database-only command (migrations, list-keys) needs, so it runs without a pepper or Redis.
-export function loadDbConfig(env: NodeJS.ProcessEnv = process.env): { databaseUrl: string; dbPoolSize: number } {
-  const e = dbSchema.parse(env);
-  return { databaseUrl: e.DATABASE_URL, dbPoolSize: e.DB_POOL_SIZE };
+// create-key needs the database and the pepper, nothing else.
+export function loadPepperConfig(env: NodeJS.ProcessEnv = process.env): { databaseUrl: string; apiKeyPepper: string } {
+  const e = z.object({ ...dbFields, ...pepperField }).parse(env);
+  return { databaseUrl: e.DATABASE_URL, apiKeyPepper: e.API_KEY_PEPPER };
 }

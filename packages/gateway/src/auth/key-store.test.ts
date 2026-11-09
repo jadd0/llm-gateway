@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDb, type Db } from '../db/client.ts';
 import { createRedis } from '../redis.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
-import { keyStoreFromConfig } from './key-store.ts';
+import { keyStoreFromConfig, type KeyStoreOptions } from './key-store.ts';
 import type { Config } from '../config.ts';
 
 const config: Config = testConfig();
@@ -16,7 +16,7 @@ let queries = 0;
 // land a revoke between a lookup's read and its cache fill.
 let gate: { held: boolean; open: () => void; wait: Promise<void> } | null = null;
 
-const storeFor = (r: Redis | null, log?: { warn: () => void; info: () => void }) =>
+const storeFor = (r: Redis | null, log?: KeyStoreOptions['log']) =>
   keyStoreFromConfig(config, handle.db, r, log);
 
 const seed = async () => {
@@ -113,10 +113,11 @@ describe('key store', () => {
       expect(await store.lookup(live.hash)).toEqual({ tenantId: live.tenantId, tenantName: live.tenant });
       expect(await store.lookup(live.hash)).not.toBeNull();
       expect(await store.lookup(randomBytes(32).toString('hex'))).toBeNull();
+      expect(warns).toHaveLength(1); // three failed reads, one warn
       // Revoked in Postgres while Redis is unreachable: no tombstone is possible, the key is still rejected.
       expect(await store.revoke(dead.hash)).toEqual({ revoked: true, tombstoned: false });
       expect(await store.lookup(dead.hash)).toBeNull();
-      expect(warns).toHaveLength(1);
+      expect(warns).toHaveLength(2); // plus the failed tombstone write
     } finally {
       deadRedis.disconnect();
     }
@@ -167,6 +168,58 @@ describe('key store', () => {
     expect(queries).toBe(1);
     expect(warns).toHaveLength(0);
     expect(await redis.get(key)).toContain(s.tenantId);
+  });
+
+  it('a tombstone written after a corrupt value was read survives the fill', async () => {
+    const s = await seed();
+    const key = `${config.redisKeyPrefix}apikey:${s.hash}`;
+    await redis.set(key, '{not json', 'EX', 60);
+    const store = storeFor(redis);
+    let open!: () => void;
+    const wait = new Promise<void>((r) => (open = r));
+    gate = { held: false, open, wait };
+    const stale = store.lookup(s.hash); // reads the corrupt value, then Postgres (valid), then stalls
+    const end = Date.now() + 2000;
+    while (!gate.held && Date.now() < end) await new Promise((r) => setTimeout(r, 5));
+    expect(gate.held).toBe(true);
+    const g = gate;
+    gate = null;
+    expect((await store.revoke(s.hash)).tombstoned).toBe(true); // overwrites the corrupt value
+    g.open();
+    await stale;
+    expect(await redis.get(key)).toBe('revoked');
+    expect(await store.lookup(s.hash)).toBeNull();
+  });
+
+  it('one warn per outage start: a failed write, then cache hits, then a read outage', async () => {
+    const warns: Array<{ op: string }> = [];
+    const infos: object[] = [];
+    const tenant = JSON.stringify({ tenantId: 't', tenantName: 'n' });
+    let mode: 'miss' | 'hit' | 'down' = 'miss';
+    const flaky = {
+      status: 'ready',
+      get: async () => {
+        if (mode === 'down') throw new Error('ECONNRESET');
+        return mode === 'hit' ? tenant : null;
+      },
+      set: async () => {
+        throw Object.assign(new Error('READONLY'), { code: 'READONLY' });
+      },
+    } as unknown as Redis;
+    const store = storeFor(flaky, { warn: (o) => warns.push(o as { op: string }), info: (o) => infos.push(o) });
+    const hash = randomBytes(32).toString('hex');
+    await store.lookup(hash); // miss: Postgres, then the fill fails
+    mode = 'hit';
+    for (let i = 0; i < 5; i++) expect(await store.lookup(hash)).toEqual({ tenantId: 't', tenantName: 'n' });
+    expect(warns.map((w) => w.op)).toEqual(['set']);
+    mode = 'down';
+    await store.lookup(hash);
+    await store.lookup(hash);
+    expect(warns.map((w) => w.op)).toEqual(['set', 'get']);
+    expect(infos).toHaveLength(0);
+    mode = 'hit';
+    await store.lookup(hash);
+    expect(infos).toHaveLength(1); // the read outage ended
   });
 
   it('writes failing while reads succeed log one warn, not one per request', async () => {

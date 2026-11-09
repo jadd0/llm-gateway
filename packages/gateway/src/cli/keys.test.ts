@@ -19,7 +19,8 @@ let redis: Redis;
 const tenantNames: string[] = [];
 
 // Runs the real CLI as a child process with this test run's config in its environment.
-const cli = (...args: string[]) =>
+const cli = (...args: string[]) => cliWith({}, ...args);
+const cliWith = (extra: Record<string, string>, ...args: string[]) =>
   run(process.execPath, [cliPath, ...args], {
     env: {
       ...process.env,
@@ -27,6 +28,7 @@ const cli = (...args: string[]) =>
       REDIS_URL: config.redisUrl!,
       REDIS_KEY_PREFIX: config.redisKeyPrefix,
       API_KEY_PEPPER: config.apiKeyPepper,
+      ...extra,
     },
   });
 
@@ -92,7 +94,7 @@ describe('keys CLI', () => {
       { tenantId: t!.id, keyHash: randomBytes(32).toString('hex'), prefix: `${shared}AAAAAA` },
       { tenantId: t!.id, keyHash: randomBytes(32).toString('hex'), prefix: `${shared}BBBBBB` },
     ]);
-    await expect(cli('revoke-key', shared)).rejects.toThrow(/matches 2 active keys/);
+    await expect(cli('revoke-key', shared)).rejects.toThrow(/matches 2 keys/);
     await expect(cli('revoke-key', 'gw_')).rejects.toThrow(/at least 6/);
     const stillActive = await handle.db.select().from(apiKeys).where(eq(apiKeys.tenantId, t!.id));
     expect(stillActive.filter((r) => r.revokedAt !== null)).toHaveLength(0);
@@ -107,5 +109,32 @@ describe('keys CLI', () => {
     const rows = await handle.db.select({ h: apiKeys.keyHash, r: apiKeys.revokedAt }).from(apiKeys);
     expect(rows.find((r) => r.h === hashA)!.r).not.toBeNull();
     expect(rows.find((r) => r.h === hashB)!.r).toBeNull();
+  });
+
+  it('revoke-key is repeatable: a second run rewrites the tombstone, and a failed one can be retried', async () => {
+    const tenant = await newTenant();
+    const key = (await cli('create-key', tenant)).stdout.trim();
+    const prefix = key.slice(0, 12);
+    const hash = hashKey(config.apiKeyPepper, key);
+    const redisKey = `${config.redisKeyPrefix}apikey:${hash}`;
+    const store = keyStoreFromConfig(config, handle.db, redis);
+    expect(await store.lookup(hash)).not.toBeNull(); // cached as valid
+
+    // Redis unreachable: Postgres is updated, the command fails, the cached copy is still valid.
+    await expect(cliWith({ REDIS_URL: 'redis://127.0.0.1:1' }, 'revoke-key', prefix)).rejects.toThrow(/redis unreachable/);
+    expect(await redis.get(redisKey)).toContain('tenantId');
+
+    // Run again with Redis up: succeeds and clears the cached valid entry.
+    const again = await cli('revoke-key', prefix);
+    expect(again.stdout).toContain('was already revoked; tombstone refreshed');
+    expect(await redis.get(redisKey)).toBe('revoked');
+
+    // A third run refreshes the tombstone after it went missing.
+    await redis.del(redisKey);
+    expect((await cli('revoke-key', prefix)).stdout).toContain('tombstone refreshed');
+    expect(await redis.get(redisKey)).toBe('revoked');
+
+    // Only a prefix matching nothing is an error.
+    await expect(cli('revoke-key', 'gw_nomatch0000')).rejects.toThrow(/no key with prefix/);
   });
 });

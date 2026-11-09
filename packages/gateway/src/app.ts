@@ -26,7 +26,12 @@ export function buildApp(
   app.addHook('onClose', async () => {
     // Close everything even if one close fails.
     redis?.disconnect();
-    await Promise.allSettled([upstream.close(), handle.close()]);
+    const closed = await Promise.allSettled([upstream.close(), handle.close()]);
+    for (const r of closed) {
+      if (r.status === 'rejected') {
+        app.log.error({ errClass: (r.reason as Error)?.name, code: (r.reason as { code?: string })?.code }, 'close failed');
+      }
+    }
   });
   // Fastify's own request errors (unsupported content-type, oversized body) and unknown routes
   // use the OpenAI error shape too.

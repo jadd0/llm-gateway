@@ -1,5 +1,5 @@
-import { and, asc, eq, isNull, sql } from 'drizzle-orm';
-import { loadConfig, loadDbConfig } from '../config.ts';
+import { asc, eq, sql } from 'drizzle-orm';
+import { loadConfig, loadDbConfig, loadPepperConfig } from '../config.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { apiKeys, tenants } from '../db/schema.ts';
 import { generateKey, hashKey, keyPrefix, KEY_PREFIX_LENGTH } from '../auth/keys.ts';
@@ -50,8 +50,9 @@ export async function listKeys(db: Db['db'], tenantName?: string) {
     .orderBy(asc(tenants.name), asc(apiKeys.createdAt));
 }
 
-// Revokes exactly one active key, found by display prefix. A prefix that matches several keys is
-// refused rather than guessed at.
+// Revokes exactly one key, found by display prefix; a prefix that matches several keys is refused.
+// Safe to repeat: an already revoked key gets its tombstone rewritten, which is how a revoke whose
+// Redis write failed is retried.
 export async function revokeKey(db: Db['db'], keyStore: KeyStore, prefixArg: string) {
   const prefix = prefixArg.slice(0, KEY_PREFIX_LENGTH);
   if (prefix.length < MIN_REVOKE_PREFIX) {
@@ -60,10 +61,10 @@ export async function revokeKey(db: Db['db'], keyStore: KeyStore, prefixArg: str
   const matches = await db
     .select({ keyHash: apiKeys.keyHash, prefix: apiKeys.prefix })
     .from(apiKeys)
-    .where(and(sql`starts_with(${apiKeys.prefix}, ${prefix})`, isNull(apiKeys.revokedAt)));
-  if (matches.length === 0) throw new CliError(`no active key with prefix "${prefix}"`);
+    .where(sql`starts_with(${apiKeys.prefix}, ${prefix})`);
+  if (matches.length === 0) throw new CliError(`no key with prefix "${prefix}"`);
   if (matches.length > 1) {
-    throw new CliError(`prefix "${prefix}" matches ${matches.length} active keys; give more characters`);
+    throw new CliError(`prefix "${prefix}" matches ${matches.length} keys; give more characters`);
   }
   const result = await keyStore.revoke(matches[0]!.keyHash);
   return { prefix: matches[0]!.prefix, ...result };
@@ -75,64 +76,71 @@ const USAGE = `usage:
   keys revoke-key <prefix>
   keys list-keys [tenant]`;
 
+async function withDb<T>(databaseUrl: string, fn: (db: Db['db']) => Promise<T>): Promise<T> {
+  const handle = createDb({ databaseUrl, poolSize: 2 });
+  try {
+    return await fn(handle.db);
+  } finally {
+    await handle.close();
+  }
+}
+
 async function main(argv: string[]) {
   const [command, ...args] = argv;
-  if (!command || !['create-tenant', 'create-key', 'revoke-key', 'list-keys'].includes(command)) {
-    throw new CliError(USAGE);
-  }
-  // Database-only commands need nothing but the database settings.
-  const dbOnly = command === 'create-tenant' || command === 'list-keys';
-  const config = dbOnly ? undefined : loadConfig();
-  const dbConfig = config ?? loadDbConfig();
-  const handle = createDb({ databaseUrl: dbConfig.databaseUrl, poolSize: 2 });
-  // Only revoke-key talks to Redis.
-  const redis =
-    command === 'revoke-key' && config?.authCache === 'redis' && config.redisUrl
-      ? createRedis(config.redisUrl)
-      : null;
-  try {
-    switch (command) {
-      case 'create-tenant': {
-        if (!args[0]) throw new CliError(USAGE);
-        const t = await createTenant(handle.db, args[0]);
-        console.log(`tenant ${t.name} ${t.id}`);
-        break;
-      }
-      case 'create-key': {
-        if (!args[0]) throw new CliError(USAGE);
-        const k = await createKey(handle.db, config!.apiKeyPepper, args[0], args[1]);
-        // stdout carries only the key so scripts can capture it; the rest goes to stderr.
-        console.error(`key for ${k.tenant} (prefix ${k.prefix}); store it now, it is not recoverable:`);
-        console.log(k.key);
-        break;
-      }
-      case 'revoke-key': {
-        if (!args[0]) throw new CliError(USAGE);
-        const keyStore = keyStoreFromConfig(config!, handle.db, redis);
-        const r = await revokeKey(handle.db, keyStore, args[0]);
-        if (!r.revoked) throw new CliError(`${r.prefix}: already revoked or not found`);
-        console.log(`revoked ${r.prefix}`);
+  switch (command) {
+    case 'create-tenant': {
+      if (!args[0]) throw new CliError(USAGE);
+      const name = args[0];
+      const t = await withDb(loadDbConfig().databaseUrl, (db) => createTenant(db, name));
+      console.log(`tenant ${t.name} ${t.id}`);
+      return;
+    }
+    case 'create-key': {
+      if (!args[0]) throw new CliError(USAGE);
+      const tenant = args[0];
+      const cfg = loadPepperConfig();
+      const k = await withDb(cfg.databaseUrl, (db) => createKey(db, cfg.apiKeyPepper, tenant, args[1]));
+      // stdout carries only the key so scripts can capture it; the rest goes to stderr.
+      console.error(`key for ${k.tenant} (prefix ${k.prefix}); store it now, it is not recoverable:`);
+      console.log(k.key);
+      return;
+    }
+    case 'revoke-key': {
+      if (!args[0]) throw new CliError(USAGE);
+      const prefixArg = args[0];
+      const config = loadConfig();
+      const redis = config.authCache === 'redis' && config.redisUrl ? createRedis(config.redisUrl) : null;
+      try {
+        const r = await withDb(config.databaseUrl, (db) =>
+          revokeKey(db, keyStoreFromConfig(config, db, redis), prefixArg),
+        );
         if (redis !== null && !r.tombstoned) {
           // Postgres is updated but the cache could not be told; a cached copy may live on.
+          // Running the same command again, once Redis is up, finishes the job.
           throw new CliError(
-            `redis unreachable: the key is revoked in Postgres but a cached copy can keep working for up to ${config!.authCacheTtlS}s`,
+            `${r.prefix}: redis unreachable. The key is revoked in Postgres but a cached copy can keep working for up to ${config.authCacheTtlS}s; run this command again when Redis is up`,
           );
         }
-        break;
+        console.log(r.revoked
+            ? `revoked ${r.prefix}`
+            : `${r.prefix} was already revoked${r.tombstoned ? '; tombstone refreshed' : ''}`);
+      } finally {
+        redis?.disconnect();
       }
-      case 'list-keys': {
-        const rows = await listKeys(handle.db, args[0]);
-        for (const r of rows) {
-          console.log(
-            [r.tenant, r.prefix, r.name ?? '-', r.createdAt.toISOString(), r.revokedAt ? `revoked ${r.revokedAt.toISOString()}` : 'active'].join('\t'),
-          );
-        }
-        break;
-      }
+      return;
     }
-  } finally {
-    redis?.disconnect();
-    await handle.close();
+    case 'list-keys': {
+      const tenant = args[0];
+      const rows = await withDb(loadDbConfig().databaseUrl, (db) => listKeys(db, tenant));
+      for (const r of rows) {
+        console.log(
+          [r.tenant, r.prefix, r.name ?? '-', r.createdAt.toISOString(), r.revokedAt ? `revoked ${r.revokedAt.toISOString()}` : 'active'].join('\t'),
+        );
+      }
+      return;
+    }
+    default:
+      throw new CliError(USAGE);
   }
 }
 
