@@ -22,6 +22,9 @@ first one (drizzle-kit names it at generate time). Residuals owned by this PR: n
 | `package.json` | root scripts `db:migrate`, `keys` forwarding to the gateway workspace |
 | `packages/gateway/drizzle.config.ts` | **new**. Schema path, `drizzle/` output, `DATABASE_URL` |
 | `packages/gateway/drizzle/` | **new**. Generated SQL migration + drizzle meta (never hand-edited) |
+| `packages/gateway/drizzle/0000_many_wallow.sql` | the generated migration |
+| `packages/gateway/drizzle/meta/0000_snapshot.json` | drizzle snapshot |
+| `packages/gateway/drizzle/meta/_journal.json` | drizzle journal |
 | `packages/gateway/src/db/schema.ts` | **new**. `tenants`, `api_keys` tables (see Schema) |
 | `packages/gateway/src/db/client.ts` | **new**. One `pg` Pool + drizzle instance; pool size from config |
 | `packages/gateway/src/db/migrate.ts` | **new**. Applies migrations with drizzle's migrator; run by `db:migrate` |
