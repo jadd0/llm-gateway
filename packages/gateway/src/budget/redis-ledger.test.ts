@@ -136,23 +136,34 @@ describe('redis ledger', { timeout: 120_000 }, () => {
   });
 
   it("missing balance triggers rebuild from Postgres; two concurrent rebuilds don't double it", async () => {
-    const calls: Array<[string, string]> = [];
-    const loadSpent = async (t: string, p: string) => {
-      calls.push([t, p]);
-      await new Promise((r) => setTimeout(r, 20)); // both rebuilds are in flight together
-      return 4000;
-    };
     const t = tenant();
-    const a = ledger(loadSpent);
-    const b = ledger(loadSpent);
-    const [ra, rb] = await Promise.all([a.reserve(args(t, 100, 10_000)), b.reserve(args(t, 100, 10_000))]);
-    expect(ra.allowed && rb.allowed).toBe(true);
-    // Both read Postgres (the balance was missing for both) but the spend was set once.
-    expect(calls).toHaveLength(2);
-    expect(await bal(t)).toEqual({ spent: 4000, reserved: 200 });
+    let release!: () => void;
+    const slow = new Promise<void>((r) => (release = r));
+    const calls = { slow: 0, fast: 0 };
+    // Instance A reads Postgres (4000) and is then held up before it can write the balance.
+    const a = ledger(async () => {
+      calls.slow++;
+      await slow;
+      return 4000;
+    });
+    const b = ledger(async () => {
+      calls.fast++;
+      return 4000;
+    });
+    const stuck = a.reserve(args(t, 100, 10_000));
+    // Meanwhile B rebuilds, reserves and settles a real charge on the new balance.
+    const mine = args(t, 100, 10_000);
+    expect((await b.reserve(mine)).allowed).toBe(true);
+    await b.settle({ tenantId: t, period: P, epoch: 1, id: mine.id, actual: 60 });
+    expect(await bal(t)).toEqual({ spent: 4060, reserved: 0 });
+    // A's stale rebuild now lands. It must find the balance there and leave it alone.
+    release();
+    expect((await stuck).allowed).toBe(true);
+    expect(await bal(t)).toEqual({ spent: 4060, reserved: 100 });
+    expect(calls).toEqual({ slow: 1, fast: 1 });
     // An existing balance is not rebuilt again.
     await a.reserve(args(t, 100, 10_000));
-    expect(calls).toHaveLength(2);
+    expect(calls.slow).toBe(1);
   });
 
   it('rebuilt spend counts against the cap', async () => {
