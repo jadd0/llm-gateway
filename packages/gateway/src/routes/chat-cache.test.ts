@@ -330,8 +330,10 @@ describe('response cache on POST /v1/chat/completions', () => {
   it('hit refunds the token estimate and counts one request', async () => {
     const t = await tenant();
     // The token bucket's Redis key expires on the real clock while the limiter's clock is pinned, and a nearly
-    // full bucket expires within milliseconds. A provider that reports 100000 tokens used keeps it half empty.
-    const body = req('mock-big', uniq());
+    // full bucket expires within milliseconds: a correction arriving after that finds no bucket and starts from
+    // a full one. A large max_tokens makes the estimate take enough of the bucket to outlast the upstream call,
+    // and a provider that reports 100000 tokens used then keeps it half empty.
+    const body = req('mock-big', uniq(), { max_tokens: 5000 });
     const remaining = (res: Response, kind: 'requests' | 'tokens') => Number(res.headers.get(`x-ratelimit-remaining-${kind}`));
     // The bucket as Redis holds it. Corrections to it are sent without the request waiting for them, so each
     // step waits until the bucket shows what it should.
