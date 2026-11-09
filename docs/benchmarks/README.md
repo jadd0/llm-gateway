@@ -21,7 +21,7 @@ for headline numbers is a later PR.
   so a slow gateway cannot hide by slowing the load. 30 s warm-up, then 60 s measured; only the
   measured phase is read.
 - **Overhead, two ways.** (1) The difference between the gateway run and the direct run at p50 and p95.
-  (2) The gateway's own `server-timing` figure. It covers only the gateway's pre-dispatch time, so it is
+  (2) The gateway's own `server-timing` figure. It covers only the gateway's in-process time (pre-dispatch plus post-receipt for non-streamed), so it is
   a floor, not the overhead; the k6 difference includes the extra HTTP hop. A p50 gap between the two over
   1 ms is investigated before publishing.
 - **Throughput.** The arrival rate is stepped up against the instant mock, through the gateway and direct,

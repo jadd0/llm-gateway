@@ -30,13 +30,6 @@ export function buildApp(
     }
     return reply.code(500).send(errorBody('internal error', 'gateway_error'));
   });
-  // Unknown routes would otherwise hit the body parsers first (a POST with an odd content-type
-  // would get 415 instead of 404), so answer them before parsing.
-  app.addHook('onRequest', async (request, reply) => {
-    if (request.routeOptions.url === undefined) {
-      return reply.code(404).send(errorBody('unknown route', 'invalid_request_error'));
-    }
-  });
   app.setNotFoundHandler((_request, reply) =>
     reply.code(404).send(errorBody('unknown route', 'invalid_request_error')),
   );

@@ -21,9 +21,9 @@ Diagram: [chat-passthrough.html](chat-passthrough.html). Code: `packages/gateway
 - **Non-streamed.** Status and content-type from the upstream, body passed as bytes.
 - **Failures.** Connection error gives 502, upstream timeout gives 504 (in the hang test, within about half a second of `UPSTREAM_TIMEOUT_MS`), both with
   `{"error":{"message":..., "type":"gateway_error"}}`. An upstream 4xx or 5xx is passed through unchanged.
-- **Timing.** Non-streamed responses carry `server-timing: gw-pre;dur=<ms>, upstream;dur=<ms>`; streamed
-  responses carry `server-timing: gw-pre;dur=<ms>`. `gw-pre` is the pre-dispatch time (request received to
-  upstream request dispatched); `upstream` is dispatch to body received.
+- **Timing.** Non-streamed responses carry `server-timing: gw-pre;dur=<ms>, gw-post;dur=<ms>, upstream;dur=<ms>`;
+  streamed responses carry `server-timing: gw-pre;dur=<ms>`. `gw-pre` is request received to upstream request
+  dispatched, `upstream` is dispatch to body received, `gw-post` is body received to reply built.
 - **Upstream headers.** `retry-after`, `x-request-id`, `openai-processing-ms` and every `x-ratelimit-*`
   header are passed through, streamed and not; other upstream headers are dropped.
 - **Errors.** Fastify's own errors (415 unsupported content-type, oversized body) and unknown routes (404)
@@ -50,7 +50,7 @@ deliberately the least clever code in the file: hijack and pipe, so there is not
 ## Measured (from [BENCHMARKS.md](../../BENCHMARKS.md))
 
 0.233 ms p50 / 0.982 ms p95 added, non-streamed at 1000 req/s; 0.238 ms p50 / 0.254 ms p95 added to first
-streamed byte at 200 req/s. The gateway's pre-dispatch time is 0.008 ms p50 (`server-timing`).
+streamed byte at 200 req/s. The gateway's in-process time (pre-dispatch plus post-receipt) was 0.008 ms p50 in the instant run (`server-timing`).
 
 ## Questions you should be able to answer
 
@@ -64,5 +64,5 @@ streamed byte at 200 req/s. The gateway's pre-dispatch time is 0.008 ms p50 (`se
    body; upstream 4xx and 5xx pass through unchanged. Retries and fallback are later PRs.
 4. **Why forward the original bytes instead of re-serialising?** It is cheaper, and the gateway only needs
    to know three fields, so everything else stays untouched.
-5. **What does `server-timing` tell you?** Only the gateway's pre-dispatch time. The real overhead is the
+5. **What does `server-timing` tell you?** Only the gateway's own in-process time. The real overhead is the
    k6 difference against a direct run, which includes the extra HTTP hop.

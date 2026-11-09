@@ -3,11 +3,15 @@
 Method and the reasons behind it: [docs/benchmarks/README.md](docs/benchmarks/README.md). Raw k6 summaries
 for every figure below are committed in [bench/results/pr-1/](bench/results/pr-1/); re-run with
 `npm run bench:baseline`. Every number here is read from those JSON files (`http_req_duration`,
-`http_req_waiting` and the gateway's pre-dispatch time, measured phase only, tag `phase:measure`). The
-pre-dispatch metric was named `gw_server_timing_ms` when these runs were recorded; the committed JSON keeps
-that name, and the k6 script now calls it `gw_pre_server_timing_ms`. The header it was read from was `gw` for
-non-streamed responses and `gw-pre` for streamed ones; both measured the same thing (request received to
-upstream request dispatched), and both are now named `gw-pre`.
+`http_req_waiting` and the gateway's own timing, measured phase only, tag `phase:measure`).
+
+The gateway-timing metric is named `gw_server_timing_ms` in the committed JSON. It was read from the
+`server-timing` header as it was when these runs were recorded: for the non-streamed (instant) runs the `gw`
+field, which is the gateway's in-process time, **pre-dispatch plus post-receipt** (request received to upstream
+dispatched, plus body received to reply built); for the streamed (realistic) runs the `gw-pre` field, which is
+**pre-dispatch only**. The gateway now reports `gw-pre` and `gw-post` separately on non-streamed responses, and
+the k6 script records them as `gw_pre_server_timing_ms` and `gw_post_server_timing_ms`. The committed
+results were not re-run.
 
 ## Environment
 
@@ -44,9 +48,9 @@ as an overhead figure. Time to first byte is the streamed measure.
 
 ### Cross-check against the gateway's own timing
 
-The gateway reports `server-timing` with a `gw-pre` field, its pre-dispatch time (request received to upstream
-request dispatched). That header measures only the gateway's own time before it calls the upstream: 0.008 ms p50 / 0.010 ms p95 (instant) and 0.010 ms p50 / 0.018 ms p95
-(realistic). It is not the overhead figure. k6's direct-versus-gateway difference, about 0.23 ms at p50, is
+The gateway reports `server-timing`. As recorded, that is its in-process time: 0.008 ms p50 / 0.010 ms p95
+for the instant run (pre-dispatch plus post-receipt) and 0.010 ms p50 / 0.018 ms p95 for the realistic run
+(pre-dispatch only). It is not the overhead figure. k6's direct-versus-gateway difference, about 0.23 ms at p50, is
 the real overhead, because it includes the extra HTTP hop (parsing the request, an extra socket round trip,
 writing the response) that the header cannot see. The plan's check was that the two must not differ by more
 than 1 ms at p50; they differ by about 0.22 ms, and the difference is explained by that hop.
