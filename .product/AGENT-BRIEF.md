@@ -203,3 +203,29 @@ Read it, never type it: `grep '^TEST_DATABASE=' .env.local`. If a failure makes 
 anything else, stop and report.
 Why: an interrupted drop once left the shared database invalid, and the way back risked every
 other worktree's database.
+
+## Repo-specific rules (llm-gateway)
+
+### R1. Tests sit beside the code
+
+A test for `src/foo.ts` is `src/foo.test.ts` in the same folder; there are no `test/` folders.
+vitest collects `packages/*/src/**/*.test.ts`.
+Why: founder's rule (D-008); a reader finds the proof next to the code it proves.
+
+### R2. Docs are one folder per part, each with a diagram
+
+Every part of the system has `docs/<part>/` holding `README.md` and an archify diagram (`.html`)
+of that part, drawn from the code as built. A PR that adds a part creates its folder and lists it
+in `docs/README.md`; a PR that changes a part updates its README and redraws its diagram. Each
+README is plain English, at most a page: what it does, why it is built this way, the decisions
+and their measured numbers, and 3 to 5 likely interview questions with answers. Data-flow lines
+in `docs/diagrams/flows.md` (the kit registry, which stays put) point at diagrams in part folders.
+Why: founder's rule (D-009); the founder does not write the code (D-007), so the docs are how
+he explains every part in an interview.
+
+### R3. No number without a run
+
+A figure in README.md, BENCHMARKS.md or `docs/` must trace to a committed k6 summary or test
+output. Never type, round or estimate one.
+Why: every number on the founder's CV must be reproducible live in an interview.
+
