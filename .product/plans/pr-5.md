@@ -33,9 +33,17 @@ migration: next free number at generate time. Residuals owned by this PR: none.
 | `packages/gateway/src/cli/keys.test.ts` | set-budget / show-spend tests |
 | `packages/gateway/src/config.ts`, `.env.example` | new rows (Decisions) |
 | `packages/gateway/src/app.ts` | register budget plugin after rate limit |
+| `packages/gateway/src/usage/settle.ts`, `packages/gateway/src/usage/settle.test.ts` | **new**. The one shared settle step (used / refund / keep) feeding the rate limiter and the budget |
+| `packages/gateway/src/usage/estimate.ts`, `packages/gateway/src/usage/estimate.test.ts` | `estimateWorstCase`: prompt plus max_tokens or the default, no tpm clamp |
+| `packages/gateway/src/routes/chat.ts` | settles through the shared step; `keep` on every exit |
+| `packages/gateway/src/budget/period.ts`, `packages/gateway/src/budget/period.test.ts` | **new**. UTC month helpers |
+| `packages/gateway/src/test-env.ts` | budgets off by default in tests |
+| `packages/gateway/src/auth/key-store.test.ts`, `packages/gateway/src/auth/plugin.test.ts` | cached tenant carries the cap |
+| `bench/budget-tool.ts` | **new**. Creates and measures the flood tenants |
+| `bench/run-baseline.sh`, `bench/run-ratelimit.sh` | budgets off in the older benchmarks |
 | `bench/k6/budget-flood.js` | **new**. Concurrent flood at a small-cap tenant |
 | `bench/run-budget.sh` | **new**. Overhead run (cap high, nothing refused) vs PR 4; flood runs; Redis-down run |
-| `bench/results/pr-5/*.json` | **new** |
+| `bench/results/pr-5/*.json` | **new**; produced by the orchestrator's quiet run (pending) |
 | `BENCHMARKS.md` | "Budgets (PR 5)" section |
 | `docs/budgets/README.md` | **new**. Reserve-then-settle in plain English, the Lua annotated, failure modes, numbers, interview Qs |
 | `docs/budgets/budget-flow.html` | **new**. Archify diagram: reserve → call → settle, the Postgres fallback and the epoch |
@@ -181,3 +189,13 @@ create table budget_epoch (id int primary key check (id = 1), epoch bigint not n
 - **Docs** (R2): interview Qs incl. "why reserve the worst case?", "why not just check balance > 0?",
   "why integer micro-dollars?", "what happens if Redis dies mid-month?", "what's the epoch for?",
   "where can the cap still be broken, and by how much?".
+
+## Notes from the build
+
+- The plan predates PR 4 as merged: the reconcile point is `request.rateLimit.settle` called from `routes/chat.ts`, not an
+  onResponse hook. Budget settle follows the same refund/keep rules through `usage/settle.ts`.
+- Settle is idempotent per request id through a short-lived `done` key in Redis, so a settle that arrives after its
+  reservation lapsed still charges, and a repeat never does.
+- Redis-path settle writes Postgres first, then Redis; a failed Redis settle moves the budget to the Postgres path and bumps the epoch.
+- Budget unreachable on both stores: `503 budget_unavailable` (fail closed). The plan did not say.
+- A request refused by the budget (402, 400 model_not_priced, 503) returns the tokens the limiter had taken.

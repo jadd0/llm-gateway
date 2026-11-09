@@ -17,8 +17,11 @@ hop (auth, limits, budgets, caching, failover, logging).
 - **Rate limiter** (`packages/gateway/src/ratelimit`, `usage`): per-key token buckets for requests and tokens per
   minute, kept in Redis by one Lua script so every gateway instance shares the count. See
   [../rate-limiter/README.md](../rate-limiter/README.md).
-- **Redis and Postgres+pgvector** (`docker-compose.yml`): Redis holds the key cache and the rate-limit buckets;
-  Postgres holds tenants and API keys (with their limits). Vectors and the request log are not used yet.
+- **Budgets** (`packages/gateway/src/budget`, `pricing`): a monthly spend cap per tenant. The worst-case cost is
+  reserved atomically in Redis before the call and replaced by the actual cost after; Postgres records every charge and
+  decides instead while Redis is down. See [../budgets/README.md](../budgets/README.md).
+- **Redis and Postgres+pgvector** (`docker-compose.yml`): Redis holds the key cache, the rate-limit buckets and the live
+  budget balances; Postgres holds tenants and API keys (with their limits and caps) and the spend record. Vectors and the request log are not used yet.
 
 ## Planned (marked dashed in the diagram)
 
@@ -52,7 +55,7 @@ compared against rather than an impression. PR 3 added the key check and re-meas
    non-streamed in the baseline.
 2. **Why is the gateway stateless?** So instances scale horizontally; anything shared goes to Redis or
    Postgres. Auth uses both: Postgres is the source of truth for keys, Redis only caches it.
-3. **What is built versus planned?** Built: passthrough, the mock, tenants and API-key auth, per-key rate limits. Planned: everything dashed in the
+3. **What is built versus planned?** Built: passthrough, the mock, tenants and API-key auth, per-key rate limits, per-tenant monthly budgets (see [../budgets/](../budgets/README.md)). Planned: everything dashed in the
    diagram.
 4. **How do you know the numbers are the gateway's?** The mock removes provider variance, and each figure is
    a difference against a direct-to-mock run at the same rate.

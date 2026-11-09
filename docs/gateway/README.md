@@ -38,6 +38,9 @@ Diagram: [chat-passthrough.html](chat-passthrough.html). Code: `packages/gateway
 - **Rate limit.** After auth and before the route, a `preHandler` (`ratelimit/plugin.ts`) charges the request to the
   key's buckets or answers 429 / 400. A streamed request is sent upstream with `stream_options.include_usage=true`
   and its bytes pass through a tap that reads the final usage (and drops the usage-only chunk if the client did not ask for it); see [../rate-limiter/README.md](../rate-limiter/README.md).
+- **Budget.** After the rate limiter, a `preHandler` (`budget/plugin.ts`) reserves the request's worst-case cost against
+  the tenant's monthly cap or answers 402 / 400 / 503. The route ends every request through one shared step
+  (`usage/settle.ts`) that settles the rate limiter and the budget together; see [../budgets/README.md](../budgets/README.md).
 - **Binding.** The gateway listens on `GATEWAY_HOST`, default `127.0.0.1`.
 - **Logging.** Nothing logs per request. `LOG_LEVEL` defaults to `warn`; failures log error class and code only.
 

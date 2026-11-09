@@ -13,6 +13,8 @@ without any other command in between: two gateways can never both read "1 token 
 
 ## The path of a request
 
+Budgets (PR 5) sit right after this check and settle through the same step as the token bucket; see [../budgets/README.md](../budgets/README.md). A request the budget refuses gets its tokens back.
+
 1. `auth/plugin.ts` (onRequest) identifies the key, as before. The cached key entry now carries `keyId`, `rpmLimit`
    and `tpmLimit`, so the limiter costs no extra database read.
 2. `ratelimit/plugin.ts` (preHandler, after the body is read) first asks whether the route would accept the body

@@ -19,3 +19,5 @@ lines verbatim; for any plan in the branch's diff, a flow line missing from this
 - API key check → `docs/auth/api-key-check.html` → `packages/gateway/src/auth/{plugin.ts,key-store.ts}`
 - API key management (CLI) → `docs/auth/api-key-check.html` → `packages/gateway/src/cli/keys.ts`
 - Rate limit check and usage reconcile → `docs/rate-limiter/token-bucket.html` → `packages/gateway/src/{ratelimit/*.ts,ratelimit/token-bucket.lua,usage/*.ts}`
+- Budget reserve and settle → `docs/budgets/budget-flow.html` → `packages/gateway/src/budget/*.ts`
+- Spend recorded to Postgres → `docs/budgets/budget-flow.html` → `packages/gateway/src/budget/{budget.ts,pg-ledger.ts}`
