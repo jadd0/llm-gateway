@@ -8,7 +8,7 @@ response and streaming format.
 
 **SCOPE GUARD:** text chat only. No tool/function calling, images or audio, `n > 1`, logprobs
 or embeddings: for Anthropic and Gemini these get a 400 `unsupported_parameter`, never silently
-dropped; OpenAI requests pass through untouched. No retries, fallback or breaker (PR 7). The mock
+dropped (a neutral value such as `presence_penalty: 0` or `logprobs: false` asks for nothing and passes); OpenAI requests pass through untouched. No retries, fallback or breaker (PR 7). The mock
 stays the benchmark target; live calls are a hand-run script, never in the gate or CI.
 
 **BASE:** main after PR 5 merges (usage flows into the PR 4/5 reconcile hook; real prices go in
@@ -59,18 +59,27 @@ none.
 
 - **Apps speak OpenAI format only.** Every response, streamed or not, from every provider, is
   OpenAI-shaped (`chat.completion` / `chat.completion.chunk`, `finish_reason`, `usage`).
-- **Routing** by longest matching prefix in `MODEL_ROUTES`. The model name is forwarded as given.
+- **Routing** by longest matching prefix in `MODEL_ROUTES`. The model name is forwarded as given. A
+  name no route serves is answered 400 `model_not_found` before the budget looks at it (a routed name
+  with no price is still 400 `model_not_priced`).
+- **`OPENAI_BASE_URL` carries its path** (`https://api.openai.com/v1`); a URL with no path is refused at
+  start-up with a message naming the fix. The mock's three formats are served under `MOCK_BASE_URL`.
 - **Anthropic translation:** `system` messages joined into `system`; consecutive same-role
   messages merged; `max_tokens` required (`max_tokens ?? max_completion_tokens ?? default`);
-  `stop` → `stop_sequences`; `temperature`, `top_p` mapped. Response: text blocks joined;
+  `stop` → `stop_sequences`; `temperature`, `top_p` mapped (`temperature` above 1 is refused:
+  Anthropic accepts 0 to 1). `user`, `metadata`, `service_tier` and `store` are dropped; `reasoning_effort`
+  other than null is refused. Response: text blocks joined;
   `end_turn`/`stop_sequence` → `stop`, `max_tokens` → `length`; `input_tokens`/`output_tokens`
   → `prompt_tokens`/`completion_tokens`. Stream: `message_start` (input usage),
   `content_block_delta` text → `delta.content`, `message_delta` (stop reason, output usage) →
   final chunk + usage chunk, `message_stop` → `[DONE]`, `ping` ignored, `error` event → stream
-  ends with an OpenAI-shaped error event. Headers `x-api-key`, `anthropic-version`.
+  ends with an OpenAI-shaped error event typed by meaning (`rate_limit_error` → `rate_limit_error` /
+  `rate_limit_exceeded`; `invalid_request_error` stays; auth errors → `provider_auth_failed`; everything
+  else, including `overloaded_error`, `api_error`, timeouts → `server_error`). Gemini's `error.status`
+  maps the same way. Headers `x-api-key`, `anthropic-version`.
 - **Gemini translation:** messages → `contents` (`user`/`model`, `parts:[{text}]`), system →
-  `systemInstruction`; `generationConfig` {`maxOutputTokens`, `temperature`, `topP`,
-  `stopSequences`}. Response: first candidate's text parts joined; `STOP` → `stop`, `MAX_TOKENS`
+  `systemInstruction`; `generationConfig` {`maxOutputTokens` (the client's limit, else the default allowance the budget hold is
+  sized on), `temperature`, `topP`, `stopSequences`}. Response: first candidate's text parts joined; `STOP` → `stop`, `MAX_TOKENS`
   → `length`, `SAFETY`/`RECITATION` → `content_filter`; usage from `usageMetadata`
   (`promptTokenCount`; completion = `candidatesTokenCount + thoughtsTokenCount`). Header
   `x-goog-api-key`.
@@ -80,11 +89,14 @@ none.
 - **Usage** from every adapter reaches the PR 4/5 reconcile hook; translated streams report it
   from the adapter, OpenAI from PR 4's tap.
 - **Errors:** provider status kept (429 stays 429 with `retry-after`; Anthropic 529 overloaded →
-  503); body mapped to the OpenAI error shape with the provider's message.
+  503); body mapped to the OpenAI error shape with the provider's message. Exception: a provider 401
+  or 403 (the gateway's own key was rejected) is a 502 `provider_auth_failed` with a generic message,
+  for all three formats including OpenAI pass-through; the real status and message are logged only
+  (D-026).
 - **Credentials isolation:** each provider receives only its own key; a test asserts no
   Anthropic key reaches Gemini and vice versa, and no client key reaches any provider.
 - **Unsupported parameters** for translated providers (`tools`, `tool_choice`, image or audio
-  content parts, `n > 1`, `logprobs`, `response_format`) → 400 `unsupported_parameter` naming
+  content parts, `n > 1`, `logprobs: true`, non-zero penalties, `seed`, `response_format`, `reasoning_effort`) → 400 `unsupported_parameter` naming
   the field.
 
 ## Tests
@@ -149,7 +161,7 @@ its own key`; `usage from each format reaches reconcile`.
   `claude-=anthropic,gpt-=openai,o1=openai,o3=openai,o4=openai,gemini-=gemini,mock-anthropic-=mock-anthropic,mock-gemini-=mock-gemini,mock-=mock-openai`),
   `ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL=https://api.anthropic.com`,
   `ANTHROPIC_VERSION=2023-06-01`, `GEMINI_API_KEY`,
-  `GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta`, `MOCK_BASE_URL=http://127.0.0.1:9000`,
+  `GEMINI_BASE_URL=https://generativelanguage.googleapis.com/v1beta`, `MOCK_BASE_URL=http://127.0.0.1:9000`, `OPENAI_BASE_URL` must include `/v1`,
   `DEFAULT_MAX_TOKENS` (shared with PR 4's default). Keys blank in `.env.example`; a provider
   with no key returns 503 `provider_not_configured` instead of crashing at start-up.
 - **Docs** (R2): interview Qs incl. "why adapters, not SDKs?", "how do you translate a stream
