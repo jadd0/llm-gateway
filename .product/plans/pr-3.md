@@ -34,7 +34,10 @@ first one (drizzle-kit names it at generate time). Residuals owned by this PR: n
 | `packages/gateway/src/auth/plugin.test.ts` | **new** |
 | `packages/gateway/src/cli/keys.ts` | **new**. `create-tenant`, `create-key`, `revoke-key`, `list-keys` |
 | `packages/gateway/src/cli/keys.test.ts` | **new** |
-| `packages/gateway/src/config.ts` | new rows (see Decisions) |
+| `packages/gateway/src/config.ts` | new rows (see Decisions), plus `REDIS_KEY_PREFIX` so tests namespace their Redis keys |
+| `packages/gateway/src/errors.ts` | `errorBody` takes an optional `code` for the 401 body |
+| `packages/gateway/src/test-env.ts` | **new**. Test helper: reads `.env.local`, random pepper and Redis prefix per run, `seedKey`, `cleanup` |
+| `.product/gate-steps` | `db-migrate` step so the suite always runs against a migrated database |
 | `packages/gateway/src/app.ts` | register auth plugin before routes; close db and redis on shutdown |
 | `packages/gateway/src/routes/chat.test.ts` | existing tests send a valid key |
 | `.env.example` | new rows |
