@@ -63,6 +63,16 @@ describe('OPENAI_BASE_URL', () => {
     expect(loadConfig(env({})).upstreamBaseUrl).toBe('https://api.openai.com/v1');
     expect(loadConfig(env({ OPENAI_BASE_URL: '' })).upstreamBaseUrl).toBe('https://api.openai.com/v1');
   });
+
+  it('root OPENAI_BASE_URL allowed only with the flag', () => {
+    for (const root of ['http://127.0.0.1:9000', 'https://proxy.example.com/']) {
+      expect(() => loadConfig(env({ OPENAI_BASE_URL: root })), root).toThrow(/OPENAI_BASE_URL_ALLOW_ROOT=true/);
+      expect(() => loadConfig(env({ OPENAI_BASE_URL: root, OPENAI_BASE_URL_ALLOW_ROOT: 'false' })), root).toThrow(/needs the API version path/);
+      expect(loadConfig(env({ OPENAI_BASE_URL: root, OPENAI_BASE_URL_ALLOW_ROOT: 'true' })).upstreamBaseUrl).toBe(root);
+    }
+    // The flag does not change a URL that already has a path.
+    expect(loadConfig(env({ OPENAI_BASE_URL: 'http://127.0.0.1:9000/v1', OPENAI_BASE_URL_ALLOW_ROOT: 'true' })).upstreamBaseUrl).toBe('http://127.0.0.1:9000/v1');
+  });
 });
 
 describe('resilience settings', () => {

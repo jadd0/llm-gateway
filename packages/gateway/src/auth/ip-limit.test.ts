@@ -71,14 +71,17 @@ describe('failed-auth limit per address', () => {
     expect((await get(gw, bad())).status).toBe(401);
     expect(await lookups(gw)).toBe(1);
 
-    // 10 000 random well-formed keys, 100 in flight at a time.
+    // The first LIMIT failures, one at a time, are the limit's worth: each reaches Postgres.
+    for (let i = 1; i < LIMIT; i++) expect((await get(gw, bad())).status).toBe(401);
+    expect(await lookups(gw)).toBe(LIMIT);
+    // Then 10 000 random well-formed keys, 100 in flight at a time: all refused ahead of Postgres.
     const statuses = new Map<number, number>();
     for (let i = 0; i < 100; i++) {
       const batch = await Promise.all(Array.from({ length: 100 }, () => get(gw, bad()).then((r) => r.status)));
       for (const s of batch) statuses.set(s, (statuses.get(s) ?? 0) + 1);
     }
-    expect(statuses.get(401)).toBe(LIMIT - 1); // the limit's worth, the first request included
-    expect(statuses.get(429)).toBe(10_000 - (LIMIT - 1));
+    expect(statuses.get(429)).toBe(10_000);
+    expect(statuses.get(401)).toBeUndefined();
     expect(await lookups(gw)).toBe(LIMIT);
 
     const refused = await get(gw, bad());

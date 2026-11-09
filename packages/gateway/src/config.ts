@@ -46,18 +46,11 @@ const schema = z
     GATEWAY_HOST: z.preprocess(blankAsUnset, z.string().default('127.0.0.1')),
     GATEWAY_PORT: int(8080, 0),
     // Base URLs carry the API version prefix, as the providers' own SDKs expect; adapters append to them.
-    // A URL with no path is refused: this one carries /v1 (the gateway used to add it), and a leftover
-    // `http://host:port` would send every request to a path the provider does not serve.
-    OPENAI_BASE_URL: z.preprocess(
-      blankAsUnset,
-      z
-        .url()
-        .default('https://api.openai.com/v1')
-        .refine((u) => new URL(u).pathname.replace(/\/+$/, '') !== '', {
-          message:
-            'OPENAI_BASE_URL needs the API version path, as OpenAI\'s SDKs take it: https://api.openai.com/v1 (a proxy: https://host/v1). The gateway no longer adds /v1',
-        }),
-    ),
+    // A URL with no path is refused unless OPENAI_BASE_URL_ALLOW_ROOT=true: this one carries /v1 (the gateway
+    // used to add it), and a leftover `http://host:port` would send every request to a path the provider
+    // does not serve. A root-mounted OpenAI-compatible upstream sets the flag.
+    OPENAI_BASE_URL: z.preprocess(blankAsUnset, z.url().default('https://api.openai.com/v1')),
+    OPENAI_BASE_URL_ALLOW_ROOT: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('false')),
     OPENAI_API_KEY: z.preprocess(blankAsUnset, z.string().optional()),
     ANTHROPIC_BASE_URL: z.preprocess(blankAsUnset, z.url().default('https://api.anthropic.com')),
     ANTHROPIC_API_KEY: z.preprocess(blankAsUnset, z.string().optional()),
@@ -152,6 +145,11 @@ const schema = z
     BUDGET_EPOCH_REFRESH_MS: int(250, 10),
     BUDGET_OUTAGE_FAILURES: int(3, 1),
     BUDGET_SWEEP_INTERVAL_S: int(60, 1),
+  })
+  .refine((e) => e.OPENAI_BASE_URL_ALLOW_ROOT === 'true' || new URL(e.OPENAI_BASE_URL).pathname.replace(/\/+$/, '') !== '', {
+    message:
+      "OPENAI_BASE_URL needs the API version path, as OpenAI's SDKs take it: https://api.openai.com/v1 (a proxy: https://host/v1). The gateway no longer adds /v1. An upstream mounted at the root of its host: set OPENAI_BASE_URL_ALLOW_ROOT=true",
+    path: ['OPENAI_BASE_URL'],
   })
   .refine((e) => e.UPSTREAM_TIMEOUT_MS === undefined, {
     message:

@@ -66,12 +66,10 @@ export function createUpstream(config: TargetConfig): Upstream {
     return pool;
   };
 
+  // One adapter per wire format, shared by the real provider and its mock: they speak the same format.
   const openai = createOpenAiAdapter();
   const anthropic = createAnthropicAdapter({ version: config.anthropicVersion });
   const gemini = createGeminiAdapter();
-  const mockOpenai = createOpenAiAdapter();
-  const mockAnthropic = createAnthropicAdapter({ version: config.anthropicVersion });
-  const mockGemini = createGeminiAdapter();
 
   const make = (provider: ProviderId, adapter: Adapter, baseUrl: string, apiKey: string | undefined, mock: boolean, extra = ''): Target => {
     const url = new URL(baseUrl);
@@ -89,9 +87,9 @@ export function createUpstream(config: TargetConfig): Upstream {
     anthropic: () => make('anthropic', anthropic, config.anthropicBaseUrl, config.anthropicApiKey, false),
     gemini: () => make('gemini', gemini, config.geminiBaseUrl, config.geminiApiKey, false),
     // The mock serves each format at the path the real provider uses, under the same version prefix.
-    'mock-openai': () => make('mock-openai', mockOpenai, config.mockBaseUrl, undefined, true, '/v1'),
-    'mock-anthropic': () => make('mock-anthropic', mockAnthropic, config.mockAnthropicBaseUrl, undefined, true),
-    'mock-gemini': () => make('mock-gemini', mockGemini, config.mockGeminiBaseUrl, undefined, true, '/v1beta'),
+    'mock-openai': () => make('mock-openai', openai, config.mockBaseUrl, undefined, true, '/v1'),
+    'mock-anthropic': () => make('mock-anthropic', anthropic, config.mockAnthropicBaseUrl, undefined, true),
+    'mock-gemini': () => make('mock-gemini', gemini, config.mockGeminiBaseUrl, undefined, true, '/v1beta'),
   };
   const targets = new Map<ProviderId, Target>();
 

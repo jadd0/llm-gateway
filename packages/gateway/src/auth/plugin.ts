@@ -31,9 +31,9 @@ const authPlugin: FastifyPluginAsync<AuthOptions> = async (app, opts) => {
   app.decorateRequest('tenant', null);
   // onRequest runs before the body is read or parsed, so an unauthenticated caller costs one lookup
   // and nothing else. It also covers unknown routes, which therefore answer 401 rather than 404.
-  // With an address limiter, each request first takes one token from its address's bucket and gives it
-  // back when the key is valid: only failed authentications count, and an address that has used up its
-  // tokens is refused before any lookup. request.ip honours X-Forwarded-For only from trusted proxies.
+  // With an address limiter, an address whose bucket is empty is refused before any lookup, and each failed
+  // authentication takes a token from it: only failures count, so a valid key is never charged.
+  // request.ip honours X-Forwarded-For only from trusted proxies.
   app.addHook('onRequest', async (request, reply) => {
     const limiter = opts.ipLimiter;
     if (limiter) {
@@ -53,12 +53,14 @@ const authPlugin: FastifyPluginAsync<AuthOptions> = async (app, opts) => {
       }
     }
     const token = bearerToken(request.headers.authorization);
-    if (token === undefined || !looksLikeKey(token)) return reply.code(401).send(unauthorized());
+    const reject = async () => {
+      if (limiter) await limiter.failed(request.ip);
+      return reply.code(401).send(unauthorized());
+    };
+    if (token === undefined || !looksLikeKey(token)) return reject();
     const tenant = await opts.keyStore.lookup(hashKey(opts.pepper, token));
-    if (tenant === null) return reply.code(401).send(unauthorized());
+    if (tenant === null) return reject();
     request.tenant = tenant;
-    // Not awaited: the refund is bookkeeping and must not add a round trip to a valid request.
-    if (limiter) void limiter.succeeded(request.ip);
   });
 };
 

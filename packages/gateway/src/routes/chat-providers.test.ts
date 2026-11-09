@@ -144,7 +144,7 @@ beforeAll(async () => {
   tenantIds.push(tenantId);
   const cfg = (env: Record<string, string>) =>
     testConfig({ API_KEY_PEPPER: base.apiKeyPepper, REDIS_KEY_PREFIX: prefix, BUDGET_ENABLED: 'true', RATE_LIMIT_REDIS_TIMEOUT_MS: '5000', BUDGET_REDIS_TIMEOUT_MS: '5000', ...env });
-  viaMock = buildApp(cfg({ OPENAI_BASE_URL: urls.mock, MOCK_BASE_URL: urls.mock }));
+  viaMock = buildApp(cfg({ OPENAI_BASE_URL: `${urls.mock}/v1`, MOCK_BASE_URL: urls.mock }));
   viaStub = buildApp(
     cfg({
       OPENAI_BASE_URL: `${urls.stub}/api/v1`, // a path prefix, as OpenRouter's
@@ -154,8 +154,8 @@ beforeAll(async () => {
       ...KEYS,
     }),
   );
-  noKeys = buildApp(cfg({ OPENAI_BASE_URL: urls.stub, MOCK_BASE_URL: urls.stub }));
-  unmetered = buildApp(cfg({ OPENAI_BASE_URL: urls.stub, MOCK_BASE_URL: urls.stub, BUDGET_ENABLED: 'false' }));
+  noKeys = buildApp(cfg({ OPENAI_BASE_URL: `${urls.stub}/v1`, MOCK_BASE_URL: urls.stub }));
+  unmetered = buildApp(cfg({ OPENAI_BASE_URL: `${urls.stub}/v1`, MOCK_BASE_URL: urls.stub, BUDGET_ENABLED: 'false' }));
   logged = buildApp(
     cfg({ OPENAI_BASE_URL: `${urls.stub}/api/v1`, ANTHROPIC_BASE_URL: `${urls.stub}/anthropic`, GEMINI_BASE_URL: `${urls.stub}/v1beta`, MOCK_BASE_URL: urls.stub, LOG_LEVEL: 'error', ...KEYS }),
     { logStream: { write: (line: string) => void logLines.push(line) } as unknown as NodeJS.WritableStream },

@@ -3,8 +3,7 @@ import { isIPv6 } from 'node:net';
 import type { Redis } from 'ioredis';
 import { isStarting } from '../redis.ts';
 
-// The same two scripts as the per-key limiter: a conditional take and a bounded adjust.
-const TAKE_LUA = readFileSync(new URL('../ratelimit/token-bucket.lua', import.meta.url), 'utf8');
+// The per-key limiter's bounded-adjust script: delta 0 reads the bucket (after refill), -1 charges a failure.
 const ADJUST_LUA = readFileSync(new URL('../ratelimit/token-bucket-adjust.lua', import.meta.url), 'utf8');
 
 export type IpAdmit =
@@ -15,12 +14,13 @@ export type IpAdmit =
 
 export interface IpLimiter {
   /**
-   * Charges one failed-authentication token to the client's bucket, or says the bucket is empty. Called
-   * before the key is looked up, so a refused client costs no Postgres query. Never throws.
+   * Whether the client's bucket still has a token. Read-only: a valid request is never charged, so a busy
+   * legitimate client is not limited however many requests it has in flight. Called before the key is
+   * looked up, so a refused client costs no Postgres query. Never throws.
    */
   admit(ip: string, now?: number): Promise<IpAdmit>;
-  /** Hands the token back once the key turned out valid, so only failed authentications count. Never throws. */
-  succeeded(ip: string, now?: number): Promise<void>;
+  /** Charges one failed authentication. Never throws. */
+  failed(ip: string, now?: number): Promise<void>;
 }
 
 export interface IpLimiterOptions {
@@ -36,7 +36,6 @@ export interface IpLimiterOptions {
 }
 
 type Commands = Redis & {
-  ipTake(k1: string, k2: string, ...args: Array<string | number>): Promise<number[]>;
   ipAdjust(k: string, ...args: Array<string | number>): Promise<number>;
 };
 
@@ -66,14 +65,12 @@ export function ipBucketId(ip: string): string {
 
 export function createIpLimiter(opts: IpLimiterOptions): IpLimiter {
   const { redis, keyPrefix, limitPerMin, timeoutMs, log, clock } = opts;
-  redis.defineCommand('ipTake', { numberOfKeys: 2, lua: TAKE_LUA });
   redis.defineCommand('ipAdjust', { numberOfKeys: 1, lua: ADJUST_LUA });
   const cmd = redis as Commands;
-  // The bucket lives in the request-bucket key; the script's token bucket is charged nothing.
-  const keys = (ip: string) => [`${keyPrefix}ipfail:{${ipBucketId(ip)}}:req`, `${keyPrefix}ipfail:{${ipBucketId(ip)}}:tok`] as const;
+  const key = (ip: string) => `${keyPrefix}ipfail:{${ipBucketId(ip)}}`;
 
   let down = false;
-  const failed = (err: unknown) => {
+  const outage = (err: unknown) => {
     if (isStarting(redis) || down) return;
     down = true;
     log?.warn(
@@ -81,7 +78,7 @@ export function createIpLimiter(opts: IpLimiterOptions): IpLimiter {
       'redis unavailable, per-address limiting of failed authentications is off until it answers again',
     );
   };
-  const ok = () => {
+  const recovered = () => {
     if (!down) return;
     down = false;
     log?.info({}, 'redis available again, per-address limiting resumed');
@@ -102,44 +99,32 @@ export function createIpLimiter(opts: IpLimiterOptions): IpLimiter {
       );
     });
 
-  const refund = async (ip: string, now?: number): Promise<void> => {
-    const [kReq] = keys(ip);
+  // Moves the bucket by delta and returns the whole tokens left (negative once failures outrun the refill).
+  const move = (ip: string, delta: number, now?: number): Promise<number> => {
     const at = now ?? clock?.();
-    await withTimeout(cmd.ipAdjust(kReq, limitPerMin, 1, ...(at === undefined ? [] : [at])));
+    return withTimeout(cmd.ipAdjust(key(ip), limitPerMin, delta, ...(at === undefined ? [] : [at])));
   };
 
   return {
     async admit(ip, now) {
-      const [kReq, kTok] = keys(ip);
-      const at = now ?? clock?.();
-      let call: Promise<number[]> | undefined;
       try {
-        call = cmd.ipTake(kReq, kTok, limitPerMin, 1, 0, ...(at === undefined ? [] : [at]));
-        const r = await withTimeout(call);
-        ok();
-        if (r[0] === 1) return { status: 'allowed' };
-        return { status: 'denied', retryAfterMs: r[3] ?? 0 };
+        const left = await move(ip, 0, now);
+        recovered();
+        if (left >= 1) return { status: 'allowed' };
+        // Time for the bucket to climb back to one token at limitPerMin tokens a minute.
+        return { status: 'denied', retryAfterMs: Math.ceil(((1 - left) * 60_000) / limitPerMin) };
       } catch (err) {
-        failed(err);
-        // A take the script still runs after we gave up would charge a request we let through: hand it back.
-        if (err instanceof RedisTimeout && call !== undefined) {
-          call.then(
-            (late) => {
-              if (late[0] === 1) void refund(ip).catch(() => {});
-            },
-            () => {},
-          );
-        }
+        outage(err);
         return { status: 'skipped' };
       }
     },
 
-    async succeeded(ip, now) {
+    async failed(ip, now) {
       try {
-        await refund(ip, now);
-        ok();
+        await move(ip, -1, now);
+        recovered();
       } catch (err) {
-        failed(err);
+        outage(err);
       }
     },
   };
