@@ -129,3 +129,18 @@ describe('response cache settings', () => {
     expect(() => loadConfig(env({ CACHE_LOCK_MS: '1000', CACHE_WAIT_MS: '2000' }))).toThrow(/CACHE_WAIT_MS must not be longer than CACHE_LOCK_MS/);
   });
 });
+
+describe('request log settings', () => {
+  it('defaults, and the stream needs Redis while inline does not', () => {
+    expect(loadConfig(env({}))).toMatchObject({
+      logMode: 'stream', logGroup: 'log-writers', logBatchSize: 500, logBatchWaitMs: 1000,
+      logClaimIdleMs: 30_000, logMaxDeliveries: 5, logBufferMax: 10_000, logSweepS: 60,
+    });
+    expect(loadConfig(env({})).workerConsumer).toMatch(/-\d+$/);
+    expect(loadConfig(env({ WORKER_CONSUMER: 'w1' })).workerConsumer).toBe('w1');
+    const noRedis = { DATABASE_URL: 'postgres://u:p@127.0.0.1:1/db', API_KEY_PEPPER: 'x'.repeat(40), AUTH_CACHE: 'none', RATE_LIMIT_ENABLED: 'false', BUDGET_ENABLED: 'false', CACHE_ENABLED: 'false' };
+    expect(() => loadConfig(noRedis)).toThrow(/LOG_MODE=stream/);
+    expect(loadConfig({ ...noRedis, LOG_MODE: 'inline' }).logMode).toBe('inline');
+    expect(() => loadConfig(env({ LOG_MODE: 'file' }))).toThrow();
+  });
+});
