@@ -36,8 +36,17 @@ without any other command in between: two gateways can never both read "1 token 
    - the provider answers non-2xx (500, 429, ...) or cannot be reached (502, 504): nothing was used, the whole
      estimate is refunded (`settle(0)`);
    - the client leaves, or a stream fails after bytes were sent: tokens were partly used, so the estimate stays;
-   - a streamed answer with no usage in it, or a request whose `stream_options` is not an object: the estimate stays;
+   - a streamed answer with no usage in it, or a request whose `stream_options` is not an object, or a provider answer that was 2xx but whose body then broke: the
+     estimate stays;
    - a denied request is never charged or settled.
+
+Two trade-offs to know about:
+- With `include_usage` on, OpenAI-style providers put `"usage":null` on every content chunk, and the gateway forwards
+  those unchanged (even to a client that did not ask for usage). Most clients ignore the field.
+- When the caller names no `max_tokens`, the output allowance is trimmed to what is left of the key's minute
+  (`tpm` minus the prompt), so the real output can be larger than what was charged. The correction then debits
+  the difference and the bucket goes negative, so the key's later requests wait. The overshoot is bounded by one
+  request's output and corrects itself as the bucket refills.
 
 How the request body changes for a streamed request: if the client already sent `include_usage: true` the bytes are
 forwarded untouched. If it sent no `stream_options`, `"stream_options":{"include_usage":true},` is spliced in after
