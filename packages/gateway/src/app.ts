@@ -169,7 +169,9 @@ export function buildApp(
       },
       defaultCapMicros: config.budgetDefaultMonthlyMicros,
       defaultMaxTokens: config.rateLimitDefaultMaxTokens,
+      mockMaxOutputTokens: config.mockMaxOutputTokens,
       isRoutable: (model) => upstream.resolve(model) !== undefined,
+      sendsNoOutputLimit: (model) => upstream.resolve(model)?.adapter.translates === false,
       chainFor: (model) => chainFor(config.modelFallbacks, model),
     });
   }

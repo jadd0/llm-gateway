@@ -141,6 +141,7 @@ const schema = z
     RATE_LIMIT_DEFAULT_RPM: int(600, 1),
     RATE_LIMIT_DEFAULT_TPM: int(200_000, 1),
     RATE_LIMIT_DEFAULT_MAX_TOKENS: int(1024, 1),
+    MOCK_MAX_OUTPUT_TOKENS: int(4096, 1),
     RATE_LIMIT_REDIS_TIMEOUT_MS: int(50, 1),
     BUDGET_ENABLED: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
     BUDGET_DEFAULT_MONTHLY_USD: usd('10'),
@@ -260,6 +261,7 @@ export interface Config {
   rateLimitDefaultTpm: number;
   /** Output tokens assumed when a request names no max_tokens. */
   rateLimitDefaultMaxTokens: number;
+  mockMaxOutputTokens: number;
   rateLimitRedisTimeoutMs: number;
   budgetEnabled: boolean;
   /** Monthly cap in micro-USD for tenants with none of their own. */
@@ -337,6 +339,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rateLimitDefaultRpm: e.RATE_LIMIT_DEFAULT_RPM,
     rateLimitDefaultTpm: e.RATE_LIMIT_DEFAULT_TPM,
     rateLimitDefaultMaxTokens: e.RATE_LIMIT_DEFAULT_MAX_TOKENS,
+    mockMaxOutputTokens: e.MOCK_MAX_OUTPUT_TOKENS,
     rateLimitRedisTimeoutMs: e.RATE_LIMIT_REDIS_TIMEOUT_MS,
     budgetEnabled: e.BUDGET_ENABLED === 'true',
     budgetDefaultMonthlyMicros: e.BUDGET_DEFAULT_MONTHLY_USD,

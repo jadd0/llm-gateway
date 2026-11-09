@@ -15,6 +15,11 @@ export interface Price {
    * max_tokens. Absent: the gateway-wide DEFAULT_MAX_TOKENS.
    */
   defaultMaxTokens?: number;
+  /**
+   * The most output tokens the provider documents for the model. A request the gateway forwards without
+   * any output limit (the OpenAI adapter sends none) may generate this many, so its budget hold is sized on it.
+   */
+  maxOutputTokens?: number;
 }
 
 /** A real model's price with where it came from, so any figure can be checked against the provider. */
@@ -34,7 +39,7 @@ const row = (
   source: string,
   inUsd: number,
   outUsd: number,
-  extra: { longContext?: { threshold: number; inUsd: number; outUsd: number }; defaultMaxTokens?: number } = {},
+  extra: { longContext?: { threshold: number; inUsd: number; outUsd: number }; defaultMaxTokens?: number; maxOutputTokens?: number } = {},
 ): PriceRow => ({
   inPerMillion: usd(inUsd),
   outPerMillion: usd(outUsd),
@@ -42,6 +47,7 @@ const row = (
     ? { longContext: { threshold: extra.longContext.threshold, inPerMillion: usd(extra.longContext.inUsd), outPerMillion: usd(extra.longContext.outUsd) } }
     : {}),
   ...(extra.defaultMaxTokens !== undefined ? { defaultMaxTokens: extra.defaultMaxTokens } : {}),
+  ...(extra.maxOutputTokens !== undefined ? { maxOutputTokens: extra.maxOutputTokens } : {}),
   asOf: AS_OF,
   source,
 });
@@ -50,6 +56,10 @@ const row = (
 // truncates them. None of the provider pages read documents a default for these models (Anthropic requires
 // max_tokens; OpenAI and Google state only the model maximum), so the gateway picks this one.
 const THINKING_DEFAULT_MAX_TOKENS = 4096;
+
+// Model pages read 2026-11-09: "128,000 max output tokens" for both OpenAI models,
+// https://developers.openai.com/api/docs/models/gpt-6-astra and https://developers.openai.com/api/docs/models/gpt-5-nano
+const OPENAI_MAX_OUTPUT = 128_000;
 
 // Static table, read from each provider's pricing page on the date in each row. Each provider has its
 // current flagship and its smallest text model. A prompt past a model's long-context threshold is billed
@@ -65,8 +75,9 @@ export const REAL_PRICES: Record<string, PriceRow> = {
   'gpt-6-astra': row(OPENAI, 10, 50, {
     longContext: { threshold: 272_000, inUsd: 20, outUsd: 75 },
     defaultMaxTokens: THINKING_DEFAULT_MAX_TOKENS,
+    maxOutputTokens: OPENAI_MAX_OUTPUT,
   }),
-  'gpt-5-nano': row(OPENAI, 0.05, 0.4),
+  'gpt-5-nano': row(OPENAI, 0.05, 0.4, { maxOutputTokens: OPENAI_MAX_OUTPUT }),
   'gemini-3.1-pro-preview': row(GOOGLE, 2, 12, {
     longContext: { threshold: 200_000, inUsd: 4, outUsd: 18 },
     defaultMaxTokens: THINKING_DEFAULT_MAX_TOKENS,
@@ -91,6 +102,16 @@ export function priceFor(model: string): Price | undefined {
 /** The output tokens to assume for a model when the caller names none. */
 export function defaultMaxTokensFor(model: string, fallback: number): number {
   return priceFor(model)?.defaultMaxTokens ?? fallback;
+}
+
+/**
+ * The most a model can generate when nothing limits it: its documented maximum, or `mockMax` for a mock-*
+ * model (which has no provider page). Undefined for a model with neither.
+ */
+export function maxOutputTokensFor(model: string, mockMax: number): number | undefined {
+  const exact = Object.hasOwn(EXACT, model) ? EXACT[model] : undefined;
+  if (exact) return exact.maxOutputTokens;
+  return model.startsWith('mock-') ? mockMax : undefined;
 }
 
 const perMillion = (tokens: number, price: number): number => Math.ceil((tokens * price) / 1_000_000);

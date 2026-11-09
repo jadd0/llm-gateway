@@ -1,8 +1,8 @@
 import type { FastifyPluginAsync, FastifyRequest } from 'fastify';
 import { errorBody } from '../errors.ts';
-import { costMicros, defaultMaxTokensFor, formatUsd, priceFor, type Price } from '../pricing/prices.ts';
+import { costMicros, defaultMaxTokensFor, formatUsd, maxOutputTokensFor, priceFor, type Price } from '../pricing/prices.ts';
 import { chatRequest } from '../request-body.ts';
-import { estimateWorstCase } from '../usage/estimate.ts';
+import { splitRequest } from '../usage/estimate.ts';
 import type { Usage } from '../usage/sse-usage.ts';
 import type { CacheHit } from '../cache/plugin.ts';
 import { createBudget, type Budget, type BudgetOptions, type Reservation } from './budget.ts';
@@ -42,6 +42,13 @@ export interface BudgetPluginOptions {
   defaultCapMicros: number;
   /** Output tokens assumed when a request names no max_tokens. */
   defaultMaxTokens: number;
+  /** Output tokens a mock-* model may generate when nothing limits it. */
+  mockMaxOutputTokens: number;
+  /**
+   * Whether the gateway forwards a request to this model without any output limit of its own (the OpenAI
+   * adapter sends the client's body as is). Such a request with no max_tokens can generate the model's maximum.
+   */
+  sendsNoOutputLimit?(model: string): boolean;
   /** Whether a model name is served at all. An unroutable name holds nothing: the route answers it with model_not_found. */
   isRoutable(model: string): boolean;
   /** The models a request for `model` may be served by, in order. The hold covers the dearest of them. */
@@ -98,16 +105,26 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
         .send(errorBody(`Model "${model}" has no price, so a spend cap cannot be applied to it.`, 'invalid_request_error', 'model_not_priced'));
     }
 
-    // The output assumed for a caller who named no max_tokens is the one the adapter will send to that model.
-    const outputFor = (m: string) => estimateWorstCase(body.value, defaultMaxTokensFor(m, opts.defaultMaxTokens)).output;
-    const { prompt, output } = estimateWorstCase(body.value, defaultMaxTokensFor(model, opts.defaultMaxTokens));
+    // What a caller who named no max_tokens may get: where the adapter sends the model a default, that default;
+    // where it sends nothing, whatever the model can generate, so the hold covers what the provider may bill.
+    const { prompt, explicitOutput } = splitRequest(body.value);
+    const uncapped = (m: string) => explicitOutput === undefined && opts.sendsNoOutputLimit?.(m) === true;
+    const outputFor = (m: string) =>
+      explicitOutput ??
+      (uncapped(m) ? maxOutputTokensFor(m, opts.mockMaxOutputTokens) : undefined) ??
+      defaultMaxTokensFor(m, opts.defaultMaxTokens);
+    const output = outputFor(model);
     // A fallback may land the request on a dearer model, so the hold is the worst case over the chain, each
     // model at its own output allowance and its own tier for this prompt.
-    const chainCosts = (opts.chainFor?.(model) ?? [model]).flatMap((m) => {
-      const p = priceFor(m);
-      return p === undefined ? [] : [costMicros(p, prompt, outputFor(m))];
-    });
-    const estimate = Math.max(costMicros(price, prompt, output), ...chainCosts);
+    const chain = opts.chainFor?.(model) ?? [model];
+    const models = chain.includes(model) ? chain : [model, ...chain];
+    const estimate = Math.max(
+      ...models.flatMap((m) => {
+        const p = priceFor(m);
+        return p === undefined ? [] : [costMicros(p, prompt, outputFor(m))];
+      }),
+    );
+    const holdOnModelMax = models.some(uncapped);
     const cap = request.tenant.monthlyBudgetMicros ?? opts.defaultCapMicros;
     const result = await budget.reserve({
       tenantId: request.tenant.tenantId, model, estimate, cap, promptTokens: prompt, completionTokens: output,
@@ -123,7 +140,16 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
       refundTokens(request);
       return reply
         .code(402)
-        .send(errorBody('Monthly budget exhausted for this tenant. It resets on the 1st (UTC).', 'insufficient_quota', 'budget_exhausted'));
+        .send(
+          errorBody(
+            'Monthly budget exhausted for this tenant. It resets on the 1st (UTC).' +
+              (holdOnModelMax
+                ? ' This request names no max_tokens, so the hold covers the most the model can generate; set max_tokens to hold less.'
+                : ''),
+            'insufficient_quota',
+            'budget_exhausted',
+          ),
+        );
     }
 
     const held: Reservation = result.reservation;
