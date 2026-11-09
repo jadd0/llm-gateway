@@ -4,9 +4,12 @@ import type { Db } from '../db/client.ts';
 import { periodOf, type Period } from './period.ts';
 import { createPgLedger, type PgLedger, type SettleRecord, type SpendEntry } from './pg-ledger.ts';
 import { createRedisLedger, type RedisLedger } from './redis-ledger.ts';
+import type { SpendEntry as QueuedSpend } from '../requestlog/entry.ts';
 
 /** What a request asks the budget to hold. */
 export interface ReserveRequest {
+  /** Names the hold and its ledger row. Unset: a fresh id. The route passes the request's own id, so the ledger and the request log join on it. */
+  id?: string;
   tenantId: string;
   model: string;
   /** Worst-case cost, micro-USD. */
@@ -58,12 +61,14 @@ export interface CacheHitRecord {
 export interface Budget {
   /** Holds `estimate` against the tenant's month, or says why not. Never throws. */
   reserve(req: ReserveRequest): Promise<ReserveOutcome>;
-  /** Ends a hold: Postgres first (hold removed, charge recorded, retried), then the live balance. Never throws. */
+  /**
+   * Ends a hold. With Redis up, one script queues the settle for the log worker and moves the live balance;
+   * the worker writes the ledger. Otherwise (Redis down, or the script failed) the ledger is written here in a
+   * Postgres transaction, retried, and the live balance caught up after. Never throws.
+   */
   settle(reservation: Reservation, outcome: SettleOutcome): Promise<void>;
-  /** Writes the zero-cost ledger row for a cache hit. Never throws. */
+  /** Queues the zero-cost ledger row for a cache hit (written directly if Redis cannot take it). Never throws. */
   recordHit(hit: CacheHitRecord): Promise<void>;
-  /** Deletes lapsed holds from Postgres (bounded). Run on a timer; exposed for tests. Returns how many went. */
-  sweepExpired(): Promise<number>;
   /** Re-reads the epoch from Postgres and adopts it if newer. Run on a timer; exposed for tests. */
   refreshEpoch(): Promise<void>;
   /** The Redis key generation this instance is using. */
@@ -86,10 +91,6 @@ export interface BudgetOptions {
   epochRefreshMs: number;
   /** Consecutive failed Redis calls that declare an outage without waiting for a failed PING. */
   outageFailures: number;
-  /** How often lapsed holds are deleted from Postgres, in seconds. */
-  sweepIntervalS?: number;
-  /** The most lapsed holds one sweep deletes. */
-  sweepLimit?: number;
   log?: { warn(obj: object, msg: string): void; info(obj: object, msg: string): void; error(obj: object, msg: string): void };
   /** Pins the time that picks the month and the Redis scripts' expiry clock, in ms. Tests only. */
   clock?: () => number;
@@ -136,6 +137,8 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
   let bumpDone = true;
   let bumping: Promise<void> | null = null;
   const pending = new Set<Promise<void>>();
+  // Settles already made or under way, by hold id. Bounded: only recent ones can be repeated.
+  const settles = new Map<string, Promise<void>>();
   // Balances this instance has used successfully at the current epoch. One that goes missing again at the
   // same epoch did not expire and was not replaced by a bump: Redis lost it (a restart or a flush).
   const seen = new Set<string>();
@@ -233,16 +236,6 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
   const timer = setInterval(() => void refreshEpoch(), opts.epochRefreshMs);
   timer.unref();
 
-  // Holds are removed when they settle; one whose gateway died is only removed when it lapses. Redis
-  // forgets it on its own, Postgres has to be told: a bounded delete, whichever path is in use.
-  const sweepLimit = opts.sweepLimit ?? 1000;
-  const sweepExpired = () => pg.sweepExpired(sweepLimit);
-  const sweeper = setInterval(
-    () => void sweepExpired().catch((e: unknown) => log?.warn(errInfo(e), 'budget hold sweep failed')),
-    (opts.sweepIntervalS ?? 60) * 1000,
-  );
-  sweeper.unref();
-
   async function withRetries<T>(fn: () => Promise<T>): Promise<T> {
     for (let attempt = 0; ; attempt++) {
       try {
@@ -254,22 +247,19 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
     }
   }
 
-  // Corrects the live balance after Postgres has the settle. It lands on the current epoch whatever epoch
-  // the request reserved under, and is safe to repeat, so a failed try is simply tried again.
-  async function settleRedis(res: Reservation, rec: SettleRecord): Promise<void> {
+  // Catches the live balance up after a settle written straight to Postgres: releases the hold if the balance
+  // still has it and adds the cost. It lands on the current epoch whatever epoch the request reserved under,
+  // and does nothing for a balance that already took the settle, so a failed try is simply tried again.
+  async function catchUpRedis(res: Reservation, rec: SettleRecord, costMicros: number): Promise<void> {
     if (rec.epoch !== null) adopt(rec.epoch);
-    // A charge's totals are passed on even when this call found it already recorded (a retry after a lost
-    // reply): the live balance takes them only if it is behind.
-    const args = { tenantId: res.tenantId, period: res.period, epoch, id: res.id, charges: rec.charges, spentAfter: rec.spent };
     // During an outage one try is made and its failure is expected; Redis is rebuilt from Postgres on return.
     const tries = onPostgres ? 1 : Math.max(1, opts.outageFailures);
     for (let i = 0; i < tries; i++) {
       try {
-        const applied = await redisLedger.settle({ ...args, epoch });
+        const applied = await redisLedger.apply(epoch, [{ tenantId: res.tenantId, period: res.period, id: res.id, costMicros }]);
         redisAnswered();
-        // 'rebuild' means there is no balance at this epoch: nothing to have seen. Marking it would make the
-        // next rebuild look like a lost balance and move the epoch again.
-        if (applied !== 'rebuild') markSeen(res.tenantId, res.period, epoch);
+        if (applied === 'rebuild') return;
+        markSeen(res.tenantId, res.period, epoch);
         return;
       } catch (err) {
         if (await redisFailed(err)) {
@@ -280,18 +270,39 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
     }
   }
 
-  async function settleNow(res: Reservation, outcome: SettleOutcome): Promise<void> {
+  // True when the settle is recorded (queued, or written to Postgres); false when nothing could be written.
+  async function settleNow(res: Reservation, outcome: SettleOutcome): Promise<boolean> {
+    const queued: QueuedSpend =
+      outcome.kind === 'charge'
+        ? {
+            kind: 'charge', id: res.id, tenantId: res.tenantId, period: res.period, model: outcome.model ?? res.model,
+            promptTokens: outcome.promptTokens, completionTokens: outcome.completionTokens,
+            costMicros: outcome.costMicros, estimated: outcome.estimated, savedMicros: 0,
+          }
+        : { kind: 'refund', id: res.id, tenantId: res.tenantId, period: res.period, model: res.model, promptTokens: 0, completionTokens: 0, costMicros: 0, estimated: false, savedMicros: 0 };
+
+    // The normal path: one Redis script queues the entry and moves the balance. If it cannot (Redis is down, or
+    // timed out and may or may not have run), the ledger is written here instead; the worker's insert of the
+    // entry, if it did land, then changes nothing.
+    if (!onPostgres && bumpDone) {
+      try {
+        const applied = await redisLedger.settle({ tenantId: res.tenantId, period: res.period, epoch, entry: queued });
+        redisAnswered();
+        // 'rebuild' means there is no balance at this epoch: nothing to have seen. Marking it would make the
+        // next rebuild look like a lost balance and move the epoch again.
+        if (applied !== 'rebuild') markSeen(res.tenantId, res.period, epoch);
+        return true;
+      } catch (err) {
+        await redisFailed(err);
+      }
+    }
+
     const entry: SpendEntry | null =
       outcome.kind === 'charge'
         ? {
-            requestId: res.id,
-            tenantId: res.tenantId,
-            period: res.period,
-            model: outcome.model ?? res.model,
-            promptTokens: outcome.promptTokens,
-            completionTokens: outcome.completionTokens,
-            costMicros: outcome.costMicros,
-            estimated: outcome.estimated,
+            requestId: res.id, tenantId: res.tenantId, period: res.period, model: queued.model,
+            promptTokens: queued.promptTokens, completionTokens: queued.completionTokens,
+            costMicros: queued.costMicros, estimated: queued.estimated,
           }
         : null;
     let rec: SettleRecord;
@@ -299,17 +310,18 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
       // The hold is dropped and the charge recorded in one transaction.
       rec = await withRetries(() => pg.settle(res.id, entry));
     } catch (err) {
-      // Nothing was written: the hold stays in both stores until it lapses, then the charge is lost.
+      // Nothing was written: the hold stays in both stores until it lapses, then the worker charges its estimate.
       log?.error(errInfo(err), 'budget settle could not be written to postgres');
-      return;
+      return false;
     }
-    await settleRedis(res, rec);
+    await catchUpRedis(res, rec, queued.costMicros);
+    return true;
   }
 
   return {
     async reserve(req) {
       const period = periodOf(now());
-      const id = randomUUID();
+      const id = req.id ?? randomUUID();
       const hold = (path: Reservation['path'], heldEpoch: number, remaining: number): ReserveOutcome => ({
         status: 'allowed',
         remaining,
@@ -387,16 +399,45 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
     },
 
     settle(reservation, outcome) {
-      const p = settleNow(reservation, outcome).catch((err: unknown) => {
-        log?.error(errInfo(err), 'budget settle failed');
-      });
+      // A request is settled once. The script that moves the balance adds a charge each time it runs, so a
+      // second call for the same hold (a bug in a caller) is answered with the first call's result.
+      const prior = settles.get(reservation.id);
+      if (prior) return prior.then(() => undefined);
+      const p = settleNow(reservation, outcome).then(
+        (ok) => {
+          // Nothing was written: a later call may try again.
+          if (!ok) settles.delete(reservation.id);
+        },
+        (err: unknown) => {
+          settles.delete(reservation.id);
+          log?.error(errInfo(err), 'budget settle failed');
+        },
+      );
+      settles.set(reservation.id, p);
+      if (settles.size > 10_000) settles.delete(settles.keys().next().value!);
       pending.add(p);
       void p.finally(() => pending.delete(p));
       return p;
     },
 
     recordHit(hit) {
-      const p = withRetries(() => pg.recordHit({ requestId: randomUUID(), period: periodOf(now()), ...hit })).catch((err: unknown) => {
+      const id = randomUUID();
+      const period = periodOf(now());
+      const queued: QueuedSpend = {
+        kind: 'hit', id, tenantId: hit.tenantId, period, model: hit.model, promptTokens: hit.promptTokens,
+        completionTokens: hit.completionTokens, costMicros: 0, estimated: false, savedMicros: hit.savedMicros,
+      };
+      const p = (async () => {
+        if (!onPostgres && bumpDone) {
+          try {
+            await redisLedger.enqueue(queued);
+            return;
+          } catch (err) {
+            await redisFailed(err);
+          }
+        }
+        await withRetries(() => pg.recordHit({ requestId: id, period, ...hit }));
+      })().catch((err: unknown) => {
         log?.error(errInfo(err), 'cache hit could not be written to the ledger');
       });
       pending.add(p);
@@ -404,14 +445,12 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
       return p;
     },
 
-    sweepExpired,
     refreshEpoch,
     epoch: () => epoch,
     mode: () => (onPostgres ? 'postgres' : 'redis'),
 
     async close() {
       clearInterval(timer);
-      clearInterval(sweeper);
       await Promise.allSettled([...pending, ...(bumping ? [bumping] : [])]);
     },
   };

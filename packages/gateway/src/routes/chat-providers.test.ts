@@ -8,6 +8,7 @@ import { createMockServer, type Settings } from '../../../mock-provider/src/serv
 import { buildApp } from '../app.ts';
 import { estimateWorstCase } from '../usage/estimate.ts';
 import { createDb, type Db } from '../db/client.ts';
+import { standInWorker } from '../../test/drain.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
 
 // Two upstreams. The mock provider (three formats, fixed 5 completion tokens) for the happy paths, and
@@ -137,6 +138,7 @@ beforeAll(async () => {
   urls.stub = `http://127.0.0.1:${await listen(stub)}`;
   handle = createDb({ databaseUrl: base.databaseUrl, poolSize: 4 });
   redis = new Redis(base.redisUrl!);
+  stopWorker = standInWorker(handle.db, redis, prefix); // the log worker's part: queued settles reach Postgres
   const seeded = await seedKey(handle.db, base, { rpm: 100000, tpm: 100000000 });
   key = seeded.key;
   tenantId = seeded.tenantId;
@@ -165,7 +167,9 @@ beforeAll(async () => {
   }
 });
 
+let stopWorker: () => void = () => {};
 afterAll(async () => {
+  stopWorker();
   release();
   for (const app of [viaMock, viaStub, noKeys, unmetered, logged]) await app.close();
   mock.closeAllConnections();

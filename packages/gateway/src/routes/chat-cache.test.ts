@@ -10,6 +10,7 @@ import { keyStoreFromConfig } from '../auth/key-store.ts';
 import { periodOf } from '../budget/period.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { spendLedger, tenants, tenantSpend } from '../db/schema.ts';
+import { standInWorker } from '../../test/drain.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
 
 // The upstream stands in for the provider and counts the calls it gets. Its answer says which call made it, so a
@@ -85,6 +86,7 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
   handle = createDb({ databaseUrl: base.databaseUrl, poolSize: 8 });
   redis = new Redis(base.redisUrl!);
+  stopWorker = standInWorker(handle.db, redis, base.redisKeyPrefix); // the log worker's part: queued settles reach Postgres
   app = buildApp(
     testConfig({
       API_KEY_PEPPER: base.apiKeyPepper,
@@ -112,7 +114,9 @@ beforeAll(async () => {
   gw = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 });
 
+let stopWorker: () => void = () => {};
 afterAll(async () => {
+  stopWorker();
   await app.close();
   upstream.closeAllConnections();
   await new Promise((resolve) => upstream.close(resolve));

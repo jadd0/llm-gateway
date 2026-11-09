@@ -139,7 +139,6 @@ export function buildApp(
         redisTimeoutMs: config.budgetRedisTimeoutMs,
         epochRefreshMs: config.budgetEpochRefreshMs,
         outageFailures: config.budgetOutageFailures,
-        sweepIntervalS: config.budgetSweepIntervalS,
         ...(extra.budgetClock ? { clock: extra.budgetClock } : {}),
         ...(extra.budgetPgLedger ? { pgLedger: extra.budgetPgLedger } : {}),
       },

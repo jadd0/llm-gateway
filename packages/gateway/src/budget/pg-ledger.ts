@@ -1,8 +1,9 @@
-import { eq, and, sql } from 'drizzle-orm';
+import { eq, and, inArray, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.ts';
 import { budgetEpoch, budgetReservations, spendLedger, tenantSpend } from '../db/schema.ts';
 import type { Period } from './period.ts';
-import type { Snapshot } from './redis-ledger.ts';
+import type { SpendEntry as QueuedSpend } from '../requestlog/entry.ts';
+import type { AppliedSettle, Snapshot } from './redis-ledger.ts';
 
 type Tx = Parameters<Parameters<Db['db']['transaction']>[0]>[0];
 
@@ -75,8 +76,6 @@ export interface PgLedger {
   hold(args: Omit<PgReserveArgs, 'cap'>): Promise<void>;
   /** Drops a hold that is not going to be used (Redis refused it). */
   release(id: string): Promise<void>;
-  /** Deletes up to `limit` lapsed holds, whoever placed them. Returns how many. */
-  sweepExpired(limit: number): Promise<number>;
   /**
    * Drops a hold and records the charge (once per request id) in one transaction. `entry` is null for a
    * refund.
@@ -149,16 +148,6 @@ export function createPgLedger(db: Db['db']): PgLedger {
           .where(and(eq(tenantSpend.tenantId, a.tenantId), eq(tenantSpend.period, a.period)))
           .for('update');
         const spent = row?.spent ?? 0;
-        // Expired holds are dropped; the rest count against the cap. now() is the database's one clock.
-        await tx
-          .delete(budgetReservations)
-          .where(
-            and(
-              eq(budgetReservations.tenantId, a.tenantId),
-              eq(budgetReservations.period, a.period),
-              sql`${budgetReservations.expiresAt} <= now()`,
-            ),
-          );
         // This request's own hold, if it was written ahead of a Redis attempt that then failed, is not
         // counted twice: it is replaced below.
         const [held] = await tx
@@ -169,6 +158,8 @@ export function createPgLedger(db: Db['db']): PgLedger {
               eq(budgetReservations.tenantId, a.tenantId),
               eq(budgetReservations.period, a.period),
               sql`${budgetReservations.id} <> ${a.id}`,
+              // A lapsed hold is not counted but not deleted either: the log worker charges its estimate.
+              sql`${budgetReservations.expiresAt} > now()`,
             ),
           );
         const reserved = Number(held?.held ?? 0);
@@ -236,13 +227,6 @@ export function createPgLedger(db: Db['db']): PgLedger {
       await db.delete(budgetReservations).where(eq(budgetReservations.id, id));
     },
 
-    async sweepExpired(limit) {
-      const r = await db.execute(sql`
-        delete from budget_reservations
-        where id in (select id from budget_reservations where expires_at < now() limit ${limit})`);
-      return r.rowCount ?? 0;
-    },
-
     async settle(id, entry) {
       const rec = await db.transaction(async (tx) => {
         await tx.delete(budgetReservations).where(eq(budgetReservations.id, id));
@@ -287,4 +271,94 @@ export function createPgLedger(db: Db['db']): PgLedger {
       return { epoch: now!.epoch, bumped: false };
     },
   };
+}
+
+/**
+ * Writes queued spend to the ledger, in the caller's transaction. A ledger row that is already there is left
+ * alone (`ON CONFLICT DO NOTHING`), and `tenant_spend` grows only by the rows actually inserted, so an entry
+ * delivered twice is applied once. Every charge and refund then drops its hold, whether or not the row was new.
+ * Returns the charges and refunds, for catching the live balances up (see `applySettled`).
+ */
+export async function applySpendBatch(tx: Tx, entries: QueuedSpend[]): Promise<{ inserted: number; settled: AppliedSettle[] }> {
+  // The same request twice in one batch (a redelivery next to the original) is one row.
+  const byId = new Map<string, QueuedSpend>();
+  for (const e of entries) if (!byId.has(e.id)) byId.set(e.id, e);
+  const unique = [...byId.values()];
+
+  const rows = unique
+    .filter((e) => e.kind !== 'refund')
+    .map((e) => ({
+      requestId: e.id,
+      tenantId: e.tenantId,
+      period: e.period,
+      model: e.model,
+      promptTokens: e.promptTokens,
+      completionTokens: e.completionTokens,
+      costMicros: e.kind === 'hit' ? 0 : e.costMicros,
+      estimated: e.kind === 'charge' && e.estimated,
+      cached: e.kind === 'hit',
+      savedMicros: e.kind === 'hit' ? e.savedMicros : 0,
+    }));
+  const inserted = rows.length
+    ? await tx
+        .insert(spendLedger)
+        .values(rows)
+        .onConflictDoNothing()
+        .returning({ id: spendLedger.requestId, tenantId: spendLedger.tenantId, period: spendLedger.period, cost: spendLedger.costMicros, cached: spendLedger.cached })
+    : [];
+
+  // One upsert per tenant and month, in a fixed order so two workers cannot wait on each other.
+  const totals = new Map<string, { tenantId: string; period: string; cost: number; n: number }>();
+  for (const r of inserted) {
+    if (r.cached) continue;
+    const t = totals.get(`${r.tenantId}|${r.period}`) ?? { tenantId: r.tenantId, period: r.period, cost: 0, n: 0 };
+    t.cost += r.cost;
+    t.n += 1;
+    totals.set(`${r.tenantId}|${r.period}`, t);
+  }
+  for (const key of [...totals.keys()].sort()) {
+    const t = totals.get(key)!;
+    await tx
+      .insert(tenantSpend)
+      .values({ tenantId: t.tenantId, period: t.period, spentMicros: t.cost, charges: t.n })
+      .onConflictDoUpdate({
+        target: [tenantSpend.tenantId, tenantSpend.period],
+        set: { spentMicros: sql`${tenantSpend.spentMicros} + ${t.cost}`, charges: sql`${tenantSpend.charges} + ${t.n}` },
+      });
+  }
+
+  const holdIds = unique.filter((e) => e.kind !== 'hit').map((e) => e.id);
+  if (holdIds.length) await tx.delete(budgetReservations).where(inArray(budgetReservations.id, holdIds));
+  return {
+    inserted: inserted.length,
+    settled: unique
+      .filter((e) => e.kind !== 'hit')
+      .map((e) => ({ tenantId: e.tenantId, period: e.period, id: e.id, costMicros: e.kind === 'charge' ? e.costMicros : 0 })),
+  };
+}
+
+/**
+ * Charges the estimate of holds that lapsed with no settle (the gateway died, or its entry was lost), up to
+ * `limit`, in one transaction. They are recorded as estimated charges with the model unknown: the hold knows
+ * its amount and nothing else. A hold is never dropped uncharged. Returns what was charged.
+ */
+export async function chargeExpiredHolds(db: Db['db'], limit: number): Promise<AppliedSettle[]> {
+  return db.transaction(async (tx) => {
+    const lapsed = await tx
+      .select({ id: budgetReservations.id, tenantId: budgetReservations.tenantId, period: budgetReservations.period, amount: budgetReservations.amountMicros })
+      .from(budgetReservations)
+      .where(sql`${budgetReservations.expiresAt} < now()`)
+      .orderBy(budgetReservations.expiresAt)
+      .limit(limit)
+      .for('update', { skipLocked: true });
+    if (lapsed.length === 0) return [];
+    const { settled } = await applySpendBatch(
+      tx,
+      lapsed.map((h) => ({
+        kind: 'charge' as const, id: h.id, tenantId: h.tenantId, period: h.period, model: 'unknown',
+        promptTokens: 0, completionTokens: 0, costMicros: h.amount, estimated: true, savedMicros: 0,
+      })),
+    );
+    return settled.map((s) => ({ ...s, force: true }));
+  });
 }

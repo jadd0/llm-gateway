@@ -1,13 +1,13 @@
--- Tenant budget scripts. Three scripts in one file, split on the "@script" markers and loaded
+-- Tenant budget scripts. Five scripts in one file, split on the "@script" markers and loaded
 -- separately (redis-ledger.ts). Money is integer micro-USD held in Lua doubles, exact below 2^53.
 --
 -- A tenant's month lives under three keys that share the hash tag {tenantId}:
---   bal   hash  spent, reserved, ver     settled money, money held for in-flight requests, and how many
---                                        charges `spent` includes (tenant_spend.charges in Postgres)
+--   bal   hash  spent, reserved          settled money and money held for in-flight requests
 --   res   zset  request id -> expiry     when each hold lapses (ms)
 --   amt   hash  request id -> amount     what each hold is worth
--- Postgres is the record: `spent` is only ever set to a value Postgres has had, so a repeated or
--- reordered settle cannot count a charge twice.
+-- Postgres is the record, written by the log worker from the request-log stream. `spent` runs ahead of it by
+-- the settles still queued, and a balance rebuilt from Postgres counts those as holds (their estimate) until
+-- the worker has applied them.
 
 -- @script reserve
 -- KEYS: bal, res, amt
@@ -61,16 +61,19 @@ redis.call('EXPIREAT', KEYS[3], ARGV[6])
 return {1, room - estimate}
 
 -- @script settle
--- KEYS: bal, res, amt
--- ARGV: id, charges, spentAfter
--- Releases the request's hold if it is still there. If `charges` > 0 it is the value of
--- tenant_spend.charges right after this request's charge was recorded in Postgres, and `spentAfter` the
--- value of spent_micros then: the balance takes them only if it is behind (ver < charges). Postgres
--- numbers its charges in commit order and each spentAfter includes every earlier charge, so the balance
--- ends at the same value in whatever order, and however many times, settles arrive, and a balance that
--- was rebuilt after the charge (ver >= charges) leaves it alone.
--- Returns {1} if anything changed, {0} if nothing did, {-1} when the balance is missing (the next reserve
--- rebuilds it from Postgres, which already has this settle).
+-- KEYS: bal, res, amt, stream
+-- ARGV: id, cost, then the stream entry's fields (name, value, ...)
+-- Queues the settle for the log worker and applies it to the live balance in one script, so neither can
+-- happen without the other. The XADD is first: Redis does not undo earlier writes when a later command in a
+-- script fails, so a failing XADD must leave the balance untouched. Then the request's hold is released if it
+-- is still there, and `cost` (0 for a refund or a cache hit) is added to spent. The worker writes the ledger
+-- row later; until it does, Postgres still holds the hold row, which is why a rebuilt balance counts the
+-- estimate for it and the worker's apply script (below) settles it there.
+-- Returns {1} if the balance changed, {0} if not, {-1} when the balance is missing (the entry is queued
+-- all the same; the next reserve rebuilds from Postgres, which will have this settle once the worker applies it).
+local fields = {}
+for i = 3, #ARGV do fields[#fields + 1] = ARGV[i] end
+redis.call('XADD', KEYS[4], '*', unpack(fields))
 if redis.call('EXISTS', KEYS[1]) == 0 then return {-1} end
 local changed = 0
 local held = redis.call('HGET', KEYS[3], ARGV[1])
@@ -80,40 +83,79 @@ if held then
   redis.call('HINCRBY', KEYS[1], 'reserved', -tonumber(held))
   changed = 1
 end
-local n = tonumber(ARGV[2])
-if n > 0 then
-  local ver = tonumber(redis.call('HGET', KEYS[1], 'ver')) or 0
-  if n > ver then
-    redis.call('HSET', KEYS[1], 'spent', ARGV[3], 'ver', ARGV[2])
-    changed = 1
-  end
+local cost = tonumber(ARGV[2])
+if cost > 0 then
+  redis.call('HINCRBY', KEYS[1], 'spent', cost)
+  changed = 1
 end
 return {changed}
 
+-- @script release
+-- KEYS: bal, res, amt
+-- ARGV: id
+-- Drops a hold that is not going to be used (the request was refused, or its reserve was cleaned up). Queues
+-- nothing and charges nothing. Returns 1 if a hold was dropped.
+local held = redis.call('HGET', KEYS[3], ARGV[1])
+if not held then return 0 end
+redis.call('HDEL', KEYS[3], ARGV[1])
+redis.call('ZREM', KEYS[2], ARGV[1])
+redis.call('HINCRBY', KEYS[1], 'reserved', -tonumber(held))
+return 1
+
+-- @script apply
+-- KEYS: bal, res, amt
+-- ARGV: (id, cost, force) triples
+-- Catches the live balance up with settles the log worker has just written to Postgres. A triple counts only if
+-- the balance still holds that request's hold: a balance rebuilt while the settle was queued imported the hold
+-- (Postgres still had it) and not the charge, so the hold is released and the cost added. A balance that
+-- already took the settle (its own settle script released the hold) has no hold left, and the triple
+-- does nothing, however many times it is repeated. Nothing here sets spent to a Postgres value: while entries
+-- are queued the balance is rightly ahead of Postgres.
+-- force = 1 is for a lapsed hold the worker charged its estimate: no settle ever reached the balance and the
+-- balance has long since released the hold, so the cost is added even when no hold is found.
+-- Returns how many triples changed the balance, or -1 when the balance is missing.
+if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
+local n = 0
+for i = 1, #ARGV, 3 do
+  local held = redis.call('HGET', KEYS[3], ARGV[i])
+  local cost = tonumber(ARGV[i + 1])
+  if held then
+    redis.call('HDEL', KEYS[3], ARGV[i])
+    redis.call('ZREM', KEYS[2], ARGV[i])
+    redis.call('HINCRBY', KEYS[1], 'reserved', -tonumber(held))
+    if cost > 0 then redis.call('HINCRBY', KEYS[1], 'spent', cost) end
+    n = n + 1
+  elseif ARGV[i + 2] == '1' and cost > 0 then
+    redis.call('HINCRBY', KEYS[1], 'spent', cost)
+    n = n + 1
+  end
+end
+return n
+
 -- @script init
 -- KEYS: bal, res, amt
--- ARGV: spent, ver, expireAt (unix s), nowMs (empty = Redis TIME), then (id, amount, ttlMs) per live hold
--- Builds the balance from a Postgres snapshot: settled spend and charge count, and every unexpired hold
+-- ARGV: spent, expireAt (unix s), nowMs (empty = Redis TIME), then (id, amount, ttlMs) per live hold
+-- Builds the balance from a Postgres snapshot: settled spend, and every unexpired hold
 -- (so their settles release them and they count against the cap now). Creates it only if it is still
 -- missing, so two instances rebuilding at once cannot add anything twice. Returns 1 if this call
 -- created it.
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
-local now = tonumber(ARGV[4])
+local now = tonumber(ARGV[3])
 if now == nil then
   local t = redis.call('TIME')
   now = t[1] * 1000 + math.floor(t[2] / 1000)
 end
 local reserved = 0
-for i = 5, #ARGV, 3 do
+for i = 4, #ARGV, 3 do
   local amount = tonumber(ARGV[i + 1])
   redis.call('ZADD', KEYS[2], now + tonumber(ARGV[i + 2]), ARGV[i])
   redis.call('HSET', KEYS[3], ARGV[i], amount)
   reserved = reserved + amount
 end
-redis.call('HSET', KEYS[1], 'spent', ARGV[1], 'ver', ARGV[2], 'reserved', reserved)
-redis.call('EXPIREAT', KEYS[1], ARGV[3])
-if reserved > 0 or #ARGV > 4 then
-  redis.call('EXPIREAT', KEYS[2], ARGV[3])
-  redis.call('EXPIREAT', KEYS[3], ARGV[3])
+redis.call('HSET', KEYS[1], 'spent', ARGV[1], 'reserved', reserved)
+redis.call('EXPIREAT', KEYS[1], ARGV[2])
+if reserved > 0 or #ARGV > 3 then
+  redis.call('EXPIREAT', KEYS[2], ARGV[2])
+  redis.call('EXPIREAT', KEYS[3], ARGV[2])
 end
 return 1

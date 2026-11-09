@@ -1,14 +1,15 @@
 import { readFileSync } from 'node:fs';
 import type { Redis } from 'ioredis';
+import { streamKey, toSpendFields, type SpendEntry } from '../requestlog/entry.ts';
 import { periodExpiryS, type Period } from './period.ts';
 
-// budget.lua holds three scripts, split on its "@script" markers.
+// budget.lua holds five scripts, split on its "@script" markers.
 const SCRIPTS = Object.fromEntries(
   readFileSync(new URL('./budget.lua', import.meta.url), 'utf8')
     .split(/^-- @script (\w+)\n/m)
     .slice(1)
     .reduce<Array<[string, string]>>((acc, part, i, all) => (i % 2 === 0 ? [...acc, [part, all[i + 1]!]] : acc), []),
-) as Record<'reserve' | 'settle' | 'init', string>;
+) as Record<'reserve' | 'settle' | 'release' | 'apply' | 'init', string>;
 
 export interface ReserveArgs {
   tenantId: string;
@@ -35,18 +36,24 @@ export interface SettleArgs {
   period: Period;
   /** The epoch in force now, whatever epoch the request reserved under. */
   epoch: number;
+  /** What the log worker will write to the ledger. Queued in the same script that moves the balance. */
+  entry: SpendEntry;
+}
+
+/** One settle the worker has written to Postgres, to catch the live balance up with. */
+export interface AppliedSettle {
+  tenantId: string;
+  period: Period;
   id: string;
-  /**
-   * 0 releases the hold and charges nothing. Otherwise the tenant_spend.charges value right after this
-   * request's charge was recorded in Postgres, with `spentAfter` the spent_micros then.
-   */
-  charges: number;
-  spentAfter: number;
+  costMicros: number;
+  /** True for a lapsed hold charged its estimate: added to spent even though the balance no longer holds it. */
+  force?: boolean;
 }
 
 /** What Postgres knows about a tenant's month: the record a lost balance is rebuilt from. */
 export interface Snapshot {
   spent: number;
+  /** How many charges `spent` includes (tenant_spend.charges). Informational: the balance does not use it. */
   charges: number;
   /** Every unexpired hold, with the time it has left. */
   holds: Array<{ id: string; amount: number; ttlMs: number }>;
@@ -58,9 +65,13 @@ export type SettleResult = 'changed' | 'unchanged' | 'rebuild';
 export interface RedisLedger {
   /** Throws when Redis does not answer in time or fails. */
   reserve(args: ReserveArgs): Promise<ReserveResult>;
-  /** Throws when Redis does not answer in time or fails. Safe to repeat and to reorder. */
+  /** Queues the settle for the log worker and moves the balance, in one script. Throws when Redis does not answer in time or fails. */
   settle(args: SettleArgs): Promise<SettleResult>;
-  /** Releases a hold by id if the balance has it. Best effort and idempotent; never throws. */
+  /** Catches the balance up with settles Postgres now has (see `applySettled`). Throws when Redis does not answer in time or fails. */
+  apply(epoch: number, settled: AppliedSettle[]): Promise<SettleResult>;
+  /** Queues a cache hit's ledger row. Throws when Redis does not answer in time or fails. */
+  enqueue(entry: SpendEntry): Promise<void>;
+  /** Releases a hold by id if the balance has it. Queues and charges nothing. Best effort and idempotent; never throws. */
   release(tenantId: string, period: Period, epoch: number, id: string): Promise<void>;
   /** Resolves if Redis answers a PING in time. */
   ping(): Promise<void>;
@@ -82,8 +93,62 @@ export interface RedisLedgerOptions {
 type Commands = Redis & {
   budReserve(...args: Array<string | number>): Promise<number[]>;
   budSettle(...args: Array<string | number>): Promise<number[]>;
+  budRelease(...args: Array<string | number>): Promise<number>;
+  budApply(...args: Array<string | number>): Promise<number>;
   budInit(...args: Array<string | number>): Promise<number>;
 };
+
+/**
+ * Catches live balances up with settles the log worker has written to Postgres: each pair releases that
+ * request's hold and adds its cost, only where the balance still holds it. Used by the gateway (after a direct
+ * Postgres settle) and by the worker (after each batch). Returns how many pairs changed a balance. Throws when
+ * Redis fails. A balance that is missing is left alone: its rebuild reads Postgres, which has the settle.
+ */
+export async function applySettled(redis: Redis, keyPrefix: string, epoch: number, settled: AppliedSettle[], timeoutMs: number): Promise<number> {
+  const c = commandsOf(redis);
+  const groups = new Map<string, { tenantId: string; period: Period; args: Array<string | number> }>();
+  for (const s of settled) {
+    const g = groups.get(`${s.tenantId}|${s.period}`) ?? { tenantId: s.tenantId, period: s.period, args: [] };
+    g.args.push(s.id, s.costMicros, s.force ? 1 : 0);
+    groups.set(`${s.tenantId}|${s.period}`, g);
+  }
+  let changed = 0;
+  for (const g of groups.values()) {
+    const b = `${keyPrefix}bud:{${g.tenantId}}:${g.period}:${epoch}`;
+    const r = await withTimeout(c.budApply(b, `${b}:res`, `${b}:amt`, ...g.args), timeoutMs);
+    if (r > 0) changed += r;
+  }
+  return changed;
+}
+
+// Defines the scripts on the client once; asking again for a client that has them changes nothing.
+function commandsOf(redis: Redis): Commands {
+  const c = redis as Partial<Commands> & Redis;
+  if (!c.budReserve) {
+    redis.defineCommand('budReserve', { numberOfKeys: 3, lua: SCRIPTS.reserve });
+    redis.defineCommand('budSettle', { numberOfKeys: 4, lua: SCRIPTS.settle });
+    redis.defineCommand('budRelease', { numberOfKeys: 3, lua: SCRIPTS.release });
+    redis.defineCommand('budApply', { numberOfKeys: 3, lua: SCRIPTS.apply });
+    redis.defineCommand('budInit', { numberOfKeys: 3, lua: SCRIPTS.init });
+  }
+  return redis as Commands;
+}
+
+function withTimeout<T>(p: Promise<T>, timeoutMs: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new RedisTimeout('no reply in time')), timeoutMs);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
 
 export class RedisTimeout extends Error {
   override name = 'RedisTimeout';
@@ -91,10 +156,7 @@ export class RedisTimeout extends Error {
 
 export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
   const { redis, keyPrefix, timeoutMs, loadSnapshot, clock, onRebuild } = opts;
-  redis.defineCommand('budReserve', { numberOfKeys: 3, lua: SCRIPTS.reserve });
-  redis.defineCommand('budSettle', { numberOfKeys: 3, lua: SCRIPTS.settle });
-  redis.defineCommand('budInit', { numberOfKeys: 3, lua: SCRIPTS.init });
-  const cmd = redis as Commands;
+  const cmd = commandsOf(redis);
 
   // The hash tag {tenantId} puts every key of a tenant's month in one Redis Cluster slot.
   const keys = (tenantId: string, period: Period, epoch: number) => {
@@ -102,23 +164,10 @@ export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
     return [b, `${b}:res`, `${b}:amt`] as const;
   };
 
-  const withTimeout = <T>(p: Promise<T>): Promise<T> =>
-    new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new RedisTimeout('no reply in time')), timeoutMs);
-      p.then(
-        (v) => {
-          clearTimeout(timer);
-          resolve(v);
-        },
-        (e: unknown) => {
-          clearTimeout(timer);
-          reject(e);
-        },
-      );
-    });
+  const within = <T>(p: Promise<T>): Promise<T> => withTimeout(p, timeoutMs);
 
   const reserveOnce = async (a: ReserveArgs): Promise<[number, number]> => {
-    const r = await withTimeout(
+    const r = await within(
       cmd.budReserve(...keys(a.tenantId, a.period, a.epoch), a.id, a.estimate, a.cap, a.ttlMs, clock ? clock() : '', periodExpiryS(a.period)),
     );
     return [r[0]!, r[1]!];
@@ -134,8 +183,8 @@ export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
         onRebuild?.({ tenantId: a.tenantId, period: a.period, epoch: a.epoch });
         const snap = await loadSnapshot(a.tenantId, a.period);
         const holds = snap.holds.flatMap((h) => [h.id, h.amount, h.ttlMs]);
-        await withTimeout(
-          cmd.budInit(...keys(a.tenantId, a.period, a.epoch), snap.spent, snap.charges, periodExpiryS(a.period), clock ? clock() : '', ...holds),
+        await within(
+          cmd.budInit(...keys(a.tenantId, a.period, a.epoch), snap.spent, periodExpiryS(a.period), clock ? clock() : '', ...holds),
         );
         [status, remaining] = await reserveOnce(a);
         if (status === -1) throw new Error('budget balance missing after rebuild');
@@ -144,21 +193,32 @@ export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
     },
 
     async settle(a) {
-      const r = await withTimeout(cmd.budSettle(...keys(a.tenantId, a.period, a.epoch), a.id, a.charges, a.spentAfter));
+      const r = await within(
+        cmd.budSettle(...keys(a.tenantId, a.period, a.epoch), streamKey(keyPrefix), a.entry.id, a.entry.kind === 'charge' ? a.entry.costMicros : 0, ...toSpendFields(a.entry)),
+      );
       if (r[0] === -1) return 'rebuild';
       return r[0] === 1 ? 'changed' : 'unchanged';
     },
 
+    async enqueue(entry) {
+      await within(redis.xadd(streamKey(keyPrefix), '*', ...toSpendFields(entry)));
+    },
+
+    async apply(epoch, settled) {
+      const n = await applySettled(redis, keyPrefix, epoch, settled, timeoutMs);
+      return n > 0 ? 'changed' : 'unchanged';
+    },
+
     async release(tenantId, period, epoch, id) {
       try {
-        await withTimeout(cmd.budSettle(...keys(tenantId, period, epoch), id, 0, 0));
+        await within(cmd.budRelease(...keys(tenantId, period, epoch), id));
       } catch {
         // A hold that can't be released here lapses by itself.
       }
     },
 
     async ping() {
-      await withTimeout(redis.ping());
+      await within(redis.ping());
     },
   };
 }
