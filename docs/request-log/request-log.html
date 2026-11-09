@@ -5173,7 +5173,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <path data-edge-from="settle" data-edge-to="stream" data-edge-label="XADD spend entry" data-edge-key="1" data-composition-points="156,385;207.5,385;207.5,278;259,278" d="M 156 385 L 207.5 385 L 207.5 278 L 259 278" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="stream" data-edge-to="worker" data-edge-label="XREADGROUP batch" data-edge-key="2" data-composition-points="371,271;474,271" d="M 371 271 L 474 271" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="worker" data-edge-to="logrows" data-edge-label="insert rows" data-edge-key="3" data-composition-points="586,271;689,271" d="M 586 271 L 689 271" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="worker" data-edge-to="ledger" data-edge-label="ledger, spend, holds" data-edge-key="4" data-composition-points="586,271;637.5,271;637.5,378;689,378" d="M 586 271 L 637.5 271 L 637.5 378 L 689 378" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="worker" data-edge-to="ledger" data-edge-label="ledger, spend, holds (epoch read fresh per batch)" data-edge-key="4" data-composition-points="586,271;637.5,271;637.5,378;689,378" d="M 586 271 L 637.5 271 L 637.5 378 L 689 378" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="sweeper" data-edge-to="ledger" data-edge-label="estimate charge (only with no spend waiting)" data-edge-key="5" data-composition-points="586,499;637.5,499;637.5,392;689,392" d="M 586 499 L 637.5 499 L 637.5 392 L 689 392" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="worker" data-edge-to="dead" data-edge-label="over max deliveries" data-edge-key="6" data-composition-points="530,242;530,186" d="M 530 242 L 530 186" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
 
@@ -5303,9 +5303,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <text x="740" y="214" class="t-muted" font-size="8" text-anchor="middle">insert rows</text>
         <text data-detail="fine" x="740" y="225" class="t-dim" font-size="7" text-anchor="middle">per batch</text>
         </g>
-        <g data-detail="context" data-edge-from="worker" data-edge-to="ledger" data-edge-label="ledger, spend, holds" data-edge-key="4">
+        <g data-detail="context" data-edge-from="worker" data-edge-to="ledger" data-edge-label="ledger, spend, holds (epoch read fresh per batch)" data-edge-key="4">
           <rect x="582.5" y="303.5" width="110" height="27" rx="4" class="c-mask"/>
-          <text x="637.5" y="314.5" class="t-muted" font-size="8" text-anchor="middle">ledger, spend, holds</text>
+          <text x="637.5" y="314.5" class="t-muted" font-size="8" text-anchor="middle">ledger, spend, holds (epoch read fresh per batch)</text>
         <text data-detail="fine" x="637.5" y="325.5" class="t-dim" font-size="7" text-anchor="middle">same transaction</text>
         </g>
         <g data-detail="context" data-edge-from="sweeper" data-edge-to="ledger" data-edge-label="estimate charge (only with no spend waiting)" data-edge-key="5">
