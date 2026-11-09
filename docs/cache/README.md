@@ -5,7 +5,7 @@ Diagram: [cache-flow.html](cache-flow.html). Code: `packages/gateway/src/cache/`
 
 Apps send the same deterministic request again and again (evals, retries, shared prompts), and each repeat costs a
 provider call in money and seconds. The cache answers an identical request from Redis instead. Exact match only; near
-duplicates are a later PR.
+duplicates are served by the [semantic cache](../semantic-cache/README.md) after an exact miss.
 
 ## What is cached
 
@@ -28,7 +28,7 @@ one-element list), the output limit as it is sent upstream (for Anthropic and Ge
 fields as sent, so a request with no limit is not the same as one that names the default), the
 penalties (a zero is the default), `response_format`, and any other field the gateway does not know. Left out:
 `stream`, `stream_options`, `user`, `metadata`, `service_tier`, `store`, so a streamed request and a non-streamed one
-share an entry. Field order never matters. The key is `cache:v1:{scope}:{hash}`; `v1` changes whenever the rules do.
+share an entry. Field order never matters. The key is `cache:v2:{scope}:{hash}`; `v2` changes whenever the rules do.
 
 ## Who can see an entry
 
