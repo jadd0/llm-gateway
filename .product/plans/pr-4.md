@@ -29,7 +29,7 @@ migration: next free number at generate time. Residuals owned by this PR: none.
 | `packages/gateway/src/test-env.ts` | `seedKey` takes per-key limits |
 | `packages/gateway/src/ratelimit/limiter.ts` | **new**. Loads the script (ioredis `defineCommand`), `take()`, `adjust()`, fail-open handling |
 | `packages/gateway/src/ratelimit/limiter.test.ts` | **new** |
-| `packages/gateway/src/ratelimit/plugin.ts` | **new**. Fastify `preHandler` after auth: take, set headers, 429/400; `onResponse`-side reconcile |
+| `packages/gateway/src/ratelimit/plugin.ts` | **new**. Fastify `preHandler` after auth: take, set headers, 429/400; hands the route a `settle()` that the route calls once it knows the usage (an `onResponse` hook does not run for hijacked streams) |
 | `packages/gateway/src/ratelimit/plugin.test.ts` | **new** |
 | `packages/gateway/src/auth/key-store.ts` | cached key value carries `keyId`, `rpmLimit`, `tpmLimit`; `setLimits` overwrites the cache entry |
 | `packages/gateway/src/auth/key-store.test.ts` | limits in cache; limit change visible on next request |
