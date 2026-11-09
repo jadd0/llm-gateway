@@ -218,12 +218,15 @@ describe('log worker', { timeout: 60_000 }, () => {
     const pgl = createPgLedger(handle.db);
     const orphan = { id: randomUUID(), tenantId: t, period: P, estimate: 250, ttlMs: -60_000 };
     await pgl.hold(orphan);
-    const w = workerFor({ sweepS: 0.4, sweepGraceS: 0, batchWaitMs: 20 });
-    // About 5 requests a second, so every pass has something to read and the stream is never empty.
+    // About 5 requests a second with the default batch wait: each pass returns as soon as an entry arrives, so
+    // no pass is ever empty and the stream is never quiet.
+    const w = workerFor({ sweepS: 0.4, sweepGraceS: 0, batchWaitMs: 1000 });
+    // The producer has its own connection: the worker's blocking read would hold up commands on a shared one.
+    const gateway = new Redis(base.redisUrl!);
     let producing = true;
     const producer = (async () => {
       while (producing) {
-        await queue([toLogFields(logEntry(t))]);
+        await gateway.xadd(streamKey(kp), '*', ...toLogFields(logEntry(t)));
         await sleep(200);
       }
     })();
@@ -236,6 +239,7 @@ describe('log worker', { timeout: 60_000 }, () => {
     }
     producing = false;
     await producer;
+    gateway.disconnect();
     await w.stop();
     expect(charged).toBe(true);
     expect(Date.now() - startedAt).toBeLessThan(3000); // within about LOG_SWEEP_S, not "when the stream is quiet"
