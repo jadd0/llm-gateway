@@ -25,6 +25,11 @@ hours (`ROLLUP_MINUTE_RETENTION_H`) are deleted, unfolded ones never. The fold h
 shared, so a request is counted once in the hour tables whatever the timing. A row that arrives after its hour was folded goes straight
 to the hour tables (and, if within a day of the mark, to the minute tables for the minute-grain views).
 
+The migration **backfills** from the existing log: it sets the fold mark where a worker would have it, writes the hour tables from
+every log row before the mark and the minute tables from the day before it on, with the worker's own latency buckets, so a log that
+already has history shows in every range from the first start. A test runs the migration over a seeded log and compares every range with
+the raw aggregate.
+
 ## Percentiles from histograms
 
 Latency is stored as counts in 242 fixed buckets: 0 to 1 ms, then each bucket's upper bound 5% above the last, up to about 122 s, and one
@@ -38,13 +43,14 @@ fixed in code: changing them would invalidate every stored histogram.
 Up to 24 hours: the minute tables. Longer: the hour tables plus the minutes not yet folded. Spend by tenant reads the per-tenant tables,
 the series and percentiles the totals tables. The last-failures table reads `request_log` through a partial index on error rows. An
 error is a status of 500 or more, or a stream that broke after a 200; a client that left (499) and 4xx refusals are not errors. Cache hit
-rate is exact plus semantic hits over all requests.
+rate is exact plus semantic hits over all requests. A request with no tenant is "Unauthenticated"; a tenant id whose row was deleted shows as
+"Deleted tenant" with the start of its id. Ranges start on a boundary of their step (a minute, 15 minutes, an hour, 6 hours), so the first point is a whole step.
 
 ## Read-only role and login
 
 The page connects as a Postgres role that can read the rollup tables, tenant ids and names, and seven columns of `request_log`
 (request id, time, tenant, model, status, error code, latency): not the ledger, keys, holds or any other column. A test asks the database
-for each refusal. Login is one admin token (`DASHBOARD_TOKEN`, at least 32 characters, compared in constant time) posted in a form body;
+for each refusal. `db:migrate` refuses to make a superuser, the migrating user or a role that owns objects into that login. Login is one admin token (`DASHBOARD_TOKEN`, at least 32 characters, compared in constant time) posted in a form body;
 the cookie holds an HMAC, keyed with `DASHBOARD_SESSION_SECRET`, of its issue time and the token, is HttpOnly and SameSite=Strict
 (Secure in production), and expires after 12 hours. Every route but the login checks it in the proxy and again in the page. Without a
 valid token and secret the server refuses to start. No prompts, responses or keys appear on any screen.
