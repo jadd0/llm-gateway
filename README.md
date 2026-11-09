@@ -52,7 +52,7 @@ client ──► gateway (stateless, N instances behind a load balancer)
 | Mock provider | OpenAI-compatible stand-in with configurable latency, errors and outages, so benchmarks measure the gateway rather than a real provider |
 | Dashboard (Next.js) | Metrics over the request log |
 
-Design decisions and the measurements behind them will be recorded in `docs/decisions/`.
+Design notes and diagrams per part live in [`docs/`](docs/README.md).
 
 ## Benchmarks
 
@@ -62,8 +62,8 @@ sizes will live in `BENCHMARKS.md`, with the raw k6 output committed alongside.
 
 | Area | What is measured | Result |
 |---|---|---|
-| Throughput | Sustained load against the mock provider | _not yet measured_ |
-| Overhead | Gateway-added latency, p50 / p95 | _not yet measured_ |
+| Throughput | Sustained load against the mock provider | 10000 req/s through one gateway process, zero errors. One run per step, 15 s steps, "good" judged by a p95 criterion, k6, gateway and mock on one laptop; see [BENCHMARKS.md](BENCHMARKS.md) |
+| Overhead | Gateway-added latency, p50 / p95 | 0.23 ms / 0.98 ms non-streamed at 1000 req/s; 0.24 ms / 0.25 ms to first streamed byte at 200 req/s |
 | Correctness | Over-limit requests across 3+ instances under concurrent load | _not yet measured_ |
 | Resilience | Client success rate while a provider is down | _not yet measured_ |
 | Caching | Hit rate and spend saved on a realistic prompt set | _not yet measured_ |
@@ -73,8 +73,22 @@ outage mid-test.
 
 ## Getting started
 
-Setup instructions will land with the first runnable version. The stack is Node 24+, npm, and
-Docker Compose for Redis and Postgres.
+Needs Node 24+ (26 recommended), npm, Docker (for Redis and Postgres) and [k6](https://k6.io) for benchmarks.
+
+```
+npm ci
+cp .env.example .env.local
+docker compose up -d --wait      # Redis and Postgres+pgvector (not yet used by gateway code)
+npm run dev:mock                 # mock provider on :9000
+npm run dev:gateway              # gateway on :8080
+curl -N localhost:8080/v1/chat/completions -H 'content-type: application/json' \
+  -d '{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+npm run check                    # typecheck and tests
+npm run bench:baseline           # k6 baseline, writes bench/results/pr-1/
+```
+
+Per-part docs and diagrams are in [docs/](docs/README.md); measured numbers are in
+[BENCHMARKS.md](BENCHMARKS.md).
 
 ## Roadmap (out of scope for v1)
 

@@ -7,13 +7,13 @@ plain-English README (what, why, decisions with their numbers, likely interview 
 archify diagram of that part (D-007, D-009). Tests sit beside the code they test (D-008).
 
 ## PR 1 — Skeleton, mock provider and streaming passthrough
-status: pending
+status: done
 acceptance: `docker compose up` brings up Redis and Postgres+pgvector; `POST /v1/chat/completions` through the gateway returns the mock's response, streamed and non-streamed, with SSE chunks arriving unbuffered (test asserts the first chunk reaches the client before the last is sent); a committed k6 run of the mock direct vs through the gateway records gateway overhead p50/p95 and req/s in BENCHMARKS.md with hardware and versions.
 scope_notes: one upstream (the mock, OpenAI format). No auth, limits, caching, retries or logging pipeline. Gate goes green (first tests land here).
 base_branch: main
-commit:
-completed_at:
-notes:
+commit: ab90903
+completed_at: 2026-11-09
+notes: Gateway overhead 0.233/0.982 ms p50/p95 (instant, non-streamed), 0.238/0.254 ms TTFB (realistic, streamed); 10000 req/s last good step (single run per step). Residuals R1-R5 opened.
 
 ## PR 2 — Framework comparison benchmark
 status: pending
@@ -35,8 +35,8 @@ notes:
 
 ## PR 4 — Distributed rate limiter (Redis Lua token bucket)
 status: pending
-acceptance: per-key token bucket enforced by one atomic Lua script in Redis; a test firing 1,000 concurrent requests at a key limited to 100 admits exactly 100 and returns 429 with Retry-After to the rest; refill rate verified over time; explainer walks the script line by line.
-scope_notes: per-key request limits only. Multi-instance proof is PR 12.
+acceptance: per-key token buckets for requests per minute and tokens per minute, enforced together by one atomic Lua script in Redis; a test firing 1,000 concurrent requests at a key limited to 100 requests/min admits exactly 100 and returns 429 with Retry-After to the rest, including when the requests are spread across 3 gateway app instances sharing one Redis; the token bucket is charged an estimate before the call and corrected to actual usage after (streamed and non-streamed); refill verified over time; Redis unavailable fails open; docs/rate-limiter/ walks the script line by line.
+scope_notes: rate limits only (requests and tokens per minute, D-015). Spend caps are PR 5; the nginx multi-instance proof is PR 12.
 base_branch: main
 commit:
 completed_at:

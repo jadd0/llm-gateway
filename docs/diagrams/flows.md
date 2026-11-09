@@ -15,3 +15,4 @@ lines verbatim; for any plan in the branch's diff, a flow line missing from this
 
 ## Flows
 
+- Chat completion passthrough → `docs/gateway/chat-passthrough.html` → `packages/gateway/src/{routes/chat.ts,upstream.ts}`
