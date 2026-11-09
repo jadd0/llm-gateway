@@ -374,6 +374,43 @@ describe('log worker', { timeout: 60_000 }, () => {
       expect(await bal(t, epoch)).toEqual({ spent: 150, reserved: 1200 });
       expect((await w.runOnce()).reconciled).toBe(0);
     });
+
+    it('finds balances through the index, with no keyspace scan, and checks Postgres in two queries however many balances there are', async () => {
+      const pgl = createPgLedger(handle.db);
+      const epoch = await pgl.readEpoch();
+      const l = ledgerFor(pgl);
+      const tenants = [await newTenant(), await newTenant(), await newTenant()];
+      for (const t of tenants) await l.reserve({ tenantId: t, period: P, epoch, id: randomUUID(), estimate: 100, cap: 1_000_000, ttlMs: 1 });
+      await sleep(20);
+      const scan = vi.spyOn(redis, 'scan');
+      const selects = vi.spyOn(handle.db, 'select');
+      try {
+        const w = workerFor({ sweepS: 0, sweepGraceS: 3600, orphanGraceS: 0 });
+        expect((await w.runOnce()).reconciled).toBe(3);
+        expect(scan).not.toHaveBeenCalled();
+        expect(selects.mock.calls.length).toBe(2 + 1); // holds, ledger, and the epoch read
+      } finally {
+        scan.mockRestore();
+        selects.mockRestore();
+      }
+    });
+
+    it('a failed charge of expired holds does not skip the reconcile', async () => {
+      const t = await newTenant();
+      const pgl = createPgLedger(handle.db);
+      const epoch = await pgl.readEpoch();
+      await ledgerFor(pgl).reserve({ tenantId: t, period: P, epoch, id: randomUUID(), estimate: 100, cap: 1_000_000, ttlMs: 1 });
+      await sleep(20);
+      const warns: string[] = [];
+      const w = workerFor({ sweepS: 0, sweepGraceS: 3600, orphanGraceS: 0, log: { ...quiet, warn: (_o, m) => void warns.push(m) } });
+      const tx = vi.spyOn(handle.db, 'transaction').mockRejectedValueOnce(Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }));
+      try {
+        expect((await w.runOnce()).reconciled).toBeGreaterThanOrEqual(1);
+      } finally {
+        tx.mockRestore();
+      }
+      expect(warns).toContain('expired holds could not be charged, retried next interval');
+    });
   });
 
   it('warns once the request-log stream is over 80% of its cap, before trimming', async () => {
@@ -409,18 +446,17 @@ describe('log worker', { timeout: 60_000 }, () => {
       for (const e of Array.from({ length: 7 }, () => logEntry(t))) await redis.xadd(streamKey(kp), '*', ...toLogFields(e));
       for (const e of spends) await redis.xadd(spendKey(kp), '*', ...toSpendFields(e));
       const w = workerFor({ batchSize: 4 });
-      const reads: number[] = [];
-      let total = 0;
+      const spendRows = async () => Number((await handle.db.execute(sql`select count(*) as n from spend_ledger where tenant_id = ${t}`)).rows[0]!.n);
+      const first = await w.runOnce();
+      expect(first.read).toBe(4); // the three spend entries, then one log entry
+      expect(await spendRows()).toBe(3);
+      let total = first.read;
       for (let i = 0; i < 6 && total < 10; i++) {
         const r = await w.runOnce();
-        reads.push(r.read);
+        expect(r.read).toBeLessThanOrEqual(4);
         total += r.read;
       }
-      expect(reads.every((n) => n <= 4)).toBe(true);
-      expect(reads[0]).toBe(4); // the three spend entries, then one log entry
       expect(total).toBe(10);
-      const n = await handle.db.execute(sql`select count(*) as n from spend_ledger where tenant_id = ${t}`);
-      expect(Number(n.rows[0]!.n)).toBe(3); // all three spend entries were in the first batch
       expect(await pending(w.group)).toBe(0);
     });
 
