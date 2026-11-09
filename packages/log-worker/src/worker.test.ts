@@ -8,11 +8,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { createTenant } from '../../gateway/src/cli/keys.ts';
 import { createDb, type Db } from '../../gateway/src/db/client.ts';
 import { requestLog } from '../../gateway/src/db/schema.ts';
-import { deadKey, streamKey, toLogFields, toSpendFields, type LogEntry, type SpendEntry } from '../../gateway/src/requestlog/entry.ts';
+import { deadKey, spendKey, streamKey, toLogFields, toSpendFields, type LogEntry, type SpendEntry } from '../../gateway/src/requestlog/entry.ts';
 import { cleanup, testConfig } from '../../gateway/src/test-env.ts';
 import { periodOf } from '../../gateway/src/budget/period.ts';
-import { createPgLedger } from '../../gateway/src/budget/pg-ledger.ts';
-import { createRedisLedger, balanceKey } from '../../gateway/src/budget/redis-ledger.ts';
+import { createBudget } from '../../gateway/src/budget/budget.ts';
+import { chargeExpiredHolds, createPgLedger } from '../../gateway/src/budget/pg-ledger.ts';
+import { applySettled, createRedisLedger, balanceKey } from '../../gateway/src/budget/redis-ledger.ts';
 import { createWorker, type Worker, type WorkerOptions } from './worker.ts';
 
 // A real Redis and a real Postgres. Each test uses its own consumer group, so tests never read each other's
@@ -260,6 +261,86 @@ describe('log worker', { timeout: 60_000 }, () => {
     expect(await pgl.snapshot(t, P)).toMatchObject({ spent: 30, holds: [] });
   });
 
+  describe('a stalled worker and the sweeper', () => {
+    const REAL = 9;
+    const EST = 401;
+    const N = 12;
+    const lapse = () => sleep(1300); // past a 1 s reservation TTL
+    const estRows = async (t: string) =>
+      Number((await handle.db.execute(sql`select count(*) as n from spend_ledger where tenant_id = ${t} and estimated`)).rows[0]!.n);
+    const realRows = async (t: string) =>
+      Number((await handle.db.execute(sql`select count(*) as n from spend_ledger where tenant_id = ${t} and not estimated and cost_micros = ${REAL}`)).rows[0]!.n);
+    const redisSpent = async (t: string) => Number((await redis.hget(balanceKey(kp, t, P, await createPgLedger(handle.db).readEpoch()), 'spent')) ?? NaN);
+    const settleMany = async (t: string) => {
+      const b = await createBudget({ db: handle.db, redis, keyPrefix: kp, reservationTtlS: 1, redisTimeoutMs: 2000, epochRefreshMs: 3_600_000, outageFailures: 3 });
+      for (let i = 0; i < N; i++) {
+        const o = await b.reserve({ tenantId: t, model: 'm', estimate: EST, cap: 1_000_000_000, promptTokens: 1, completionTokens: 1 });
+        if (o.status !== 'allowed') throw new Error('not admitted');
+        await b.settle(o.reservation, { kind: 'charge', costMicros: REAL, promptTokens: 1, completionTokens: 1, estimated: false });
+      }
+      await b.close();
+    };
+
+    it('the sweep waits while the spend stream has entries: no hold with a queued settle is charged, and everything ends equal', async () => {
+      const t = await newTenant();
+      await settleMany(t); // N real settles queued in the spend stream; their hold rows still in Postgres
+      await lapse(); // every hold row is past its expiry, the worker has read nothing
+      const w = workerFor({ batchSize: 5, sweepS: 0, sweepGraceS: 0 });
+      const swept: number[] = [];
+      const ests: number[] = [];
+      for (let i = 0; i < 6; i++) {
+        swept.push((await w.runOnce()).swept);
+        ests.push(await estRows(t));
+      }
+      // While entries are still waiting (the first two passes) nothing is swept; later passes may sweep other tests' holds.
+      expect(swept.slice(0, 2)).toEqual([0, 0]);
+      expect(ests).toEqual([0, 0, 0, 0, 0, 0]);
+      const snap = await createPgLedger(handle.db).snapshot(t, P);
+      expect(snap).toMatchObject({ spent: N * REAL, charges: N, holds: [], estimated: [] });
+      expect(await realRows(t)).toBe(N);
+      expect(await redisSpent(t)).toBe(N * REAL);
+    });
+
+    it('a settle applied after the sweeper charged the estimate replaces it, in Postgres and in a balance that took the real settle itself', async () => {
+      const t = await newTenant();
+      await settleMany(t);
+      await lapse();
+      // The sweeper gets in first (the check passed, then the settles were queued behind a stall).
+      const charged = (await chargeExpiredHolds(handle.db, 10_000, 0)).filter((c) => c.tenantId === t);
+      expect(charged).toHaveLength(N);
+      const pgl = createPgLedger(handle.db);
+      await applySettled(redis, kp, await pgl.readEpoch(), charged, 2000);
+      expect((await pgl.snapshot(t, P)).spent).toBe(N * EST);
+      expect(await redisSpent(t)).toBe(N * REAL); // Redis had the real cost all along and ignored the estimate
+      const w = workerFor({ sweepS: 3600 });
+      while ((await w.runOnce()).read > 0);
+      expect(await pgl.snapshot(t, P)).toMatchObject({ spent: N * REAL, charges: N, holds: [], estimated: [] });
+      expect(await estRows(t)).toBe(0);
+      expect(await realRows(t)).toBe(N);
+      expect(await redisSpent(t)).toBe(N * REAL);
+    });
+
+    it('a settle applied after the sweeper charged the estimate also corrects a balance that was rebuilt from the estimate', async () => {
+      const t = await newTenant();
+      const pgl = createPgLedger(handle.db);
+      const ids = Array.from({ length: N }, () => randomUUID());
+      for (const id of ids) await pgl.hold({ id, tenantId: t, period: P, estimate: EST, ttlMs: -60_000 });
+      const charged = (await chargeExpiredHolds(handle.db, 10_000, 0)).filter((c) => c.tenantId === t);
+      expect(charged).toHaveLength(N);
+      // The balance does not exist yet: it is built now, from a snapshot that has the estimates as spend.
+      const l = createRedisLedger({ redis, keyPrefix: kp, timeoutMs: 2000, loadSnapshot: (tn, pe) => pgl.snapshot(tn, pe) });
+      const epoch = await pgl.readEpoch();
+      await l.reserve({ tenantId: t, period: P, epoch, id: randomUUID(), estimate: 1, cap: 1_000_000_000, ttlMs: 60_000 });
+      expect(await redisSpent(t)).toBe(N * EST);
+      await queue(ids.map((id) => toSpendFields(spendEntry(t, { id, costMicros: REAL }))));
+      const w = workerFor({ sweepS: 3600 });
+      while ((await w.runOnce()).read > 0);
+      expect((await pgl.snapshot(t, P)).spent).toBe(N * REAL);
+      expect(await redisSpent(t)).toBe(N * REAL);
+      expect(await estRows(t)).toBe(0);
+    });
+  });
+
   describe('reconcile', () => {
     const ledgerFor = (pgl: ReturnType<typeof createPgLedger>) =>
       createRedisLedger({ redis, keyPrefix: kp, timeoutMs: 2000, loadSnapshot: (tn, pe) => pgl.snapshot(tn, pe) });
@@ -304,21 +385,61 @@ describe('log worker', { timeout: 60_000 }, () => {
     expect(warns.filter((x) => /80%/.test(x.msg))).toEqual([expect.objectContaining({ obj: expect.objectContaining({ length: 90, max: 100 }) })]);
   });
 
-  it('the epoch is read once for many batches, and the stream is trimmed on an interval, not every batch', async () => {
+  it('the budget epoch is read fresh for every batch that wrote spend, so a settle never lands on a stale epoch; the stream is trimmed on an interval', async () => {
     const t = await newTenant();
     await queue(Array.from({ length: 6 }, () => toSpendFields(spendEntry(t))));
-    const w = workerFor({ batchSize: 2, epochRefreshMs: 3_600_000, trimEveryMs: 3_600_000 });
+    const w = workerFor({ batchSize: 2, trimEveryMs: 3_600_000 });
     const selects = vi.spyOn(handle.db, 'select');
     const xinfo = vi.spyOn(redis, 'xinfo');
     try {
       for (let i = 0; i < 3; i++) await w.runOnce();
-      // 3 batches of spend: one epoch read, and XINFO only for the first pass's trim (two streams).
-      expect(selects.mock.calls.length).toBe(1);
+      // 3 batches of spend: one epoch read each, and XINFO only for the first pass's trim (two streams).
+      expect(selects.mock.calls.length).toBe(3);
       expect(xinfo.mock.calls.length).toBe(2);
     } finally {
       selects.mockRestore();
       xinfo.mockRestore();
     }
+  });
+
+  describe('reading', () => {
+    it('a batch never exceeds batchSize, and spend entries are read before log entries', async () => {
+      const t = await newTenant();
+      const spends = Array.from({ length: 3 }, () => spendEntry(t));
+      for (const e of Array.from({ length: 7 }, () => logEntry(t))) await redis.xadd(streamKey(kp), '*', ...toLogFields(e));
+      for (const e of spends) await redis.xadd(spendKey(kp), '*', ...toSpendFields(e));
+      const w = workerFor({ batchSize: 4 });
+      const reads: number[] = [];
+      let total = 0;
+      for (let i = 0; i < 6 && total < 10; i++) {
+        const r = await w.runOnce();
+        reads.push(r.read);
+        total += r.read;
+      }
+      expect(reads.every((n) => n <= 4)).toBe(true);
+      expect(reads[0]).toBe(4); // the three spend entries, then one log entry
+      expect(total).toBe(10);
+      const n = await handle.db.execute(sql`select count(*) as n from spend_ledger where tenant_id = ${t}`);
+      expect(Number(n.rows[0]!.n)).toBe(3); // all three spend entries were in the first batch
+      expect(await pending(w.group)).toBe(0);
+    });
+
+    it('with nothing waiting, a blocking read that wakes on both streams still fits the batch', async () => {
+      const t = await newTenant();
+      const w = workerFor({ batchSize: 4, batchWaitMs: 2000 });
+      const gateway = new Redis(base.redisUrl!);
+      const pass = w.runOnce();
+      await sleep(100);
+      // Both streams get entries at once: the blocked read is asked for at most half the batch from each.
+      await Promise.all([
+        ...Array.from({ length: 5 }, () => gateway.xadd(spendKey(kp), '*', ...toSpendFields(spendEntry(t)))),
+        ...Array.from({ length: 5 }, () => gateway.xadd(streamKey(kp), '*', ...toLogFields(logEntry(t)))),
+      ]);
+      const r = await pass;
+      gateway.disconnect();
+      expect(r.read).toBeGreaterThan(0);
+      expect(r.read).toBeLessThanOrEqual(4);
+    });
   });
 
   it('the process stops on SIGTERM after writing what it read, and exits 0', async () => {

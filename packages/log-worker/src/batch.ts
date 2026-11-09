@@ -1,6 +1,4 @@
-import type { Redis } from 'ioredis';
 import { applySpendBatch } from '../../gateway/src/budget/pg-ledger.ts';
-import { applySettled } from '../../gateway/src/budget/redis-ledger.ts';
 import type { Db } from '../../gateway/src/db/client.ts';
 import { requestLog } from '../../gateway/src/db/schema.ts';
 import { fromStreamFields, toRequestLogRow, type LogEntry, type SpendEntry } from '../../gateway/src/requestlog/entry.ts';
@@ -89,10 +87,4 @@ export async function applyBatch(db: Db['db'], raw: Raw[]): Promise<BatchResult>
     }
   }
   return result;
-}
-
-/** Catches the live balances up with what was just written, on `epoch`. Best effort: the balance is also rebuilt from Postgres when it is lost. */
-export async function catchUp(redis: Redis, keyPrefix: string, epoch: number, settled: BatchResult['settled'], timeoutMs: number): Promise<number> {
-  if (settled.length === 0) return 0;
-  return applySettled(redis, keyPrefix, epoch, settled, timeoutMs);
 }

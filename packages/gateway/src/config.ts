@@ -163,7 +163,8 @@ const schema = z
     // inline: one awaited Postgres insert per request; the "before" of the logging benchmark, nothing else.
     LOG_MODE: z.preprocess(blankAsUnset, z.enum(['stream', 'inline']).default('stream')),
     LOG_GROUP: z.preprocess(blankAsUnset, z.string().min(1).default('log-writers')),
-    LOG_BATCH_SIZE: int(500, 1),
+    // At least 2: the worker's blocking read asks each of its two streams for half a batch.
+    LOG_BATCH_SIZE: int(500, 2),
     LOG_BATCH_WAIT_MS: int(1000, 1),
     LOG_CLAIM_IDLE_MS: int(30_000, 1),
     LOG_MAX_DELIVERIES: int(5, 1),

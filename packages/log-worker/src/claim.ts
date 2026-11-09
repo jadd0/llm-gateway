@@ -29,12 +29,11 @@ const toRaw = (stream: string, rows: RawEntry[] | null | undefined): Raw[] =>
   (rows ?? []).filter((r) => Array.isArray(r[1])).map(([id, fields]) => ({ id, fields, stream }));
 
 export interface GroupInfo {
-  lag: number;
   pending: number;
   lastDelivered: string | undefined;
 }
 
-/** The one reader of XINFO GROUPS: this group's lag, pending count and last delivered id on a stream. */
+/** The one reader of XINFO GROUPS: this group's pending count and last delivered id on a stream. */
 export async function groupInfo(redis: Redis, key: string, group: string): Promise<GroupInfo> {
   const groups = (await redis.xinfo('GROUPS', key)) as unknown[];
   for (const g of groups) {
@@ -42,10 +41,10 @@ export async function groupInfo(redis: Redis, key: string, group: string): Promi
     const m = new Map<string, unknown>();
     for (let i = 0; i + 1 < row.length; i += 2) m.set(String(row[i]), row[i + 1]);
     if (m.get('name') === group) {
-      return { lag: Number(m.get('lag') ?? 0), pending: Number(m.get('pending') ?? 0), lastDelivered: String(m.get('last-delivered-id')) };
+      return { pending: Number(m.get('pending') ?? 0), lastDelivered: String(m.get('last-delivered-id')) };
     }
   }
-  return { lag: 0, pending: 0, lastDelivered: undefined };
+  return { pending: 0, lastDelivered: undefined };
 }
 
 export function createGroup(o: GroupOptions) {
@@ -71,9 +70,22 @@ export function createGroup(o: GroupOptions) {
       }
     },
 
-    /** New entries for this group, waiting up to `blockMs` for the first. */
+    /**
+     * New entries for this group, never more than `count`. The spend stream is read first and the log stream
+     * fills what is left, so a pile of log entries cannot crowd spend out of a batch. With nothing waiting it
+     * blocks up to `blockMs` on both streams for the first entry; each stream is asked for at most half the
+     * batch then, so the two together still fit.
+     */
     async readNew(count: number, blockMs: number): Promise<Raw[]> {
-      const r = (await redis.xreadgroup('GROUP', group, consumer, 'COUNT', count, 'BLOCK', blockMs, 'STREAMS', ...keys, ...keys.map(() => '>'))) as
+      const out: Raw[] = [];
+      for (const key of keys) {
+        if (out.length >= count) break;
+        const r = (await redis.xreadgroup('GROUP', group, consumer, 'COUNT', count - out.length, 'STREAMS', key, '>')) as Array<[string, RawEntry[]]> | null;
+        out.push(...(r ?? []).flatMap(([stream, rows]) => toRaw(stream, rows)));
+      }
+      if (out.length > 0 || blockMs <= 0) return out;
+      const each = Math.max(1, Math.floor(count / 2));
+      const r = (await redis.xreadgroup('GROUP', group, consumer, 'COUNT', each, 'BLOCK', blockMs, 'STREAMS', ...keys, ...keys.map(() => '>'))) as
         | Array<[string, RawEntry[]]>
         | null;
       return (r ?? []).flatMap(([stream, rows]) => toRaw(stream, rows));
@@ -117,16 +129,16 @@ export function createGroup(o: GroupOptions) {
       await redis.xack(e.stream, group, e.id);
     },
 
-    /** The group's backlog over both streams: entries not yet delivered to anyone, and entries delivered and not yet acknowledged. */
-    async backlog(): Promise<{ lag: number; pending: number }> {
-      let lag = 0;
-      let pending = 0;
-      for (const key of keys) {
-        const i = await groupInfo(redis, key, group);
-        lag += i.lag;
-        pending += i.pending;
-      }
-      return { lag, pending };
+    /**
+     * True while the spend stream has entries this group has not read, or has read and not acknowledged: settles
+     * that may belong to holds the sweeper is about to charge. Asks for the entries themselves (XRANGE past the
+     * last delivered id) rather than trusting XINFO's lag, which Redis reports as nil once entries were trimmed.
+     */
+    async spendBusy(): Promise<boolean> {
+      const { lastDelivered, pending } = await groupInfo(redis, spend, group);
+      if (pending > 0) return true;
+      if (lastDelivered === undefined) return (await redis.xlen(spend)) > 0;
+      return (await redis.xrange(spend, `(${lastDelivered}`, '+', 'COUNT', 1)).length > 0;
     },
 
     /** How many entries each stream holds. */

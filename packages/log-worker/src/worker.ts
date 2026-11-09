@@ -4,7 +4,7 @@ import { applySettled, assertNotCluster } from '../../gateway/src/budget/redis-l
 import { createPgLedger } from '../../gateway/src/budget/pg-ledger.ts';
 import { loadConfig } from '../../gateway/src/config.ts';
 import { createDb, type Db } from '../../gateway/src/db/client.ts';
-import { applyBatch, catchUp } from './batch.ts';
+import { applyBatch } from './batch.ts';
 import { createGroup, entryKey, type Raw } from './claim.ts';
 import { reconcileHolds } from './reconcile.ts';
 
@@ -34,8 +34,6 @@ export interface WorkerOptions {
   streamMax?: number;
   /** How often the streams are trimmed and measured (ms). */
   trimEveryMs?: number;
-  /** How long the budget epoch is cached before it is read again (ms). */
-  epochRefreshMs?: number;
   log: Logger;
   /** How long a Redis catch-up call may take before it is skipped. */
   redisTimeoutMs?: number;
@@ -73,18 +71,10 @@ export function createWorker(o: WorkerOptions): Worker {
   let loop: Promise<void> | null = null;
   let lastSweep = Date.now();
   let lastTrim = 0;
-  // The budget epoch, read from Postgres at most every epochRefreshMs: it changes only when Redis is lost.
-  const epochRefreshMs = o.epochRefreshMs ?? 1000;
+  // The budget epoch is read from Postgres each time it is needed, after the write it applies to: a rebuild moves
+  // it, and a settle caught up on the epoch before the move would miss the balance that now holds its request.
+  // It is one primary-key select, once per batch that wrote spend and once per sweep.
   const pgLedger = createPgLedger(o.db);
-  let epoch = 1;
-  let epochAt = 0;
-  const currentEpoch = async (): Promise<number> => {
-    if (Date.now() - epochAt >= epochRefreshMs) {
-      epoch = await pgLedger.readEpoch();
-      epochAt = Date.now();
-    }
-    return epoch;
-  };
 
   async function runOnce(): Promise<PassResult> {
     if (!ensured) {
@@ -127,8 +117,9 @@ export function createWorker(o: WorkerOptions): Worker {
       for (const m of r.malformed) o.log.warn({ entryId: m.id, errClass: m.errClass }, 'log entry could not be read, left pending');
       for (const f of r.failed) o.log.warn({ entryId: f.id, errClass: f.errClass, code: f.code }, 'log entry could not be written, left pending');
       if (r.settled.length > 0) {
-        await currentEpoch()
-          .then((e) => catchUp(o.redis, o.keyPrefix, e, r.settled, redisTimeoutMs))
+        await pgLedger
+          .readEpoch()
+          .then((e) => applySettled(o.redis, o.keyPrefix, e, r.settled, redisTimeoutMs))
           .catch((err: unknown) => o.log.warn(errInfo(err), 'live balances could not be caught up'));
       }
     }
@@ -151,19 +142,34 @@ export function createWorker(o: WorkerOptions): Worker {
     // keeps a late settle from being charged its estimate first is the grace, not idleness.
     if (!stopping && Date.now() - lastSweep >= o.sweepS * 1000) {
       lastSweep = Date.now();
+      // Three independent jobs: a failure in one does not skip the others, and each is tried again next interval.
+      let charged: Awaited<ReturnType<typeof chargeExpiredHolds>> = [];
       try {
-        const charged = await chargeExpiredHolds(o.db, 1000, (o.sweepGraceS ?? 0) * 1000);
-        result.swept = charged.length;
-        const e = await currentEpoch();
-        if (charged.length > 0) {
-          o.log.warn({ holds: charged.length }, 'expired holds charged at their estimate');
-          await applySettled(o.redis, o.keyPrefix, e, charged, redisTimeoutMs);
+        // Not while settles are queued or being applied: a hold whose real settle is in the spend stream would
+        // be charged its estimate. (A settle that lands after this check is replaced by the real cost when it is
+        // applied, see applySpendBatch.)
+        if (await group.spendBusy()) {
+          o.log.info({}, 'hold sweep skipped: spend entries are waiting to be applied');
+        } else {
+          charged = await chargeExpiredHolds(o.db, 1000, (o.sweepGraceS ?? 0) * 1000);
+          result.swept = charged.length;
+          if (charged.length > 0) o.log.warn({ holds: charged.length }, 'expired holds charged at their estimate');
         }
-        const rec = await reconcileHolds({ db: o.db, redis: o.redis, keyPrefix: o.keyPrefix, epoch: e, graceMs: (o.orphanGraceS ?? 600) * 1000, timeoutMs: redisTimeoutMs });
+      } catch (err) {
+        o.log.warn(errInfo(err), 'expired holds could not be charged, retried next interval');
+      }
+      try {
+        // Holds charged but not caught up here are released by the reconcile below, from the ledger.
+        if (charged.length > 0) await applySettled(o.redis, o.keyPrefix, await pgLedger.readEpoch(), charged, redisTimeoutMs);
+      } catch (err) {
+        o.log.warn(errInfo(err), 'swept holds could not be applied to the live balances');
+      }
+      try {
+        const rec = await reconcileHolds({ db: o.db, redis: o.redis, keyPrefix: o.keyPrefix, epoch: await pgLedger.readEpoch(), graceMs: (o.orphanGraceS ?? 600) * 1000, timeoutMs: redisTimeoutMs });
         result.reconciled = rec.dropped + rec.charged;
         if (result.reconciled > 0) o.log.warn(rec, 'redis holds with no postgres hold row released');
       } catch (err) {
-        o.log.warn(errInfo(err), 'hold sweep failed, retried next interval');
+        o.log.warn(errInfo(err), 'redis hold reconcile failed, retried next interval');
       }
     }
     return result;
@@ -209,7 +215,7 @@ if (import.meta.main) {
     db: handle.db, redis, keyPrefix: config.redisKeyPrefix, group: config.logGroup, consumer: config.workerConsumer,
     batchSize: config.logBatchSize, batchWaitMs: config.logBatchWaitMs, claimIdleMs: config.logClaimIdleMs,
     maxDeliveries: config.logMaxDeliveries, sweepS: config.logSweepS, sweepGraceS: config.logSweepGraceS,
-    orphanGraceS: config.budgetOrphanGraceS, streamMax: config.logStreamMax, epochRefreshMs: config.budgetEpochRefreshMs, log,
+    orphanGraceS: config.budgetOrphanGraceS, streamMax: config.logStreamMax, log,
   });
   let closing = false;
   const shutdown = (signal: string) => {
