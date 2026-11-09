@@ -6,6 +6,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { createMockServer, type Settings } from '../../../mock-provider/src/server.ts';
 import Fastify from 'fastify';
 import { buildApp } from '../app.ts';
+import { createOpenAiAdapter } from '../providers/openai.ts';
 import type { Upstream } from '../upstream.ts';
 import { chatRoutes } from './chat.ts';
 import { Redis } from 'ioredis';
@@ -80,7 +81,7 @@ beforeEach(() => {
 });
 
 const payload = (extra: object = {}) =>
-  JSON.stringify({ model: 'm', messages: [{ role: 'user', content: 'hi' }], ...extra });
+  JSON.stringify({ model: 'mock-m', messages: [{ role: 'user', content: 'hi' }], ...extra });
 
 const post = (body: string, init: RequestInit = {}) => {
   const { headers, ...rest } = init;
@@ -150,7 +151,7 @@ describe('POST /v1/chat/completions', () => {
   });
 
   it('invalid body returns 400 without calling upstream', async () => {
-    for (const body of ['not json', '{}', JSON.stringify({ model: 1, messages: [] }), JSON.stringify({ model: 'm' })]) {
+    for (const body of ['not json', '{}', JSON.stringify({ model: 1, messages: [] }), JSON.stringify({ model: 'mock-m' })]) {
       const res = await post(body);
       expect(res.status).toBe(400);
       expect(((await res.json()) as any).error.type).toBe('invalid_request_error');
@@ -472,7 +473,7 @@ describe('usage reconcile', { timeout: 30_000 }, () => {
 
   it('adds include_usage without a JSON round trip: a large integer survives byte for byte', async () => {
     const s = await freshKey();
-    const body = '{"model":"m","seed":12345678901234567890,"messages":[{"role":"user","content":"hi"}],"stream":true}';
+    const body = '{"model":"mock-m","seed":12345678901234567890,"messages":[{"role":"user","content":"hi"}],"stream":true}';
     const res = await send(s.key, body);
     expect(res.statusCode).toBe(200);
     expect(seen.at(-1)!.raw).toBe('{"stream_options":{"include_usage":true},' + body.slice(1));
@@ -482,7 +483,7 @@ describe('usage reconcile', { timeout: 30_000 }, () => {
   it('a stream_options that is not an object is forwarded unchanged and not reconciled', async () => {
     for (const odd of ['"yes"', 'null', '[1]', '7']) {
       const s = await freshKey();
-      const body = `{"model":"m","stream":true,"stream_options":${odd},"messages":[{"role":"user","content":"hi"}]}`;
+      const body = `{"model":"mock-m","stream":true,"stream_options":${odd},"messages":[{"role":"user","content":"hi"}]}`;
       const res = await send(s.key, body);
       expect(res.statusCode).toBe(200);
       expect(seen.at(-1)!.raw).toBe(body);
@@ -579,18 +580,24 @@ describe('mid-stream failure logging', () => {
     const body = new Readable({ read() {} });
     body.push('data: {"x":1}\n\n');
     const upstream = {
-      chatPath: '/v1/chat/completions',
-      headers: {},
-      pool: {
-        request: async () => ({
-          statusCode: 200,
-          headers: { 'content-type': 'text/event-stream' },
-          body,
-        }),
-      },
+      resolve: () => ({
+        provider: 'mock-openai',
+        adapter: createOpenAiAdapter('/v1/chat/completions'),
+        basePath: '',
+        apiKey: undefined,
+        configured: true,
+        pool: {
+          request: async () => ({
+            statusCode: 200,
+            headers: { 'content-type': 'text/event-stream' },
+            body,
+          }),
+        },
+      }),
+      close: async () => {},
     } as unknown as Upstream;
     const app3 = Fastify({ logger: { level: 'warn', stream: logStream } });
-    app3.register(chatRoutes, { upstream, maxDurationMs: 240_000 });
+    app3.register(chatRoutes, { upstream, maxDurationMs: 240_000, defaultMaxTokens: 1024 });
     await app3.listen({ port: 0, host: '127.0.0.1' });
     try {
       const url = `http://127.0.0.1:${(app3.server.address() as AddressInfo).port}`;

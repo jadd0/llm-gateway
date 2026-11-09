@@ -69,7 +69,7 @@ const fresh = async (limits: { rpm?: number; tpm?: number }) => {
   tenantIds.push(s.tenantId);
   return s;
 };
-const chat = (key: string, body: unknown = { model: 'm', messages: [{ role: 'user', content: 'hi' }], max_tokens: 10 }) =>
+const chat = (key: string, body: unknown = { model: 'mock-m', messages: [{ role: 'user', content: 'hi' }], max_tokens: 10 }) =>
   app.inject({
     method: 'POST',
     url: '/v1/chat/completions',
@@ -130,7 +130,7 @@ describe('rate limit plugin', { timeout: 30_000 }, () => {
       method: 'POST',
       url: '/__settle-twice',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
-      payload: JSON.stringify({ model: 'm', messages: [], max_tokens: 100 }),
+      payload: JSON.stringify({ model: 'mock-m', messages: [], max_tokens: 100 }),
     });
     expect(res.json()).toEqual({ estimate: 100 });
     // Charged 100, then corrected to an actual 500 (a 400 debit); the second settle(5) is ignored.
@@ -140,7 +140,7 @@ describe('rate limit plugin', { timeout: 30_000 }, () => {
   it('a denied request is not charged and a tokens-limited key says tokens', async () => {
     // Tokens run out first: each request costs 1 + 1024 (default max_tokens), the key holds 3000.
     const s = await fresh({ rpm: 100, tpm: 3000 });
-    const plain = { model: 'm', messages: [{ role: 'user', content: 'hi' }] };
+    const plain = { model: 'mock-m', messages: [{ role: 'user', content: 'hi' }] };
     expect((await chat(s.key, plain)).statusCode).toBe(200);
     expect((await chat(s.key, plain)).statusCode).toBe(200);
     for (let i = 0; i < 5; i++) {
@@ -157,12 +157,12 @@ describe('rate limit plugin', { timeout: 30_000 }, () => {
     const s = await fresh({ rpm: 100, tpm: 500 });
     const hits = upstreamHits;
     // The caller asked for 1000 output tokens from a key that holds 500 a minute.
-    const res = await chat(s.key, { model: 'm', messages: [{ role: 'user', content: 'hi' }], max_tokens: 1000 });
+    const res = await chat(s.key, { model: 'mock-m', messages: [{ role: 'user', content: 'hi' }], max_tokens: 1000 });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toMatchObject({ type: 'invalid_request_error', code: 'request_too_large' });
     expect(res.headers['retry-after']).toBeUndefined();
     // A prompt alone bigger than the key's minute, with no max_tokens, is refused the same way.
-    const big = await chat(s.key, { model: 'm', messages: [{ role: 'user', content: 'x'.repeat(2400) }] });
+    const big = await chat(s.key, { model: 'mock-m', messages: [{ role: 'user', content: 'x'.repeat(2400) }] });
     expect(big.statusCode).toBe(400);
     expect(big.json().error.code).toBe('request_too_large');
     expect(await redis.exists(`${prefix}rl:{${s.keyId}}:req`, `${prefix}rl:{${s.keyId}}:tok`)).toBe(0);
@@ -173,7 +173,7 @@ describe('rate limit plugin', { timeout: 30_000 }, () => {
 
   it('a small request with no max_tokens is admitted by a key whose minute is smaller than the default allowance', async () => {
     const s = await fresh({ rpm: 100, tpm: 1000 });
-    const res = await chat(s.key, { model: 'm', messages: [{ role: 'user', content: 'hi' }] });
+    const res = await chat(s.key, { model: 'mock-m', messages: [{ role: 'user', content: 'hi' }] });
     expect(res.statusCode).toBe(200);
     // 1 prompt token plus the output allowance trimmed to what is left of the minute (999), not 1024.
     expect(res.headers['x-ratelimit-remaining-tokens']).toBe('0');
@@ -181,7 +181,7 @@ describe('rate limit plugin', { timeout: 30_000 }, () => {
 
   it('a body the route rejects is not charged', async () => {
     const s = await fresh({ rpm: 5, tpm: 100_000 });
-    for (const body of [{}, { model: 'm' }, { model: 1, messages: [] }, { model: 'm', messages: 'x' }, { model: 'm', messages: [], stream: 'yes' }]) {
+    for (const body of [{}, { model: 'mock-m' }, { model: 1, messages: [] }, { model: 'mock-m', messages: 'x' }, { model: 'mock-m', messages: [], stream: 'yes' }]) {
       const res = await chat(s.key, body);
       expect(res.statusCode).toBe(400);
       expect(res.headers['x-ratelimit-limit-requests']).toBeUndefined();
@@ -240,7 +240,7 @@ describe('rate limit plugin', { timeout: 30_000 }, () => {
           method: 'POST',
           url: '/v1/chat/completions',
           headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
-          payload: JSON.stringify({ model: 'm', messages: [], max_tokens: 5 }),
+          payload: JSON.stringify({ model: 'mock-m', messages: [], max_tokens: 5 }),
         });
         expect(res.statusCode).toBe(200);
         expect(res.headers['x-ratelimit-limit-requests']).toBeUndefined();

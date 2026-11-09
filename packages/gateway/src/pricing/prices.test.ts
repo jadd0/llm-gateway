@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { costMicros, formatUsd, parseUsd, priceFor } from './prices.ts';
+import { costMicros, formatUsd, parseUsd, priceFor, REAL_PRICES } from './prices.ts';
 
 describe('prices', () => {
   const mock = priceFor('mock-model')!;
@@ -10,6 +10,22 @@ describe('prices', () => {
     expect(priceFor('gpt-4o')).toBeUndefined();
     expect(priceFor('')).toBeUndefined();
     expect(priceFor('toString')).toBeUndefined();
+  });
+
+  it('every real model has a price in micro-USD, a read date and a source page', () => {
+    const names = Object.keys(REAL_PRICES).sort();
+    expect(names).toEqual(
+      ['claude-fable-5-1', 'claude-haiku-5-5', 'gemini-3.1-flash-lite', 'gemini-3.1-pro-preview', 'gpt-5-nano', 'gpt-6-astra'],
+    );
+    for (const name of names) {
+      const r = REAL_PRICES[name]!;
+      expect(Number.isInteger(r.inPerMillion) && r.inPerMillion > 0, name).toBe(true);
+      expect(Number.isInteger(r.outPerMillion) && r.outPerMillion > 0, name).toBe(true);
+      expect(r.asOf, name).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(r.source, name).toMatch(/^https:\/\//);
+      expect(priceFor(name), name).toBe(r);
+    }
+    expect(priceFor('claude-haiku-5-5')).toMatchObject({ inPerMillion: 100_000, outPerMillion: 500_000 });
   });
 
   it('cost rounds up in micro-USD', () => {

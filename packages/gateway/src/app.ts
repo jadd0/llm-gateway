@@ -108,6 +108,7 @@ export function buildApp(
   app.register(chatRoutes, {
     upstream,
     maxDurationMs: config.upstreamMaxDurationMs,
+    defaultMaxTokens: config.rateLimitDefaultMaxTokens,
     ...(extra.cutDrainMs ? { cutDrainMs: extra.cutDrainMs } : {}),
   });
   return app;

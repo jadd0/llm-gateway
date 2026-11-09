@@ -29,7 +29,7 @@ const chat = (headers: Record<string, string>) =>
   fetch(`${gw}/v1/chat/completions`, {
     method: 'POST',
     headers: { 'content-type': 'application/json', ...headers },
-    body: JSON.stringify({ model: 'm', messages: [{ role: 'user', content: 'hi' }] }),
+    body: JSON.stringify({ model: 'gpt-m', messages: [{ role: 'user', content: 'hi' }] }),
   });
 
 beforeAll(async () => {
@@ -38,7 +38,7 @@ beforeAll(async () => {
     if (req.url === '/v1/chat/completions') upstreamAuth.push(req.headers.authorization);
   });
   const mockUrl = `http://127.0.0.1:${await listen(mock)}`;
-  config = testConfig({ OPENAI_BASE_URL: mockUrl, OPENAI_API_KEY: 'upstream-secret' });
+  config = testConfig({ OPENAI_BASE_URL: `${mockUrl}/v1`, OPENAI_API_KEY: 'upstream-secret' });
   app = buildApp(config);
   // Registered after the auth plugin, so it sits behind the same hook as the real routes.
   app.register(async (a) => {

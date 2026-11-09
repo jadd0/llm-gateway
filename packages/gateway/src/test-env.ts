@@ -17,9 +17,17 @@ try {
 }
 
 export function testConfig(overrides: Record<string, string> = {}): Config {
+  const openaiUrl = overrides.OPENAI_BASE_URL ?? 'http://127.0.0.1:9';
   return loadConfig({
     ...process.env,
-    OPENAI_BASE_URL: 'http://127.0.0.1:9',
+    OPENAI_BASE_URL: openaiUrl,
+    // Tests stand one stub in for "the upstream": the mock-* models reach it too unless a test says otherwise.
+    MOCK_BASE_URL: openaiUrl,
+    // No test carries a real provider key, whatever the developer's .env.local holds.
+    OPENAI_API_KEY: '',
+    ANTHROPIC_API_KEY: '',
+    GEMINI_API_KEY: '',
+    MODEL_ROUTES: '',
     LOG_LEVEL: 'silent',
     API_KEY_PEPPER: randomBytes(24).toString('hex'),
     REDIS_KEY_PREFIX: `test-${randomBytes(6).toString('hex')}:`,

@@ -342,7 +342,7 @@ describe('across gateway instances', { timeout: 120_000 }, () => {
         const warm = await app.inject({ method: 'GET', url: '/__warm', headers: { authorization: `Bearer ${seeded.key}` } });
         expect(warm.statusCode).toBe(404);
       }
-      const body = JSON.stringify({ model: 'm', messages: [{ role: 'user', content: 'hi' }] });
+      const body = JSON.stringify({ model: 'mock-m', messages: [{ role: 'user', content: 'hi' }] });
       const responses = await Promise.all(
         Array.from({ length: 1000 }, (_, i) =>
           apps[i % 3]!.inject({
