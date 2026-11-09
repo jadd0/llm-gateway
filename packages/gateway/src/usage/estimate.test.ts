@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { estimateForLimit } from './estimate.ts';
+import { estimateForLimit, estimateWorstCase } from './estimate.ts';
 
 // With a key that holds more than any request, the estimate is just prompt + output.
 const estimateTokens = (body: unknown, defaultMaxTokens: number) =>
@@ -50,5 +50,24 @@ describe('estimateForLimit', () => {
     expect(estimateForLimit(body('a'.repeat(40)), 1024, 1000)).toEqual({ cost: 1000, tooLarge: false });
     expect(estimateForLimit(body('a'.repeat(4000)), 1024, 1000)).toEqual({ cost: 1000 + 0, tooLarge: false });
     expect(estimateForLimit(body('a'.repeat(4004)), 1024, 1000).tooLarge).toBe(true);
+  });
+});
+
+describe('estimateWorstCase', () => {
+  const body = (extra: object = {}) => ({ messages: [msg('a'.repeat(400))], ...extra });
+
+  it('output is the caller max_tokens, else the default allowance, whatever the rate limit would clamp it to', () => {
+    expect(estimateWorstCase(body({ max_tokens: 50 }), 1024)).toEqual({ prompt: 100, output: 50 });
+    expect(estimateWorstCase(body({ max_completion_tokens: 70 }), 1024)).toEqual({ prompt: 100, output: 70 });
+    expect(estimateWorstCase(body(), 1024)).toEqual({ prompt: 100, output: 1024 });
+    // The limiter would trim a default allowance to a 500-token minute; a budget holds the full worst case.
+    expect(estimateForLimit(body(), 1024, 500).cost).toBe(500);
+    expect(estimateWorstCase(body(), 1024).output).toBe(1024);
+  });
+
+  it('survives bodies that are not chat-shaped', () => {
+    for (const odd of [null, undefined, {}, { messages: 'x' }]) {
+      expect(estimateWorstCase(odd, 7)).toEqual({ prompt: 0, output: 7 });
+    }
   });
 });

@@ -24,6 +24,8 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
     API_KEY_PEPPER: randomBytes(24).toString('hex'),
     REDIS_KEY_PREFIX: `test-${randomBytes(6).toString('hex')}:`,
     AUTH_CACHE: 'redis',
+    // Off unless a test asks for it, so tests of other parts are not subject to a spend cap.
+    BUDGET_ENABLED: 'false',
     ...overrides,
   });
 }

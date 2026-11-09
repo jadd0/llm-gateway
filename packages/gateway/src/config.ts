@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { parseUsd } from './pricing/prices.ts';
 
 // A blank value in an env file (`KEY=`) means "not set", so the default applies.
 const blankAsUnset = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? undefined : v);
@@ -24,6 +25,20 @@ const cacheFields = {
   AUTH_TOMBSTONE_TTL_S: int(1200, 1),
 };
 
+// A USD amount written as "10" or "0.01": converted to integer micro-USD with no float in between.
+const usd = (def: string) =>
+  z.preprocess(
+    blankAsUnset,
+    z
+      .string()
+      .default(def)
+      .transform((v, ctx) => {
+        const micros = parseUsd(v);
+        if (micros === undefined) ctx.addIssue({ code: 'custom', message: 'must be a USD amount like 10 or 0.01' });
+        return micros ?? 0;
+      }),
+  );
+
 const schema = z
   .object({
     GATEWAY_HOST: z.preprocess(blankAsUnset, z.string().default('127.0.0.1')),
@@ -32,6 +47,9 @@ const schema = z
     OPENAI_API_KEY: z.preprocess(blankAsUnset, z.string().optional()),
     UPSTREAM_CONNECTIONS: int(256, 1),
     UPSTREAM_TIMEOUT_MS: int(30_000, 1),
+    // A total deadline per upstream call. UPSTREAM_TIMEOUT_MS only limits silence, so a slow stream
+    // that keeps trickling bytes could otherwise outlive the budget hold that covers it.
+    UPSTREAM_MAX_DURATION_MS: int(240_000, 1),
     LOG_LEVEL: z.preprocess(
       blankAsUnset,
       z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('warn'),
@@ -44,6 +62,13 @@ const schema = z
     RATE_LIMIT_DEFAULT_TPM: int(200_000, 1),
     RATE_LIMIT_DEFAULT_MAX_TOKENS: int(1024, 1),
     RATE_LIMIT_REDIS_TIMEOUT_MS: int(50, 1),
+    BUDGET_ENABLED: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
+    BUDGET_DEFAULT_MONTHLY_USD: usd('10'),
+    BUDGET_RESERVATION_TTL_S: int(300, 1),
+    BUDGET_REDIS_TIMEOUT_MS: int(50, 1),
+    BUDGET_EPOCH_REFRESH_MS: int(250, 10),
+    BUDGET_OUTAGE_FAILURES: int(3, 1),
+    BUDGET_SWEEP_INTERVAL_S: int(60, 1),
   })
   .refine((e) => e.AUTH_CACHE === 'none' || e.REDIS_URL !== undefined, {
     message: 'REDIS_URL is required when AUTH_CACHE=redis',
@@ -52,6 +77,15 @@ const schema = z
   .refine((e) => e.RATE_LIMIT_ENABLED === 'false' || e.REDIS_URL !== undefined, {
     message: 'REDIS_URL is required when RATE_LIMIT_ENABLED=true',
     path: ['REDIS_URL'],
+  })
+  .refine((e) => e.BUDGET_ENABLED === 'false' || e.REDIS_URL !== undefined, {
+    message: 'REDIS_URL is required when BUDGET_ENABLED=true',
+    path: ['REDIS_URL'],
+  })
+  .refine((e) => e.BUDGET_ENABLED === 'false' || e.BUDGET_RESERVATION_TTL_S * 1000 > e.UPSTREAM_MAX_DURATION_MS + 30_000, {
+    message:
+      'BUDGET_RESERVATION_TTL_S must be longer than UPSTREAM_MAX_DURATION_MS plus 30 seconds: a hold must outlive the longest call it covers',
+    path: ['BUDGET_RESERVATION_TTL_S'],
   })
   .refine((e) => e.AUTH_TOMBSTONE_TTL_S > e.AUTH_CACHE_TTL_S, {
     message: 'AUTH_TOMBSTONE_TTL_S must be longer than AUTH_CACHE_TTL_S',
@@ -65,6 +99,7 @@ export interface Config {
   upstreamApiKey: string | undefined;
   upstreamConnections: number;
   upstreamTimeoutMs: number;
+  upstreamMaxDurationMs: number;
   logLevel: string;
   databaseUrl: string;
   dbPoolSize: number;
@@ -81,6 +116,14 @@ export interface Config {
   /** Output tokens assumed when a request names no max_tokens. */
   rateLimitDefaultMaxTokens: number;
   rateLimitRedisTimeoutMs: number;
+  budgetEnabled: boolean;
+  /** Monthly cap in micro-USD for tenants with none of their own. */
+  budgetDefaultMonthlyMicros: number;
+  budgetReservationTtlS: number;
+  budgetRedisTimeoutMs: number;
+  budgetEpochRefreshMs: number;
+  budgetOutageFailures: number;
+  budgetSweepIntervalS: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -92,6 +135,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     upstreamApiKey: e.OPENAI_API_KEY,
     upstreamConnections: e.UPSTREAM_CONNECTIONS,
     upstreamTimeoutMs: e.UPSTREAM_TIMEOUT_MS,
+    upstreamMaxDurationMs: e.UPSTREAM_MAX_DURATION_MS,
     logLevel: e.LOG_LEVEL,
     databaseUrl: e.DATABASE_URL,
     dbPoolSize: e.DB_POOL_SIZE,
@@ -107,6 +151,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rateLimitDefaultTpm: e.RATE_LIMIT_DEFAULT_TPM,
     rateLimitDefaultMaxTokens: e.RATE_LIMIT_DEFAULT_MAX_TOKENS,
     rateLimitRedisTimeoutMs: e.RATE_LIMIT_REDIS_TIMEOUT_MS,
+    budgetEnabled: e.BUDGET_ENABLED === 'true',
+    budgetDefaultMonthlyMicros: e.BUDGET_DEFAULT_MONTHLY_USD,
+    budgetReservationTtlS: e.BUDGET_RESERVATION_TTL_S,
+    budgetRedisTimeoutMs: e.BUDGET_REDIS_TIMEOUT_MS,
+    budgetEpochRefreshMs: e.BUDGET_EPOCH_REFRESH_MS,
+    budgetOutageFailures: e.BUDGET_OUTAGE_FAILURES,
+    budgetSweepIntervalS: e.BUDGET_SWEEP_INTERVAL_S,
   };
 }
 

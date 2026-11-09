@@ -590,7 +590,7 @@ describe('mid-stream failure logging', () => {
       },
     } as unknown as Upstream;
     const app3 = Fastify({ logger: { level: 'warn', stream: logStream } });
-    app3.register(chatRoutes, { upstream });
+    app3.register(chatRoutes, { upstream, maxDurationMs: 240_000 });
     await app3.listen({ port: 0, host: '127.0.0.1' });
     try {
       const url = `http://127.0.0.1:${(app3.server.address() as AddressInfo).port}`;

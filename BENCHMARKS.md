@@ -136,3 +136,23 @@ What the run measures:
   (`burst.json`, with `status_200`, `status_429`, `status_429_with_retry_after`). A 100-per-minute bucket gains a token
   every 0.6 s, so a burst that takes longer than that admits one more; the run script checks the count against that bound.
 - **Estimate error:** the token estimate against the mock's reported usage.
+
+## Budgets (PR 5)
+
+Pending quiet run. `bash bench/run-budget.sh`, started behind `bash bench/quiet.sh bench/results/pr-5`, writes the
+results to `bench/results/pr-5/`; no figure is quoted here until that run is committed (R3).
+
+What the run measures:
+
+- **Overhead of the budget:** the same arrival rate through the gateway with `BUDGET_ENABLED=false` and `true` (rate
+  limiter on in both), for a tenant whose cap is never reached, instant non-streamed and realistic streamed. Files:
+  `gateway-{instant,realistic}-budget-{off,on}.json`.
+- **Flood:** 100 rounds; each round a fresh tenant with a $0.01 cap is hit by 50 requests at once. `flood.json` records
+  admitted and refused (402) counts, the largest settled spend as a share of the cap, and the largest overshoot in
+  micro-USD, read from Postgres. A round's worst case is 312 micro-USD, so a round admits 32 when every decision is made while
+  the first calls are still in flight.
+- **What the Postgres mirror costs:** the same overhead pair also covers it, since every request now writes its hold to
+  Postgres as well as Redis.
+- **Redis down:** the same flood (`flood-redis-down.json`) and the instant profile with budgets off and on
+  (`gateway-instant-redis-down-budget-{off,on}.json`) against a gateway whose Redis is unreachable, so every decision is
+  made on the Postgres path.

@@ -13,6 +13,8 @@ export interface Tenant {
   /** Per-minute limits set on this key; null means the gateway-wide default. */
   rpmLimit: number | null;
   tpmLimit: number | null;
+  /** The tenant's monthly spend cap in micro-USD; null means the gateway-wide default. */
+  monthlyBudgetMicros: number | null;
 }
 
 /** A limit that is left out is left as it is; null sets the key back to the gateway default. */
@@ -39,6 +41,13 @@ export interface KeyStore {
     keyHash: string,
     limits: Limits,
   ): Promise<{ updated: boolean; cached: boolean; rpm: number | null; tpm: number | null }>;
+  /**
+   * Writes the tenant's monthly cap (null = the gateway default) in Postgres, then overwrites the
+   * cached entry of each of its active keys. `updated` is false when there is no such tenant;
+   * `cached` is false when Redis was unreachable for any of them, in which case a cached copy keeps
+   * the old cap until its TTL runs out.
+   */
+  setBudget(tenantId: string, micros: number | null): Promise<{ updated: boolean; cached: boolean }>;
 }
 
 export interface KeyStoreOptions {
@@ -93,6 +102,7 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
         keyId: apiKeys.id,
         rpmLimit: apiKeys.rpmLimit,
         tpmLimit: apiKeys.tpmLimit,
+        monthlyBudgetMicros: tenants.monthlyBudgetMicros,
       })
       .from(apiKeys)
       .innerJoin(tenants, eq(tenants.id, apiKeys.tenantId))
@@ -110,8 +120,10 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
       }
       const rpmLimit = limit(v.rpmLimit);
       const tpmLimit = limit(v.tpmLimit);
-      if (rpmLimit === undefined || tpmLimit === undefined) return undefined;
-      return { tenantId: v.tenantId, tenantName: v.tenantName, keyId: v.keyId, rpmLimit, tpmLimit };
+      // An entry from before budgets existed has no such field: a miss, so the real cap is read.
+      const monthlyBudgetMicros = limit(v.monthlyBudgetMicros);
+      if (rpmLimit === undefined || tpmLimit === undefined || monthlyBudgetMicros === undefined) return undefined;
+      return { tenantId: v.tenantId, tenantName: v.tenantName, keyId: v.keyId, rpmLimit, tpmLimit, monthlyBudgetMicros };
     } catch {
       return undefined;
     }
@@ -213,6 +225,38 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
         }
       }
       return { updated: true, cached, rpm: updated[0]!.rpm, tpm: updated[0]!.tpm };
+    },
+
+    async setBudget(tenantId, micros) {
+      const updated = await db
+        .update(tenants)
+        .set({ monthlyBudgetMicros: micros })
+        .where(eq(tenants.id, tenantId))
+        .returning({ id: tenants.id });
+      if (updated.length === 0) return { updated: false, cached: false };
+      if (redis === null) return { updated: true, cached: false };
+      // The cap is on the tenant but the cache is per key: rewrite every active key's entry from the row.
+      const hashes = await db
+        .select({ keyHash: apiKeys.keyHash })
+        .from(apiKeys)
+        .where(and(eq(apiKeys.tenantId, tenantId), isNull(apiKeys.revokedAt)));
+      let cached = true;
+      if (hashes.length > 0 && !(await waitReady(redis, 2000))) {
+        redisFailed('set', new Error('redis not ready'));
+        return { updated: true, cached: false };
+      }
+      for (const { keyHash } of hashes) {
+        const tenant = await fromPostgres(keyHash);
+        if (tenant === null) continue; // revoked since the list was read
+        try {
+          await redis.eval(SET_UNLESS_REVOKED, 1, redisKey(keyHash), REVOKED, JSON.stringify(tenant), opts.cacheTtlS);
+          redisOk('set');
+        } catch (err) {
+          redisFailed('set', err);
+          cached = false;
+        }
+      }
+      return { updated: true, cached };
     },
   };
 }

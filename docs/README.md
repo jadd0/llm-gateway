@@ -7,6 +7,7 @@ One folder per part of the system. Each holds a `README.md` and a diagram drawn 
 - [mock-provider/](mock-provider/README.md): the OpenAI-compatible stand-in used for tests and benchmarks.
 - [auth/](auth/README.md): tenants, hashed API keys, the Redis key cache and instant revocation.
 - [rate-limiter/](rate-limiter/README.md): per-key requests and tokens per minute in one Redis Lua script, usage reconcile, fail open.
+- [budgets/](budgets/README.md): monthly spend caps per tenant, reserve-then-settle in Redis, Postgres fallback, the epoch.
 - [benchmarks/](benchmarks/README.md): how overhead is measured, and why the rig runs natively.
 
 Flow registry for the diagram check: [diagrams/flows.md](diagrams/flows.md). Numbers live in [../BENCHMARKS.md](../BENCHMARKS.md).

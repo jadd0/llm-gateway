@@ -56,3 +56,19 @@ export function estimateForLimit(body: unknown, defaultMaxTokens: number, tpm: n
   }
   return { cost: prompt + Math.min(defaultMaxTokens, Math.max(0, tpm - prompt)), tooLarge: prompt > tpm };
 }
+
+export interface WorstCase {
+  /** The prompt in tokens, by the same heuristic as the limiter's estimate. */
+  prompt: number;
+  /** The most the call can produce: the caller's max_tokens, else the default allowance. */
+  output: number;
+}
+
+/**
+ * The estimate as a budget reserves it. Money is held for the most the call can cost, so the output is
+ * the caller's own max_tokens or the default allowance, never trimmed to a rate limit's per-minute size.
+ */
+export function estimateWorstCase(body: unknown, defaultMaxTokens: number): WorstCase {
+  const { prompt, explicitOutput } = splitRequest(body);
+  return { prompt, output: explicitOutput ?? defaultMaxTokens };
+}
