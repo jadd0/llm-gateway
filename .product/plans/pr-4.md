@@ -17,7 +17,8 @@ migration: next free number at generate time. Residuals owned by this PR: none.
 | path | change |
 |---|---|
 | `packages/gateway/src/db/schema.ts` | `api_keys`: add `rpm_limit`, `tpm_limit` |
-| `packages/gateway/drizzle/` | generated migration |
+| `packages/gateway/drizzle/0001_ambiguous_legion.sql`, `packages/gateway/drizzle/meta/0001_snapshot.json`, `packages/gateway/drizzle/meta/_journal.json` | generated migration |
+| `packages/gateway/src/auth/plugin.test.ts` | the caller now carries `keyId` and limits |
 | `packages/gateway/src/usage/estimate.ts` | **new**. Pre-call token estimate (shared with PR 5) |
 | `packages/gateway/src/usage/estimate.test.ts` | **new** |
 | `packages/gateway/src/usage/sse-usage.ts` | **new**. Pass-through stream tap that extracts `usage` from the final SSE chunk without buffering |
