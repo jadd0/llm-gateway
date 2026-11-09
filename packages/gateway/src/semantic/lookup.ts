@@ -1,7 +1,8 @@
 import { replyWithin } from '../redis.ts';
 import type { CachedCompletion } from '../cache/replay.ts';
-import type { CacheStore, Lookup } from '../cache/store.ts';
+import type { CacheStore } from '../cache/store.ts';
 import type { Embedder } from './embedder.ts';
+import { failedGuard, guardSignature, type GuardOptions, type GuardRule } from './guards.ts';
 import type { SemanticSplit } from './context.ts';
 import type { SemanticStore } from './store.ts';
 
@@ -11,13 +12,19 @@ export interface SemanticHit {
   similarity: number;
 }
 
+/** What a semantic lookup found. A miss names the guard that refused the nearest prompt, when one did. */
+export type SemanticResult =
+  | { status: 'hit'; entry: SemanticHit }
+  | { status: 'miss'; guard?: GuardRule }
+  | { status: 'unavailable' };
+
 export interface SemanticLookup {
   /**
-   * After an exact miss: the cached answer of the stored prompt nearest to this one, if it is close enough.
-   * Never throws; anything that goes wrong (no embedding in time, Postgres slow or down, Redis down) is a miss
-   * or `unavailable`, and the request goes on to the provider.
+   * After an exact miss: the cached answer of the stored prompt nearest to this one, if it is close enough and
+   * passes the guards. Never throws; anything that goes wrong (no embedding in time, Postgres slow or down,
+   * Redis down) is a miss or `unavailable`, and the request goes on to the provider.
    */
-  find(scope: string, split: SemanticSplit): Promise<Lookup<SemanticHit>>;
+  find(scope: string, split: SemanticSplit): Promise<SemanticResult>;
 }
 
 export interface SemanticLookupOptions {
@@ -26,11 +33,13 @@ export interface SemanticLookupOptions {
   /** Where the answers are: the response cache, read by the key a row names. */
   cache: Pick<CacheStore, 'get'>;
   threshold: number;
+  /** Which guards the nearest prompt must pass to be served. */
+  guard: GuardOptions;
   /** false: only a vector made by the same model as the query's is a candidate. */
   crossModel: boolean;
   /** A last user message longer than this is not looked up. */
   maxChars: number;
-  /** Time allowed for the nearest-neighbour query. */
+  /** Time allowed for the nearest-neighbour query; Postgres cancels it then. */
   pgTimeoutMs: number;
   /** Unix ms. Expiry is judged on this clock, the one that wrote `expires_at`. */
   clock?: () => number;
@@ -71,9 +80,11 @@ export function createSemanticLookup(opts: SemanticLookupOptions): SemanticLooku
             contextHash: split.contextHash,
             embedding: embedded.vector,
             now: new Date(now()),
+            timeoutMs: opts.pgTimeoutMs,
             ...(opts.crossModel ? {} : { embedder: embedded.embedder }),
           }),
-          opts.pgTimeoutMs,
+          // Postgres cancels the query at pgTimeoutMs; this only bounds a wait for a connection or a reply that never comes.
+          opts.pgTimeoutMs + 25,
           () => new Slow(),
         );
       } catch (err) {
@@ -82,12 +93,16 @@ export function createSemanticLookup(opts: SemanticLookupOptions): SemanticLooku
       }
       answered();
       if (!near || near.similarity < opts.threshold) return { status: 'miss' };
+      // Close in meaning is not enough: the numbers, quotes, names and negations must agree, and the words nearly.
+      const guard = failedGuard(near.guardSig, guardSignature(split.text), opts.guard);
+      if (guard) return { status: 'miss', guard };
 
       const found = await opts.cache.get(near.exactKey);
       if (found.status === 'unavailable') return { status: 'unavailable' };
       if (found.status === 'miss') {
         // The answer is gone (evicted, expired, replaced by something unreadable): the row points at nothing.
-        await opts.store.remove(near.id).catch((err: unknown) => opts.log?.warn({ ...errInfo(err), op: 'remove' }, 'semantic row could not be removed'));
+        // Not awaited: the request is a miss either way, and a slow delete must not hold it.
+        void opts.store.remove(near.id).catch((err: unknown) => opts.log?.warn({ ...errInfo(err), op: 'remove' }, 'semantic row could not be removed'));
         return { status: 'miss' };
       }
       return { status: 'hit', entry: { entry: found.entry, similarity: Math.min(1, near.similarity) } };

@@ -4,6 +4,7 @@ import { afterAll, describe, expect, it } from 'vitest';
 import { createDb } from '../db/client.ts';
 import { semanticCache } from '../db/schema.ts';
 import { testConfig } from '../test-env.ts';
+import { guardSignature } from './guards.ts';
 import { createSemanticStore, sweepExpired, type SemanticRow } from './store.ts';
 import { angle, atSimilarity } from './test-support.ts';
 
@@ -26,11 +27,12 @@ const row = (scope: string, c: string, key: string, embedding: number[], over: P
   exactKey: `k-${key}`,
   embedding,
   embedder: 'voyage-4-lite',
+  guardSig: guardSignature(`prompt ${key}`),
   expiresAt: later(3600),
   ...over,
 });
 const ask = (scope: string, c: string, embedding: number[], extra: { embedder?: string; now?: Date } = {}) =>
-  store.nearest({ scope: `${run}-${scope}`, contextHash: ctx(c), embedding, now: extra.now ?? NOW, ...(extra.embedder ? { embedder: extra.embedder } : {}) });
+  store.nearest({ scope: `${run}-${scope}`, contextHash: ctx(c), embedding, now: extra.now ?? NOW, timeoutMs: 5000, ...(extra.embedder ? { embedder: extra.embedder } : {}) });
 
 describe('semantic store (postgres + pgvector)', () => {
   it('nearest within scope and context only', async () => {

@@ -160,6 +160,9 @@ describe('semantic cache settings', () => {
     semanticInputType: 'none',
     semanticMaxInputChars: 2000,
     semanticPgTimeoutMs: 100,
+    semanticPgPool: 4,
+    semanticGuardTokenSet: true,
+    semanticGuardMaxDiff: 2,
     semanticFillQueue: 1000,
     semanticCleanupS: 300,
   };
@@ -167,7 +170,7 @@ describe('semantic cache settings', () => {
   it('defaults, and .env.example alone (plus a pepper) loads to the same settings', () => {
     expect(loadConfig(env({}))).toMatchObject(defaults);
     const example = parseEnv(readFileSync(new URL('../../../.env.example', import.meta.url), 'utf8'));
-    for (const name of ['SEMANTIC_ENABLED', 'SEMANTIC_THRESHOLD', 'SEMANTIC_DIMENSIONS', 'VOYAGE_API_KEY', 'VOYAGE_BASE_URL', 'VOYAGE_MODEL', 'SEMANTIC_VOYAGE_TIMEOUT_MS', 'OLLAMA_URL', 'SEMANTIC_LOCAL_MODEL', 'SEMANTIC_LOCAL_TIMEOUT_MS', 'SEMANTIC_CROSS_MODEL', 'SEMANTIC_INPUT_TYPE', 'SEMANTIC_MAX_INPUT_CHARS', 'SEMANTIC_PG_TIMEOUT_MS', 'SEMANTIC_FILL_QUEUE', 'SEMANTIC_CLEANUP_S']) {
+    for (const name of ['SEMANTIC_ENABLED', 'SEMANTIC_THRESHOLD', 'SEMANTIC_DIMENSIONS', 'VOYAGE_API_KEY', 'VOYAGE_BASE_URL', 'VOYAGE_MODEL', 'SEMANTIC_VOYAGE_TIMEOUT_MS', 'OLLAMA_URL', 'SEMANTIC_LOCAL_MODEL', 'SEMANTIC_LOCAL_TIMEOUT_MS', 'SEMANTIC_CROSS_MODEL', 'SEMANTIC_INPUT_TYPE', 'SEMANTIC_MAX_INPUT_CHARS', 'SEMANTIC_PG_TIMEOUT_MS', 'SEMANTIC_PG_POOL', 'SEMANTIC_GUARD_TOKENSET', 'SEMANTIC_GUARD_MAX_DIFF', 'SEMANTIC_FILL_QUEUE', 'SEMANTIC_CLEANUP_S']) {
       expect(example[name], name).toBeDefined();
     }
     expect(loadConfig({ ...example, API_KEY_PEPPER: 'x'.repeat(40) })).toMatchObject(defaults);

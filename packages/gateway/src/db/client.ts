@@ -9,8 +9,9 @@ export interface Db {
 }
 
 // One pool per process; `max` is the number to name when Postgres becomes the bottleneck.
-export function createDb(opts: { databaseUrl: string; poolSize: number }): Db {
-  const pool = new pg.Pool({ connectionString: opts.databaseUrl, max: opts.poolSize });
+export function createDb(opts: { databaseUrl: string; poolSize: number; connectionTimeoutMs?: number }): Db {
+  // connectionTimeoutMs: a query that cannot get a connection that soon fails instead of queueing.
+  const pool = new pg.Pool({ connectionString: opts.databaseUrl, max: opts.poolSize, ...(opts.connectionTimeoutMs ? { connectionTimeoutMillis: opts.connectionTimeoutMs } : {}) });
   // An idle client dropping (Postgres restart) must not crash the process; the next query reconnects.
   pool.on('error', () => {});
   return { pool, db: drizzle(pool, { schema }), close: () => pool.end() };

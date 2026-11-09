@@ -8,6 +8,7 @@ import { createDb } from '../db/client.ts';
 import { semanticCache } from '../db/schema.ts';
 import { testConfig } from '../test-env.ts';
 import type { SemanticSplit } from './context.ts';
+import { guardSignature } from './guards.ts';
 import { createSemanticLookup } from './lookup.ts';
 import { createSemanticStore, type SemanticStore } from './store.ts';
 import { angle, atSimilarity, stubEmbedder } from './test-support.ts';
@@ -43,13 +44,14 @@ const world = (table: Record<string, number[]>, over: { threshold?: number; cros
     crossModel: over.crossModel ?? true,
     maxChars: over.maxChars ?? 2000,
     pgTimeoutMs: over.pgTimeoutMs ?? 1000,
+    guard: { tokenSet: true, maxDiff: 2 },
     clock: () => NOW,
   });
   return { stub, store, cache, lookup };
 };
-const stored = async (w: ReturnType<typeof world>, key: string, vector: number[], over: { embedder?: string; withAnswer?: boolean } = {}) => {
+const stored = async (w: ReturnType<typeof world>, key: string, vector: number[], over: { embedder?: string; withAnswer?: boolean; text?: string } = {}) => {
   if (over.withAnswer !== false) await w.cache.set(`${prefix}${key}`, answer);
-  await w.store.upsert({ scope, contextHash: CTX, exactKey: `${prefix}${key}`, embedding: vector, embedder: over.embedder ?? 'voyage-4-lite', expiresAt: new Date(NOW + 3600_000) });
+  await w.store.upsert({ scope, contextHash: CTX, exactKey: `${prefix}${key}`, embedding: vector, embedder: over.embedder ?? 'voyage-4-lite', guardSig: guardSignature(over.text ?? 'q'), expiresAt: new Date(NOW + 3600_000) });
 };
 
 describe('semantic lookup', () => {
@@ -73,21 +75,21 @@ describe('semantic lookup', () => {
   it('row whose Redis entry is gone is deleted and misses', async () => {
     const w = world({ q: angle(0) });
     const dangling = `${run}-gone`;
-    await w.store.upsert({ scope: dangling, contextHash: CTX, exactKey: `${prefix}missing`, embedding: atSimilarity(0.99), embedder: 'voyage-4-lite', expiresAt: new Date(NOW + 3600_000) });
-    const before = await w.store.nearest({ scope: dangling, contextHash: CTX, embedding: angle(0), now: new Date(NOW) });
+    await w.store.upsert({ scope: dangling, contextHash: CTX, exactKey: `${prefix}missing`, embedding: atSimilarity(0.99), embedder: 'voyage-4-lite', guardSig: guardSignature('q'), expiresAt: new Date(NOW + 3600_000) });
+    const before = await w.store.nearest({ scope: dangling, contextHash: CTX, embedding: angle(0), now: new Date(NOW), timeoutMs: 5000 });
     expect(before?.exactKey).toBe(`${prefix}missing`);
     expect(await w.lookup.find(dangling, split('q'))).toEqual({ status: 'miss' });
-    expect(await w.store.nearest({ scope: dangling, contextHash: CTX, embedding: angle(0), now: new Date(NOW) })).toBeUndefined();
+    expect(await w.store.nearest({ scope: dangling, contextHash: CTX, embedding: angle(0), now: new Date(NOW), timeoutMs: 5000 })).toBeUndefined();
   });
 
   it('a Redis that cannot answer is unavailable and the row stays', async () => {
     const w = world({ q: angle(0) });
     const scoped = `${run}-down`;
-    await w.store.upsert({ scope: scoped, contextHash: CTX, exactKey: `${prefix}x`, embedding: atSimilarity(0.99), embedder: 'voyage-4-lite', expiresAt: new Date(NOW + 3600_000) });
+    await w.store.upsert({ scope: scoped, contextHash: CTX, exactKey: `${prefix}x`, embedding: atSimilarity(0.99), embedder: 'voyage-4-lite', guardSig: guardSignature('q'), expiresAt: new Date(NOW + 3600_000) });
     const down = { get: async () => ({ status: 'unavailable' as const }) };
-    const lookup = createSemanticLookup({ embedder: w.stub.embedder, store: w.store, cache: down, threshold: 0.95, crossModel: true, maxChars: 100, pgTimeoutMs: 500, clock: () => NOW });
+    const lookup = createSemanticLookup({ embedder: w.stub.embedder, store: w.store, cache: down, threshold: 0.95, guard: { tokenSet: true, maxDiff: 2 }, crossModel: true, maxChars: 100, pgTimeoutMs: 500, clock: () => NOW });
     expect(await lookup.find(scoped, split('q'))).toEqual({ status: 'unavailable' });
-    expect((await w.store.nearest({ scope: scoped, contextHash: CTX, embedding: angle(0), now: new Date(NOW) }))?.exactKey).toBe(`${prefix}x`);
+    expect((await w.store.nearest({ scope: scoped, contextHash: CTX, embedding: angle(0), now: new Date(NOW), timeoutMs: 5000 }))?.exactKey).toBe(`${prefix}x`);
   });
 
   it('no embedding is no lookup, and a long prompt is not embedded at all', async () => {
@@ -114,7 +116,7 @@ describe('semantic lookup', () => {
     const scoped = `${run}-x`;
     const off = world({ q: angle(0) }, { crossModel: false });
     await off.cache.set(`${prefix}nano`, answer);
-    await off.store.upsert({ scope: scoped, contextHash: CTX, exactKey: `${prefix}nano`, embedding: atSimilarity(0.99), embedder: 'voyage-4-nano', expiresAt: new Date(NOW + 3600_000) });
+    await off.store.upsert({ scope: scoped, contextHash: CTX, exactKey: `${prefix}nano`, embedding: atSimilarity(0.99), embedder: 'voyage-4-nano', guardSig: guardSignature('q'), expiresAt: new Date(NOW + 3600_000) });
     // The stub embeds as voyage-4-lite.
     expect(await off.lookup.find(scoped, split('q'))).toEqual({ status: 'miss' });
     expect((await world({ q: angle(0) }, { crossModel: true }).lookup.find(scoped, split('q'))).status).toBe('hit');

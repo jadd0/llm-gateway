@@ -1,5 +1,6 @@
 import type { SemanticSplit } from './context.ts';
 import type { Embedder } from './embedder.ts';
+import { guardSignature } from './guards.ts';
 import type { SemanticStore } from './store.ts';
 
 /** An answer that was just cached and whose prompt should be findable by meaning. */
@@ -83,6 +84,7 @@ export function createSemanticFill(opts: SemanticFillOptions): SemanticFill {
         exactKey: job.exactKey,
         embedding: embedded.vector,
         embedder: embedded.embedder,
+        guardSig: guardSignature(job.split.text),
         expiresAt: new Date(now() + job.ttlS * 1000),
       });
       stats.filled += 1;

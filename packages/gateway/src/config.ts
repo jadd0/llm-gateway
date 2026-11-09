@@ -173,6 +173,9 @@ const schema = z
     SEMANTIC_INPUT_TYPE: z.preprocess(blankAsUnset, z.enum(['none', 'query']).default('none')),
     SEMANTIC_MAX_INPUT_CHARS: int(2000, 1),
     SEMANTIC_PG_TIMEOUT_MS: int(100, 1),
+    SEMANTIC_PG_POOL: int(4, 1),
+    SEMANTIC_GUARD_TOKENSET: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
+    SEMANTIC_GUARD_MAX_DIFF: int(2, 0),
     SEMANTIC_FILL_QUEUE: int(1000, 1),
     SEMANTIC_CLEANUP_S: int(300, 1),
   })
@@ -328,6 +331,12 @@ export interface Config {
   semanticMaxInputChars: number;
   /** The nearest-neighbour query's budget; slower is a miss. */
   semanticPgTimeoutMs: number;
+  /** Connections of the pool the semantic cache's queries use, so auth and budgets never queue behind them. */
+  semanticPgPool: number;
+  /** Whether the content-word guard runs (the number, quote, name and negation guards always do). */
+  semanticGuardTokenSet: boolean;
+  /** The content-word guard: the two prompts' word sets may differ (symmetric difference) by at most this many words. */
+  semanticGuardMaxDiff: number;
   semanticFillQueue: number;
   semanticCleanupS: number;
 }
@@ -414,6 +423,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     semanticInputType: e.SEMANTIC_INPUT_TYPE,
     semanticMaxInputChars: e.SEMANTIC_MAX_INPUT_CHARS,
     semanticPgTimeoutMs: e.SEMANTIC_PG_TIMEOUT_MS,
+    semanticPgPool: e.SEMANTIC_PG_POOL,
+    semanticGuardTokenSet: e.SEMANTIC_GUARD_TOKENSET === 'true',
+    semanticGuardMaxDiff: e.SEMANTIC_GUARD_MAX_DIFF,
     semanticFillQueue: e.SEMANTIC_FILL_QUEUE,
     semanticCleanupS: e.SEMANTIC_CLEANUP_S,
   };

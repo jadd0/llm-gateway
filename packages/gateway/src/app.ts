@@ -17,7 +17,7 @@ import { createRedis } from './redis.ts';
 import { fallbackEmbedder, localEmbedder, voyageEmbedder, type Embedder } from './semantic/embedder.ts';
 import { createSemanticFill } from './semantic/fill.ts';
 import { createSemanticLookup } from './semantic/lookup.ts';
-import { createSemanticStore, sweepExpired } from './semantic/store.ts';
+import { checkPgvector, createSemanticStore, sweepExpired, type SemanticStoreOptions } from './semantic/store.ts';
 import { createBreaker, probeLockTtlMs, type Breaker } from './resilience/breaker.ts';
 import { chainFor } from './resilience/fallback.ts';
 import { createUpstream } from './upstream.ts';
@@ -167,7 +167,17 @@ export function buildApp(
           // A failed API is left alone this long, so an outage costs one timeout, not one per request.
           { backoffMs: 5_000 },
         );
-      const semanticStore = createSemanticStore(handle.db);
+      // Its own small pool: a slow vector query, a fill burst or the sweep can only queue behind each other, never
+      // behind authentication or the budget. A query that cannot get a connection within its budget fails fast.
+      const semanticDb = createDb({ databaseUrl: config.databaseUrl, poolSize: config.semanticPgPool, connectionTimeoutMs: config.semanticPgTimeoutMs });
+      const storeOptions: SemanticStoreOptions = {};
+      const semanticStore = createSemanticStore(semanticDb.db, storeOptions);
+      // The start-up check: no pgvector, no start, and the error says what to install. The version picks the query.
+      app.addHook('onReady', async () => {
+        const found = await checkPgvector(semanticDb.db);
+        storeOptions.pgvector = found;
+        app.log.info({ pgvector: found.version, iterativeScan: found.iterativeScan }, 'pgvector found');
+      });
       const clock = extra.semanticClock ?? Date.now;
       const fill = createSemanticFill({
         embedder,
@@ -184,6 +194,7 @@ export function buildApp(
           store: semanticStore,
           cache: cacheStore,
           threshold: config.semanticThreshold,
+          guard: { tokenSet: config.semanticGuardTokenSet, maxDiff: config.semanticGuardMaxDiff },
           crossModel: config.semanticCrossModel,
           maxChars: config.semanticMaxInputChars,
           pgTimeoutMs: config.semanticPgTimeoutMs,
@@ -202,6 +213,7 @@ export function buildApp(
         clearInterval(sweep);
         await fill.close();
         await embedder.close?.();
+        await semanticDb.close();
       });
     }
     app.register(responseCache, {
