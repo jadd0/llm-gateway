@@ -564,13 +564,21 @@ describe('mid-stream failure logging', () => {
   it('a client abort mid-stream logs no warn', async () => {
     const up = await slowUpstream();
     const { g, url } = await gatewayFor(up.port);
+    const probe = new Redis(base.redisUrl!);
+    // The request log's entry for the abort is the positive signal that the gateway has seen it end: no fixed sleep.
+    const closed = async () =>
+      (await probe.xrange(`${base.redisKeyPrefix}requestlog`, '-', '+')).filter(([, f]) => f.includes('client_closed')).length;
     try {
+      const before = await closed();
       const ctrl = new AbortController();
       await openStream(url, ctrl.signal);
       ctrl.abort();
-      await new Promise((r) => setTimeout(r, 300));
+      const end = Date.now() + 10_000;
+      while ((await closed()) <= before && Date.now() < end) await new Promise((r) => setTimeout(r, 10));
+      expect(await closed()).toBeGreaterThan(before);
       expect(terminated()).toHaveLength(0);
     } finally {
+      probe.disconnect();
       await g.close();
       await up.close();
     }
