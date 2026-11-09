@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import pg from 'pg';
 import { inArray } from 'drizzle-orm';
 import type { Redis } from 'ioredis';
 import { createKey, createTenant } from './cli/keys.ts';
@@ -62,4 +63,18 @@ export async function cleanup(db: Db['db'], redis: Redis | null, tenantIds: stri
     const keys = await redis.keys(`${prefix}*`);
     if (keys.length) await redis.del(...keys);
   }
+}
+
+/**
+ * Test files that move the rollup fold mark (it is one row, shared by every test in the database) hold this
+ * lock for their whole run, so two of them never see each other's mark. Returns the release function.
+ */
+export async function lockRollupState(databaseUrl: string): Promise<() => Promise<void>> {
+  const client = new pg.Client({ connectionString: databaseUrl });
+  await client.connect();
+  await client.query('SELECT pg_advisory_lock(7011)');
+  return async () => {
+    await client.query('SELECT pg_advisory_unlock(7011)');
+    await client.end();
+  };
 }

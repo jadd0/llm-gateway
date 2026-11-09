@@ -5,7 +5,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createDb, type Db } from '../../gateway/src/db/client.ts';
 import { NO_TENANT } from '../../gateway/src/db/schema.ts';
 import { streamKey, toLogFields, type LogEntry } from '../../gateway/src/requestlog/entry.ts';
-import { testConfig } from '../../gateway/src/test-env.ts';
+import { lockRollupState, testConfig } from '../../gateway/src/test-env.ts';
 import { applyBatch } from './batch.ts';
 import { histogramOf } from './histogram.ts';
 import { createWorker } from './worker.ts';
@@ -19,6 +19,7 @@ const run = randomBytes(4).toString('hex');
 let testN = 0;
 let model = '';
 let originalMark = '';
+let unlock: () => Promise<void>;
 
 // One injected clock for the whole file.
 const NOW = new Date('2031-03-01T12:30:00Z');
@@ -105,6 +106,7 @@ const totalRequests = (g: Group[]) => g.reduce((s, x) => s + x.requests, 0);
 const mark = async () => new Date((await db.execute<{ m: number }>(sql`SELECT (extract(epoch FROM folded_through) * 1000)::float8 AS m FROM rollup_state WHERE id = 1`)).rows[0]!.m);
 
 beforeAll(async () => {
+  unlock = await lockRollupState(testConfig().databaseUrl);
   originalMark = (await mark()).toISOString();
 });
 beforeEach(async () => {
@@ -117,6 +119,7 @@ afterAll(async () => {
   await db.execute(sql`DELETE FROM request_log WHERE coalesce(served_model, model) LIKE ${`rt-${run}-%`}`);
   await db.execute(sql`UPDATE rollup_state SET folded_through = ${originalMark}::timestamptz WHERE id = 1`);
   await handle.close();
+  await unlock();
 });
 
 describe('batch rollups', () => {

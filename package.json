@@ -7,7 +7,7 @@
   "scripts": {
     "dev:mock": "npm run start -w @llm-gateway/mock-provider",
     "dev:gateway": "npm run start -w @llm-gateway/gateway",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p packages/dashboard/tsconfig.json --noEmit",
     "test": "vitest run",
     "check": "npm run typecheck && npm test",
     "bench:baseline": "bash bench/run-baseline.sh",
@@ -18,7 +18,9 @@
     "bench:chaos": "bash bench/run-chaos.sh",
     "bench:cache": "bash bench/run-cache.sh",
     "bench:logging": "bash bench/run-logging.sh",
-    "worker": "node --env-file-if-exists=.env.local packages/log-worker/src/worker.ts"
+    "worker": "node --env-file-if-exists=.env.local packages/log-worker/src/worker.ts",
+    "dashboard": "npm run dev -w @llm-gateway/dashboard",
+    "bench:dashboard": "node --env-file-if-exists=.env.local bench/dashboard/query-bench.ts"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
