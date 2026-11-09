@@ -2,6 +2,9 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { chatRequest } from '../request-body.ts';
 import type { Usage } from '../usage/sse-usage.ts';
+import { splitForSemantic } from '../semantic/context.ts';
+import type { SemanticFill } from '../semantic/fill.ts';
+import type { SemanticLookup } from '../semantic/lookup.ts';
 import { cacheKey, isCacheable, normalise, scopeOf } from './key.ts';
 import { replayBody, replayStream, type CachedCompletion } from './replay.ts';
 import type { SingleFlight } from './single-flight.ts';
@@ -54,6 +57,10 @@ export interface CachePluginOptions {
   replayChunkChars: number;
   /** The provider a model name is served by, or undefined when none is: an unroutable name is the route's 400, not a cache question. */
   resolve(model: string): { translates: boolean } | undefined;
+  /** Present when the semantic cache is on: what runs after an exact miss and after an entry is stored. */
+  semantic?: { lookup: SemanticLookup; fill: SemanticFill };
+  /** How long a stored answer lives: a semantic row expires with it. */
+  ttlS: number;
   /** Unix ms. Pins `created` of a replayed reply. Tests only. */
   clock?: () => number;
 }
@@ -85,7 +92,15 @@ const cachePlugin: FastifyPluginAsync<CachePluginOptions> = async (app, opts) =>
       return void reply.header('x-gateway-cache', 'uncacheable');
     }
 
-    const key = cacheKey(opts.keyPrefix, scopeOf(tenant), normalise(body, provider.translates ? opts.defaultMaxTokens : null));
+    const scope = scopeOf(tenant);
+    const normalised = normalise(body, provider.translates ? opts.defaultMaxTokens : null);
+    const key = cacheKey(opts.keyPrefix, scope, normalised);
+    // The semantic step needs the cache on for the app, the tenant and this request, and a request whose last
+    // message is plain user text. A request that opts out never has its prompt sent to an embedder.
+    const semantic =
+      opts.semantic && tenant.semanticCache && String(request.headers['x-gateway-semantic'] ?? '').trim().toLowerCase() !== 'off'
+        ? splitForSemantic(normalised)
+        : undefined;
     const lookup = () => opts.store.get(key);
     const refresh = directives.has('no-cache');
     const streamed = body.stream === true;
@@ -95,6 +110,11 @@ const cachePlugin: FastifyPluginAsync<CachePluginOptions> = async (app, opts) =>
       const found = await lookup();
       if (found.status === 'unavailable') return void reply.header('x-gateway-cache', 'unavailable');
       if (found.status === 'hit') return hit(request, reply, found.entry, streamed, includeUsage);
+      // After an exact miss only. Anything but a hit (no embedding in time, Postgres or Redis slow) is a plain miss.
+      if (semantic) {
+        const near = await opts.semantic!.lookup.find(scope, semantic);
+        if (near.status === 'hit') return hit(request, reply, near.entry.entry, streamed, includeUsage, near.entry.similarity);
+      }
     }
 
     // A miss. The first of several identical non-streamed misses leads; the rest wait for its fill. A stream
@@ -120,6 +140,8 @@ const cachePlugin: FastifyPluginAsync<CachePluginOptions> = async (app, opts) =>
         let written: Awaited<ReturnType<CacheStore['set']>> = 'unavailable';
         try {
           written = await opts.store.set(key, entry);
+          // Queued, not awaited: the embedding happens after this request is done with.
+          if (written === 'stored' && semantic) opts.semantic!.fill.enqueue({ scope, split: semantic, exactKey: key, ttlS: opts.ttlS });
         } finally {
           state = 'ended';
           leader?.finish(written === 'stored' ? 'filled' : 'failed');
@@ -144,13 +166,15 @@ const cachePlugin: FastifyPluginAsync<CachePluginOptions> = async (app, opts) =>
 
   // A hit: no provider, no budget hold. It counts as one request against the key's rpm and gives the token
   // estimate back; the ledger gets a zero-cost row with what it saved.
-  function hit(request: FastifyRequest, reply: FastifyReply, entry: CachedCompletion, streamed: boolean, includeUsage: boolean, kind: CacheHit['kind'] = 'exact') {
+  function hit(request: FastifyRequest, reply: FastifyReply, entry: CachedCompletion, streamed: boolean, includeUsage: boolean, similarity?: number) {
+    const kind: CacheHit['kind'] = similarity === undefined ? 'exact' : 'semantic';
     void request.rateLimit?.settle(0);
     if (app.recordCacheHit) {
       void app.recordCacheHit({ tenantId: request.tenant!.tenantId, model: entry.model, usage: entry.usage, kind }).catch(() => {});
     }
     const who = { id: `chatcmpl-cache-${randomUUID()}`, created: Math.floor(now() / 1000) };
-    reply.header('x-gateway-cache', 'hit').header('x-gateway-model', entry.model).header('x-gateway-attempts', '0');
+    reply.header('x-gateway-cache', kind === 'semantic' ? 'semantic-hit' : 'hit').header('x-gateway-model', entry.model).header('x-gateway-attempts', '0');
+    if (similarity !== undefined) reply.header('x-gateway-similarity', similarity.toFixed(3));
     if (streamed) {
       return reply
         .code(200)

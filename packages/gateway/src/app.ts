@@ -13,6 +13,10 @@ import { createLimiter } from './ratelimit/limiter.ts';
 import { rateLimit } from './ratelimit/plugin.ts';
 import { chatRoutes } from './routes/chat.ts';
 import { createRedis } from './redis.ts';
+import { fallbackEmbedder, localEmbedder, voyageEmbedder, type Embedder } from './semantic/embedder.ts';
+import { createSemanticFill } from './semantic/fill.ts';
+import { createSemanticLookup } from './semantic/lookup.ts';
+import { createSemanticStore, sweepExpired } from './semantic/store.ts';
 import { createBreaker, probeLockTtlMs, type Breaker } from './resilience/breaker.ts';
 import { chainFor } from './resilience/fallback.ts';
 import { createUpstream } from './upstream.ts';
@@ -33,6 +37,10 @@ export function buildApp(
     wrapBreaker?: (breaker: Breaker) => Breaker;
     /** Wraps the response cache's store. Tests only. */
     wrapCacheStore?: (store: CacheStore) => CacheStore;
+    /** Replaces the semantic cache's embedder. Tests only. */
+    semanticEmbedder?: Embedder;
+    /** Pins the semantic cache's clock (ms): row expiry. Tests only. */
+    semanticClock?: () => number;
     /** Pins the `created` time of a replayed cache hit (ms). Tests only. */
     cacheClock?: () => number;
     /** How long a client of a deadline-cut stream gets to take the last bytes. Tests only. */
@@ -102,16 +110,84 @@ export function buildApp(
   // After the rate limiter, before the budget: an answer already in the cache costs nothing, so it is served
   // without a hold, even to a tenant whose budget is spent.
   if (config.cacheEnabled && redis !== null) {
-    app.register(responseCache, {
-      store: (extra.wrapCacheStore ?? ((s: CacheStore) => s))(
-        createCacheStore({
-          redis,
-          ttlS: config.cacheTtlS,
-          maxEntryBytes: config.cacheMaxEntryBytes,
-          timeoutMs: config.cacheRedisTimeoutMs,
+    const cacheStore = (extra.wrapCacheStore ?? ((s: CacheStore) => s))(
+      createCacheStore({
+        redis,
+        ttlS: config.cacheTtlS,
+        maxEntryBytes: config.cacheMaxEntryBytes,
+        timeoutMs: config.cacheRedisTimeoutMs,
+        log: app.log,
+      }),
+    );
+    // The semantic cache keeps prompt vectors in Postgres and reads the answers from the cache store above.
+    let semantic: { lookup: ReturnType<typeof createSemanticLookup>; fill: ReturnType<typeof createSemanticFill> } | undefined;
+    if (config.semanticEnabled) {
+      const embedder =
+        extra.semanticEmbedder ??
+        fallbackEmbedder(
+          config.voyageApiKey
+            ? voyageEmbedder({
+                apiKey: config.voyageApiKey,
+                baseUrl: config.voyageBaseUrl,
+                model: config.voyageModel,
+                dimensions: config.semanticDimensions,
+                timeoutMs: config.voyageTimeoutMs,
+                inputType: config.semanticInputType,
+                log: app.log,
+              })
+            : undefined,
+          localEmbedder({
+            baseUrl: config.ollamaUrl,
+            model: config.semanticLocalModel,
+            dimensions: config.semanticDimensions,
+            timeoutMs: config.semanticLocalTimeoutMs,
+            inputType: config.semanticInputType,
+            log: app.log,
+          }),
+          // A failed API is left alone this long, so an outage costs one timeout, not one per request.
+          { backoffMs: 5_000 },
+        );
+      const semanticStore = createSemanticStore(handle.db);
+      const clock = extra.semanticClock ?? Date.now;
+      const fill = createSemanticFill({
+        embedder,
+        store: semanticStore,
+        queueMax: config.semanticFillQueue,
+        maxChars: config.semanticMaxInputChars,
+        clock,
+        log: app.log,
+      });
+      semantic = {
+        fill,
+        lookup: createSemanticLookup({
+          embedder,
+          store: semanticStore,
+          cache: cacheStore,
+          threshold: config.semanticThreshold,
+          crossModel: config.semanticCrossModel,
+          maxChars: config.semanticMaxInputChars,
+          pgTimeoutMs: config.semanticPgTimeoutMs,
+          clock,
           log: app.log,
         }),
-      ),
+      };
+      // Expired rows are deleted in batches; one that outlives its answer by a moment is a miss in the lookup anyway.
+      const sweep = setInterval(() => {
+        sweepExpired(semanticStore, new Date(clock()), 500).catch((err: unknown) => {
+          app.log.warn({ errClass: (err as Error)?.name, code: (err as { code?: string })?.code, op: 'cleanup' }, 'semantic cleanup failed');
+        });
+      }, config.semanticCleanupS * 1000);
+      sweep.unref();
+      app.addHook('onClose', async () => {
+        clearInterval(sweep);
+        await fill.close();
+        await embedder.close?.();
+      });
+    }
+    app.register(responseCache, {
+      store: cacheStore,
+      ...(semantic ? { semantic } : {}),
+      ttlS: config.cacheTtlS,
       singleFlight: createSingleFlight({
         redis,
         lockMs: config.cacheLockMs,

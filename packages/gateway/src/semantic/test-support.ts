@@ -22,10 +22,11 @@ export function stubEmbedder(table: Record<string, number[]>, name = 'voyage-4-l
   const calls: Array<{ text: string; patient: boolean }> = [];
   let release: (() => void) | undefined;
   let gate: Promise<void> | undefined;
+  let gatePatientOnly = false;
   const embedder: Embedder = {
     async embed(text, options): Promise<Embedded | undefined> {
       calls.push({ text, patient: options?.patient === true });
-      if (gate) await gate;
+      if (gate && (!gatePatientOnly || options?.patient)) await gate;
       const vector = table[text];
       return vector ? { vector, embedder: name } : undefined;
     },
@@ -33,7 +34,9 @@ export function stubEmbedder(table: Record<string, number[]>, name = 'voyage-4-l
   return {
     embedder,
     calls,
-    hold() {
+    /** Holds every answer (or, with `patientOnly`, only the fill's) until `release`. */
+    hold(patientOnly = false) {
+      gatePatientOnly = patientOnly;
       gate = new Promise<void>((r) => (release = r));
     },
     release() {
