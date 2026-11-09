@@ -35,6 +35,8 @@ Format — one entry per decision under its category, newest last, ids never reu
   Src: founder chose "Monthly, resets"
 - **D-024** 2026-11-09 · founder · active — Budget caps are hard through a Redis outage: every hold is written to Postgres as well as Redis, the Postgres path and every Redis rebuild count unexpired Postgres holds, and settles always land on the current balance. Costs one extra Postgres write per request (to be measured). Why: the PR 5 verifier measured 1.12-2.1x cap overspend when Redis died with Redis-only holds.
   Src: founder chose "Hard cap: holds in Postgres too" in chat · Code: packages/gateway/src/budget/
+- **D-025** 2026-11-09 · founder · active — PR 5 merges after one last pass that shrinks the failover window (epoch checked every ~250 ms) plus the review's leak/deadline fixes; the remaining small overshoot during gateway failover disagreement is measured, documented and owned by PR 12 (R6). Why: after two fix rounds the cap held in 11 of 13 outage runs and the 2 breaches were 1-2% of the cap, with accounting always exact.
+  Src: founder chose "Shrink window, merge" in chat · Code: packages/gateway/src/budget/budget.ts
 - **D-023** 2026-11-09 · loop default · active — If neither Redis nor Postgres can decide a budget reservation, the request is refused with 503 budget_unavailable (fail closed), and requests refused for budget hand back their rate-limit tokens. Why: D-018 keeps spend capped; with both stores down there is no safe way to admit a paid call.
   Src: .product/plans/pr-5.md "Notes from the build" · Code: packages/gateway/src/budget/budget.ts
 
