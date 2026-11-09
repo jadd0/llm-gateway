@@ -90,6 +90,8 @@ export interface ChatRouteOptions {
   defaultMaxTokens: number;
   /** How long a provider's error body is waited for once its status and headers are in. */
   errorBodyTimeoutMs?: number;
+  /** Most bytes of a provider's error body that are kept; the rest is dropped unread. */
+  errorBodyMaxBytes?: number;
   cutDrainMs?: number;
 }
 
@@ -111,6 +113,7 @@ const asText = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : 
 export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts) => {
   const { upstream, breaker, chains, retry, maxDurationMs, defaultMaxTokens } = opts;
   const errorBodyTimeoutMs = opts.errorBodyTimeoutMs ?? 2000;
+  const errorBodyMaxBytes = opts.errorBodyMaxBytes ?? 65536;
   // After a cut stream's last bytes are written, a client that still hasn't taken them this long is dropped.
   const cutDrainMs = opts.cutDrainMs ?? 5000;
 
@@ -149,18 +152,37 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
   // The error body of a non-2xx answer, read in full (which also frees the socket) unless it takes longer than
   // errorBodyTimeoutMs: a provider that sends its status and then stalls must not hold the request for the
   // whole idle timeout before the next attempt or model. A slow body is dropped and its connection closed;
-  // the status is kept.
-  async function readErrorBody(stream: Readable & { arrayBuffer(): Promise<ArrayBuffer> }): Promise<Buffer> {
+  // the status is kept. errorBodyMaxBytes: a body past the cap is cut there and the connection closed, so a
+  // provider cannot make the gateway buffer an unbounded error answer.
+  async function readErrorBody(stream: Readable): Promise<Buffer> {
     let timer: NodeJS.Timeout | undefined;
-    const read = stream.arrayBuffer().then((b) => Buffer.from(b));
-    const slow = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), errorBodyTimeoutMs);
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let capped = false;
+    const read = (async () => {
+      for await (const chunk of stream) {
+        const c = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+        const room = errorBodyMaxBytes - size;
+        chunks.push(room < c.length ? c.subarray(0, room) : c);
+        size += Math.min(room, c.length);
+        if (size >= errorBodyMaxBytes) {
+          capped = true;
+          return;
+        }
+      }
+    })();
+    const slow = new Promise<'slow'>((resolve) => {
+      timer = setTimeout(() => resolve('slow'), errorBodyTimeoutMs);
     });
     try {
-      const got = await Promise.race([read, slow]);
-      if (got !== null) return got;
+      const got = await Promise.race([read.then(() => 'done' as const), slow]);
+      if (got === 'done' && !capped) return Buffer.concat(chunks);
       read.catch(() => {}); // destroying the stream rejects the pending read
-      stream.destroy();
+      stream.destroy(); // frees the socket without draining what is left
+      if (capped) {
+        app.log.warn({ maxBytes: errorBodyMaxBytes }, 'upstream error body over the cap, rest dropped');
+        return Buffer.concat(chunks);
+      }
       app.log.warn({ timeoutMs: errorBodyTimeoutMs }, 'upstream error body too slow, dropped');
       return Buffer.alloc(0);
     } finally {

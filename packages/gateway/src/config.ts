@@ -108,6 +108,7 @@ const schema = z
     // A provider's error answer (status and headers in) is waited for this long for its body; a slower body is
     // dropped, the status kept, and the request moves on.
     UPSTREAM_ERROR_BODY_TIMEOUT_MS: int(2_000, 1),
+    UPSTREAM_ERROR_BODY_MAX_BYTES: int(65_536, 1),
     RETRY_MAX_ATTEMPTS_PER_MODEL: int(3, 1),
     RETRY_BASE_MS: int(200, 1),
     RETRY_CAP_MS: int(2_000, 1),
@@ -231,6 +232,7 @@ export interface Config {
   upstreamIdleTimeoutMs: number;
   upstreamMaxDurationMs: number;
   upstreamErrorBodyTimeoutMs: number;
+  upstreamErrorBodyMaxBytes: number;
   retryMaxAttemptsPerModel: number;
   retryBaseMs: number;
   retryCapMs: number;
@@ -308,6 +310,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     upstreamIdleTimeoutMs: e.UPSTREAM_IDLE_TIMEOUT_MS,
     upstreamMaxDurationMs: e.UPSTREAM_MAX_DURATION_MS,
     upstreamErrorBodyTimeoutMs: e.UPSTREAM_ERROR_BODY_TIMEOUT_MS,
+    upstreamErrorBodyMaxBytes: e.UPSTREAM_ERROR_BODY_MAX_BYTES,
     retryMaxAttemptsPerModel: e.RETRY_MAX_ATTEMPTS_PER_MODEL,
     retryBaseMs: e.RETRY_BASE_MS,
     retryCapMs: e.RETRY_CAP_MS,

@@ -205,6 +205,7 @@ export function buildApp(
     maxDurationMs: config.upstreamMaxDurationMs,
     defaultMaxTokens: config.rateLimitDefaultMaxTokens,
     errorBodyTimeoutMs: config.upstreamErrorBodyTimeoutMs,
+    errorBodyMaxBytes: config.upstreamErrorBodyMaxBytes,
     ...(extra.cutDrainMs ? { cutDrainMs: extra.cutDrainMs } : {}),
   });
   return app;

@@ -519,6 +519,30 @@ describe('what counts as a failure, and where a failure leads', { timeout: 60_00
     await until(() => heldMicros(s.tenantId), (h) => h === 0);
   }, 15_000);
 
+  it('a 10 MB error body is cut at the cap and the rest is never read', async () => {
+    let sent = 0;
+    const big = await stubServer((req, res) => {
+      req.resume();
+      res.writeHead(503, { 'content-type': 'text/plain' });
+      const chunk = Buffer.alloc(64 * 1024, 'x');
+      const pump = () => {
+        while (sent < 10 * 1024 * 1024 && !res.destroyed) {
+          sent += chunk.length;
+          if (!res.write(chunk)) return void res.once('drain', pump);
+        }
+        if (!res.destroyed) res.end();
+      };
+      pump();
+    });
+    closers.push(() => new Promise((r) => (big.server.closeAllConnections(), big.server.close(r))));
+    const gw = await gateway({ MOCK_BASE_URL: big.url, MODEL_FALLBACKS: '', RETRY_MAX_ATTEMPTS_PER_MODEL: '1', UPSTREAM_ERROR_BODY_MAX_BYTES: '65536' });
+    const s = await tenant();
+    const res = await send(gw, s.key);
+    expect(res.status).toBe(503);
+    expect((await res.arrayBuffer()).byteLength).toBeLessThanOrEqual(65536);
+    expect(sent).toBeLessThan(10 * 1024 * 1024); // the provider was cut off, not drained
+  }, 15_000);
+
   it('402 before dispatch carries x-gateway-model and attempts 0', async () => {
     const gw = await gateway();
     const broke = await tenant(undefined, 1); // a cap of one micro-USD: every hold is refused
