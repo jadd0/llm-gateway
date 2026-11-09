@@ -28,7 +28,7 @@ export function ErrorsTable({ rows }: { rows: ErrorRow[] }) {
               {rows.map((r) => (
                 <tr key={r.requestId}>
                   <td className="nowrap">{fmtStamp(r.at)}</td>
-                  <td>{r.tenant ?? 'Unauthenticated'}</td>
+                  <td>{r.tenant}</td>
                   <td>{r.model ?? '—'}</td>
                   <td className="num">{r.status}</td>
                   <td>{r.errorCode ?? '—'}</td>

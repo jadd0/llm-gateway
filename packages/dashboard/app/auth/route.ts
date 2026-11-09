@@ -5,8 +5,10 @@ import { loadEnv } from '../../lib/env.ts';
 // The login form posts here; the token travels in the body, never in a URL. A wrong token goes back to the form
 // with a flag, nothing else. `action=logout` clears the cookie.
 export async function POST(request: Request): Promise<NextResponse> {
-  const form = await request.formData();
   const env = loadEnv();
+  // Anything that is not a form body (no body, JSON, a broken multipart) is a refused login, not a server error.
+  const form = await request.formData().catch(() => null);
+  if (form === null) return NextResponse.redirect(new URL('/login?error=1', request.url), 303);
   if (form.get('action') === 'logout') {
     const res = NextResponse.redirect(new URL('/login', request.url), 303);
     res.cookies.set(COOKIE_NAME, '', { httpOnly: true, sameSite: 'strict', secure: process.env.NODE_ENV === 'production', path: '/', maxAge: 0 });

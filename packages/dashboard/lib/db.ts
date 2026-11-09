@@ -6,12 +6,17 @@ import { loadEnv } from './env.ts';
 const g = globalThis as unknown as { __dashboardPool?: pg.Pool };
 
 export function pool(): pg.Pool {
-  g.__dashboardPool ??= new pg.Pool({
-    connectionString: loadEnv().databaseUrl,
-    max: 4,
-    statement_timeout: 15_000,
-    options: '-c default_transaction_read_only=on',
-  });
-  g.__dashboardPool.on('error', () => {});
+  if (!g.__dashboardPool) {
+    const p = new pg.Pool({
+      connectionString: loadEnv().databaseUrl,
+      max: 4,
+      statement_timeout: 15_000,
+      options: '-c default_transaction_read_only=on',
+    });
+    // An idle connection dropping (Postgres restart) must not crash the server; the next query reconnects. Logged by
+    // class and code only: the message can carry the connection string.
+    p.on('error', (err: Error & { code?: string }) => console.error(JSON.stringify({ level: 'error', msg: 'dashboard pool error', errClass: err.name, code: err.code })));
+    g.__dashboardPool = p;
+  }
   return g.__dashboardPool;
 }

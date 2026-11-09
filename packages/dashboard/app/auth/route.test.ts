@@ -43,6 +43,17 @@ describe('login', () => {
     }
   });
 
+  it('a request without a form body is refused with a redirect, not a server error', async () => {
+    const bodies: Array<[string, BodyInit | null]> = [['application/json', '{"token":"x"}'], ['text/plain', 'token=x'], ['multipart/form-data; boundary=zz', 'garbage'], ['application/x-www-form-urlencoded', null]];
+    for (const [type, body] of bodies) {
+      const r = await POST(new Request('http://localhost:3200/auth', { method: 'POST', body, headers: { 'content-type': type } }));
+      expect(r.status).toBe(303);
+      expect(new URL(r.headers.get('location')!).pathname).toBe('/login');
+      expect(r.headers.get('set-cookie')).toBeNull();
+    }
+    expect((await POST(new Request('http://localhost:3200/auth', { method: 'POST' }))).status).toBe(303);
+  });
+
   it('logout clears the cookie', async () => {
     const r = await post({ action: 'logout' });
     expect(new URL(r.headers.get('location')!).pathname).toBe('/login');

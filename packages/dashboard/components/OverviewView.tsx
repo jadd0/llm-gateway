@@ -58,7 +58,7 @@ export function OverviewView({ data, errors }: { data: Overview; errors: ErrorRo
             <LatencyChart points={series} {...axes} />
           </ChartCard>
           <ChartCard id="spend" title="Spend by tenant" hint="Cost of the requests in the range, per tenant."
-            table={{ head: ['Tenant', 'Requests', 'Spend'], rows: data.byTenant.map((b) => [b.name ?? 'Unauthenticated', fmtInt(b.requests), fmtUsd(b.costMicros)]) }}>
+            table={{ head: ['Tenant', 'Requests', 'Spend'], rows: data.byTenant.map((b) => [b.name, fmtInt(b.requests), fmtUsd(b.costMicros)]) }}>
             <SpendChart bars={bars} />
           </ChartCard>
           <ChartCard id="cache" title="Cache hit rate over time" hint="Responses served from the exact or semantic cache, as a share of requests."

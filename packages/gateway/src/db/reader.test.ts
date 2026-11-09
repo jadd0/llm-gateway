@@ -34,6 +34,61 @@ afterAll(async () => {
   await owner.end();
 });
 
+describe('provisionReader refuses a role it must not take over', () => {
+  const made: string[] = [];
+  const urlFor = (n: string, pw: string) => {
+    const u = new URL(testConfig().databaseUrl);
+    u.username = n;
+    u.password = pw;
+    return u.toString();
+  };
+  const tryProvision = async (n: string, pw: string) => {
+    const c = await owner.connect();
+    try {
+      return await provisionReader(c, urlFor(n, pw)).then(() => 'ok', (e: Error) => e.message);
+    } finally {
+      c.release();
+    }
+  };
+  const canLogin = (n: string, pw: string) =>
+    new pg.Client({ connectionString: urlFor(n, pw) }).connect().then(() => true, () => false);
+  afterAll(async () => {
+    for (const n of made) {
+      await owner.query(`DROP OWNED BY "${n}"`);
+      await owner.query(`DROP ROLE IF EXISTS "${n}"`);
+    }
+  });
+
+  it('refuses a superuser, leaving its password as it was', async () => {
+    const n = `dashsu_${randomBytes(4).toString('hex')}`;
+    made.push(n);
+    await owner.query(`CREATE ROLE "${n}" SUPERUSER LOGIN PASSWORD 'first-pw-1234567890'`);
+    expect(await tryProvision(n, 'second-pw-1234567890')).toMatch(/superuser/);
+    expect(await canLogin(n, 'first-pw-1234567890')).toBe(true);
+    expect(await canLogin(n, 'second-pw-1234567890')).toBe(false);
+  });
+
+  it('refuses the user running the migration', async () => {
+    const me = ((await owner.query('SELECT current_user AS u')).rows[0] as { u: string }).u;
+    expect(await tryProvision(me, 'whatever-pw-1234567890')).toMatch(/running this migration|superuser/);
+    expect(await canLogin(me, new URL(testConfig().databaseUrl).password)).toBe(true);
+  });
+
+  it('refuses a role that owns an object, leaving its password as it was', async () => {
+    const n = `dashown_${randomBytes(4).toString('hex')}`;
+    made.push(n);
+    await owner.query(`CREATE ROLE "${n}" LOGIN PASSWORD 'first-pw-1234567890'`);
+    await owner.query(`CREATE SCHEMA "${n}" AUTHORIZATION "${n}"`);
+    expect(await tryProvision(n, 'second-pw-1234567890')).toMatch(/owns objects/);
+    expect(await canLogin(n, 'first-pw-1234567890')).toBe(true);
+    expect(await canLogin(n, 'second-pw-1234567890')).toBe(false);
+    await owner.query(`DROP SCHEMA "${n}"`);
+    // Once it owns nothing it is an ordinary role and is taken over, which proves the refusal above was the ownership and nothing else.
+    expect(await tryProvision(n, 'second-pw-1234567890')).toBe('ok');
+    expect(await canLogin(n, 'second-pw-1234567890')).toBe(true);
+  });
+});
+
 describe('dashboard_reader', () => {
   it('reads the rollups, tenant names and the metadata columns of the log', async () => {
     // Positive controls: a refusal below means something only if the same login can read what it should.

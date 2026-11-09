@@ -9,7 +9,7 @@ import { createDb } from '../../gateway/src/db/client.ts';
 import { provisionReader } from '../../gateway/src/db/reader.ts';
 import { toLogFields, toSpendFields, type LogEntry, type SpendEntry } from '../../gateway/src/requestlog/entry.ts';
 import { lockRollupState, testConfig } from '../../gateway/src/test-env.ts';
-import { RANGE_KEYS, lastErrors, overview, windowOf, type Queryable } from './queries.ts';
+import { RANGES, RANGE_KEYS, lastErrors, overview, windowOf, type Queryable } from './queries.ts';
 
 // Real Postgres, read through the dashboard's own login role, so a query that touches anything the role may not
 // read fails here. The clock is injected; the data is in 2032 so nothing else in the database overlaps it.
@@ -200,5 +200,94 @@ describe('lastErrors', () => {
     expect(rows.every((r) => r.status === 502 && r.errorCode === 'upstream_error')).toBe(true);
     expect(Object.keys(rows[0]!).sort()).toEqual(['at', 'errorCode', 'latencyMs', 'model', 'requestId', 'status', 'tenant']);
     expect(rows[0]!.tenant).toBe(tenants.find((t) => t.id === failed[0]!.tenantId)!.name);
+  });
+});
+
+describe('windows', () => {
+  it('start on a boundary of the step of their range, so the first point covers a whole step', async () => {
+    const now = new Date('2032-06-15T12:37:41Z');
+    for (const range of RANGE_KEYS) {
+      const { from, to } = windowOf(range, now);
+      const { ms, stepMs } = RANGES[range];
+      expect(from.getTime() % stepMs).toBe(0);
+      // Never later than the range asked for, and less than one step earlier.
+      expect(now.getTime() - from.getTime()).toBeGreaterThanOrEqual(ms);
+      expect(now.getTime() - from.getTime()).toBeLessThan(ms + stepMs);
+      expect(to).toEqual(now);
+    }
+    expect(windowOf('24h', now).from.toISOString()).toBe('2032-06-14T12:30:00.000Z');
+    expect(windowOf('30d', now).from.toISOString()).toBe('2032-05-16T12:00:00.000Z');
+    // And a series built on it has no point before it, and every point is a whole step.
+    const o = await overview(watched, '24h', NOW);
+    expect(o.series.length).toBeGreaterThan(20);
+    expect(o.series.every((p) => p.t >= o.from.getTime() && p.t % o.stepMs === 0)).toBe(true);
+  });
+});
+
+describe('queries', () => {
+  it('run the series and the tenant spend at the same time', async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const slow: Queryable = {
+      async query(text, params) {
+        inFlight++;
+        peak = Math.max(peak, inFlight);
+        await new Promise((r) => setTimeout(r, 40));
+        try {
+          return await (reader.query(text, params as unknown[]) as never);
+        } finally {
+          inFlight--;
+        }
+      },
+    };
+    await overview(slow, '24h', NOW);
+    expect(peak).toBe(2);
+  });
+});
+
+describe('tenant names', () => {
+  const GHOST_NOW = new Date('2030-06-15T12:30:00Z');
+  const ghostModel = `ghost-${run}`;
+  const ghostIds: string[] = [];
+  let deleted = '';
+
+  const entry = (tenantId: string | null, i: number, status: number): LogEntry => ({
+    requestId: randomUUID(), startedAt: GHOST_NOW.getTime() - (i + 1) * 7 * MIN, tenantId, keyId: null, model: ghostModel, servedModel: ghostModel, provider: 'mock',
+    status, errorCode: status >= 500 ? 'upstream_error' : null, stream: false, promptTokens: 1, completionTokens: 1, costMicros: 100, savedMicros: 0, cache: 'miss', attempts: 1,
+    fallbackUsed: false, latencyMs: 50, ttfbMs: null, upstreamMs: null,
+  });
+
+  beforeAll(async () => {
+    const t = await createTenant(owner.db, `ghost-${run}`);
+    deleted = t.id;
+    const es = [...[0, 1, 2, 3].map((i) => entry(t.id, i, i === 0 ? 502 : 200)), ...[4, 5, 6].map((i) => entry(null, i, i === 4 ? 503 : 200)), entry(tenants[0]!.id, 7, 502)];
+    ghostIds.push(...es.map((e) => e.requestId));
+    const r = await applyBatch(owner.db, es.map((e, i) => ({ id: `${i}-0`, fields: toLogFields(e), stream: 'x' })));
+    if (r.failed.length) throw new Error('ghost seed failed');
+    await owner.pool.query('DELETE FROM tenants WHERE id = $1', [t.id]);
+  });
+  afterAll(async () => {
+    await owner.pool.query('DELETE FROM rollup_hour WHERE model = $1', [ghostModel]);
+    await owner.pool.query('DELETE FROM rollup_minute WHERE model = $1', [ghostModel]);
+    await owner.pool.query("DELETE FROM rollup_total_hour WHERE bucket >= '2030-01-01' AND bucket < '2031-01-01'");
+    await owner.pool.query("DELETE FROM rollup_total_minute WHERE bucket >= '2030-01-01' AND bucket < '2031-01-01'");
+    await owner.pool.query('DELETE FROM request_log WHERE request_id = ANY($1)', [ghostIds]);
+  });
+
+  it('calls only a request with no tenant unauthenticated; a tenant whose row is gone is a deleted tenant', async () => {
+    // 30 days: these rows are far behind the fold mark, so they live in the hour tables only.
+    const o = await overview(watched, '30d', GHOST_NOW);
+    const names = o.byTenant.map((t) => t.name);
+    expect(o.byTenant.find((t) => t.tenantId === deleted)!.name).toBe(`Deleted tenant ${deleted.slice(0, 8)}`);
+    expect(names.filter((n) => n === 'Unauthenticated')).toHaveLength(1);
+    expect(o.byTenant.find((t) => t.tenantId === tenants[0]!.id)!.name).toBe(tenants[0]!.name);
+    expect(o.byTenant.find((t) => t.name === 'Unauthenticated')!.requests).toBe(3);
+
+    const rows = await lastErrors(watched, 1_000_000);
+    const label = (id: string) => rows.find((r) => r.requestId === id)!.tenant;
+    const byId = new Map(ghostIds.map((id, i) => [i, id]));
+    expect(label(byId.get(0)!)).toBe(`Deleted tenant ${deleted.slice(0, 8)}`);
+    expect(label(byId.get(4)!)).toBe('Unauthenticated');
+    expect(label(byId.get(7)!)).toBe(tenants[0]!.name);
   });
 });

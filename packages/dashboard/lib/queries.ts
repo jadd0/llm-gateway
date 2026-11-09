@@ -1,4 +1,5 @@
 import { merge, percentile } from './histogram.ts';
+import { tenantLabel } from './tenants.ts';
 
 // Everything the overview page shows. Reads rollup tables only, plus the newest failures from the request log
 // (through the partial index on its error rows). Each function takes a `now`, so a test fixes the clock.
@@ -50,8 +51,8 @@ export interface Totals {
 
 export interface TenantSpend {
   tenantId: string;
-  /** Tenant name, or null for requests that never authenticated. */
-  name: string | null;
+  /** What to show: the tenant's name, "Unauthenticated", or "Deleted tenant <id>" (see tenantLabel). */
+  name: string;
   requests: number;
   costMicros: number;
 }
@@ -59,21 +60,21 @@ export interface TenantSpend {
 export interface ErrorRow {
   requestId: string;
   at: Date;
-  tenant: string | null;
+  tenant: string;
   model: string | null;
   status: number;
   errorCode: string | null;
   latencyMs: number;
 }
 
-const NO_TENANT = '00000000-0000-0000-0000-000000000000';
-
-/** The window a range covers, ending at `now`. Longer ranges start on an hour so a bucket is never half-counted. */
+/**
+ * The window a range covers, ending at `now`. It starts on a boundary of the range's own step (a minute, 15 minutes,
+ * an hour, 6 hours, counted from midnight UTC), so the first point of a series covers a whole step instead of a partial one,
+ * and no rollup bucket is half-counted.
+ */
 export function windowOf(range: RangeKey, now: Date): { from: Date; to: Date } {
-  const r = RANGES[range];
-  const raw = now.getTime() - r.ms;
-  const unit = r.minute ? MIN : HOUR;
-  return { from: new Date(Math.floor(raw / unit) * unit), to: now };
+  const { ms, stepMs } = RANGES[range];
+  return { from: new Date(Math.floor((now.getTime() - ms) / stepMs) * stepMs), to: now };
 }
 
 // The rows a range is summed from. Up to 24 hours: the minute table. Longer: the hour table, plus the minutes
@@ -124,7 +125,7 @@ export async function overview(db: Queryable, range: RangeKey, now: Date): Promi
   const stepMs = RANGES[range].stepMs;
   const params = [from.toISOString(), to.toISOString()];
 
-  const steps = await db.query<SeriesRow>(
+  const stepsQ = db.query<SeriesRow>(
     `WITH src AS (${source(range, 'total')})
      SELECT to_timestamp(floor(extract(epoch FROM bucket) * 1000 / ${stepMs}) * ${stepMs} / 1000.0) AS t,
             sum(requests) AS requests, sum(errors) AS errors, sum(cache_hits + semantic_hits) AS hits,
@@ -133,6 +134,17 @@ export async function overview(db: Queryable, range: RangeKey, now: Date): Promi
      FROM src GROUP BY 1 ORDER BY 1`,
     params,
   );
+
+  const tenantsQ = db.query<{ tenant_id: string; name: string | null; requests: string; cost: string }>(
+    `WITH src AS (${source(range, 'tenant')})
+     SELECT s.tenant_id, t.name, s.requests, s.cost
+     FROM (SELECT tenant_id, sum(requests) AS requests, sum(cost_micros) AS cost FROM src GROUP BY tenant_id) s
+     LEFT JOIN tenants t ON t.id = s.tenant_id
+     ORDER BY s.cost DESC, s.requests DESC, s.tenant_id`,
+    params,
+  );
+  // The two reads are independent: run them together.
+  const [steps, tenants] = await Promise.all([stepsQ, tenantsQ]);
 
   // Percentiles come from merged histograms, per step and for the whole range, never from averaging step percentiles.
   const series: Point[] = steps.rows.map((r) => {
@@ -160,28 +172,20 @@ export async function overview(db: Queryable, range: RangeKey, now: Date): Promi
   totals.p50 = percentile(hist, 0.5);
   totals.p95 = percentile(hist, 0.95);
 
-  const tenants = await db.query<{ tenant_id: string; name: string | null; requests: string; cost: string }>(
-    `WITH src AS (${source(range, 'tenant')})
-     SELECT s.tenant_id, t.name, s.requests, s.cost
-     FROM (SELECT tenant_id, sum(requests) AS requests, sum(cost_micros) AS cost FROM src GROUP BY tenant_id) s
-     LEFT JOIN tenants t ON t.id = s.tenant_id
-     ORDER BY s.cost DESC, s.requests DESC, s.tenant_id`,
-    params,
-  );
-  const byTenant = tenants.rows.map((r) => ({ tenantId: r.tenant_id, name: r.tenant_id === NO_TENANT ? null : r.name, requests: num(r.requests), costMicros: num(r.cost) }));
+  const byTenant = tenants.rows.map((r) => ({ tenantId: r.tenant_id, name: tenantLabel(r.tenant_id, r.name), requests: num(r.requests), costMicros: num(r.cost) }));
 
   return { range, from, to, stepMs, series, totals, byTenant };
 }
 
 /** The newest failures, metadata only: no key, no content, no cost. Reads the request log through its partial index on error rows. */
 export async function lastErrors(db: Queryable, limit = 50): Promise<ErrorRow[]> {
-  const r = await db.query<{ request_id: string; created_at: Date; name: string | null; model: string | null; status: number; error_code: string | null; latency_ms: number }>(
-    `SELECT l.request_id, l.created_at, t.name, l.model, l.status, l.error_code, l.latency_ms
+  const r = await db.query<{ request_id: string; created_at: Date; tenant_id: string | null; name: string | null; model: string | null; status: number; error_code: string | null; latency_ms: number }>(
+    `SELECT l.request_id, l.created_at, l.tenant_id, t.name, l.model, l.status, l.error_code, l.latency_ms
      FROM request_log l LEFT JOIN tenants t ON t.id = l.tenant_id
      WHERE l.status >= 500 OR l.error_code = 'upstream_stream_broken'
      ORDER BY l.created_at DESC NULLS LAST
      LIMIT $1`,
     [limit],
   );
-  return r.rows.map((x) => ({ requestId: x.request_id, at: new Date(x.created_at), tenant: x.name, model: x.model, status: x.status, errorCode: x.error_code, latencyMs: x.latency_ms }));
+  return r.rows.map((x) => ({ requestId: x.request_id, at: new Date(x.created_at), tenant: tenantLabel(x.tenant_id, x.name), model: x.model, status: x.status, errorCode: x.error_code, latencyMs: x.latency_ms }));
 }
