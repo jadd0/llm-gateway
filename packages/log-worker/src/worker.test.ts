@@ -20,7 +20,9 @@ import { createWorker, type Worker, type WorkerOptions } from './worker.ts';
 // entries; the stream key is the run's own prefix.
 const base = testConfig();
 const prefix = base.redisKeyPrefix;
-// Each test has a stream of its own under the run's prefix, so no test reads another's entries.
+// Each test has keys of its own, under a root that is not the run's prefix: other test files delete everything
+// under that prefix when they finish, and must not take a running test's balances and streams with it.
+const root = `wk${randomUUID().slice(0, 8)}:`;
 let kp = prefix;
 let testN = 0;
 const P = periodOf(Date.now());
@@ -32,13 +34,15 @@ const quiet = { info() {}, warn() {}, error() {} };
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 beforeEach(() => {
-  kp = `${prefix}t${++testN}:`;
+  kp = `${root}t${++testN}:`;
 });
 beforeAll(() => {
   handle = createDb({ databaseUrl: base.databaseUrl, poolSize: 8 });
   redis = new Redis(base.redisUrl!);
 });
 afterAll(async () => {
+  const keys = await redis.keys(`${root}*`);
+  if (keys.length) await redis.del(...keys);
   if (requestIds.length) await handle.db.delete(requestLog).where(inArray(requestLog.requestId, requestIds));
   await cleanup(handle.db, redis, tenantIds, prefix);
   redis.disconnect();
@@ -78,21 +82,6 @@ const queue = async (fields: string[][]) => {
 };
 const logRows = async (ids: string[]) => (await handle.db.select({ id: requestLog.requestId }).from(requestLog).where(inArray(requestLog.requestId, ids))).length;
 const pending = async (group: string) => Number(((await redis.xpending(streamKey(kp), group)) as unknown as [number])[0]);
-
-// The budget epoch is one row shared by every test file, and budget.test.ts moves it. A test that builds a balance
-// on one epoch and expects the worker to catch it up on the same one is run again if the epoch moved meanwhile.
-const onStableEpoch = async (body: () => Promise<void>): Promise<void> => {
-  const pgl = createPgLedger(handle.db);
-  for (let attempt = 0; ; attempt++) {
-    const before = await pgl.readEpoch();
-    try {
-      await body();
-      return;
-    } catch (err) {
-      if (attempt >= 3 || (await pgl.readEpoch()) === before) throw err;
-    }
-  }
-};
 
 describe('log worker', { timeout: 60_000 }, () => {
   it('batches up to LOG_BATCH_SIZE in one transaction', async () => {
@@ -276,6 +265,8 @@ describe('log worker', { timeout: 60_000 }, () => {
     expect(await pgl.snapshot(t, P)).toMatchObject({ spent: 30, holds: [] });
   });
 
+  // The epoch row is shared by every test file and other files move it constantly, so these tests pin the epoch the
+  // worker applies on to the one their balances were built on.
   describe('a stalled worker and the sweeper', () => {
     const REAL = 9;
     const EST = 401;
@@ -285,80 +276,74 @@ describe('log worker', { timeout: 60_000 }, () => {
       Number((await handle.db.execute(sql`select count(*) as n from spend_ledger where tenant_id = ${t} and estimated`)).rows[0]!.n);
     const realRows = async (t: string) =>
       Number((await handle.db.execute(sql`select count(*) as n from spend_ledger where tenant_id = ${t} and not estimated and cost_micros = ${REAL}`)).rows[0]!.n);
-    const redisSpent = async (t: string) => Number((await redis.hget(balanceKey(kp, t, P, await createPgLedger(handle.db).readEpoch()), 'spent')) ?? NaN);
-    const settleMany = async (t: string) => {
+    const redisSpent = async (t: string, epoch: number) => Number((await redis.hget(balanceKey(kp, t, P, epoch), 'spent')) ?? NaN);
+    // N requests reserved and settled through the real budget: the live balance has the real cost, the settles are queued.
+    const settleMany = async (t: string): Promise<number> => {
       const b = await createBudget({ db: handle.db, redis, keyPrefix: kp, reservationTtlS: 1, redisTimeoutMs: 2000, epochRefreshMs: 3_600_000, outageFailures: 3 });
+      const epoch = b.epoch();
       for (let i = 0; i < N; i++) {
         const o = await b.reserve({ tenantId: t, model: 'm', estimate: EST, cap: 1_000_000_000, promptTokens: 1, completionTokens: 1 });
         if (o.status !== 'allowed') throw new Error('not admitted');
         await b.settle(o.reservation, { kind: 'charge', costMicros: REAL, promptTokens: 1, completionTokens: 1, estimated: false });
       }
       await b.close();
+      return epoch;
     };
 
     it('the sweep waits while the spend stream has entries: no hold with a queued settle is charged, and everything ends equal', async () => {
-      await onStableEpoch(async () => {
-        const t = await newTenant();
-        await settleMany(t); // N real settles queued in the spend stream; their hold rows still in Postgres
-        await lapse(); // every hold row is past its expiry, the worker has read nothing
-        const w = workerFor({ batchSize: 5, sweepS: 0, sweepGraceS: 0 });
-        const swept: number[] = [];
-        const ests: number[] = [];
-        for (let i = 0; i < 6; i++) {
-          swept.push((await w.runOnce()).swept);
-          ests.push(await estRows(t));
-        }
-        // While entries are still waiting (the first two passes) nothing is swept; later passes may sweep other tests' holds.
-        expect(swept.slice(0, 2)).toEqual([0, 0]);
-        expect(ests).toEqual([0, 0, 0, 0, 0, 0]);
-        const snap = await createPgLedger(handle.db).snapshot(t, P);
-        expect(snap).toMatchObject({ spent: N * REAL, charges: N, holds: [], estimated: [] });
-        expect(await realRows(t)).toBe(N);
-        expect(await redisSpent(t)).toBe(N * REAL);
-      });
+      const t = await newTenant();
+      const epoch = await settleMany(t); // N real settles queued in the spend stream; their hold rows still in Postgres
+      await lapse(); // every hold row is past its expiry, the worker has read nothing
+      // Two passes with a backlog left over after each: a sweep with no grace would charge every lapsed hold here.
+      // (Further passes are not run with a sweep: it is global, and other test files have lapsed holds.)
+      const w = workerFor({ batchSize: 5, sweepS: 0, sweepGraceS: 0, epoch: async () => epoch });
+      const swept = [(await w.runOnce()).swept, (await w.runOnce()).swept];
+      expect(swept).toEqual([0, 0]);
+      expect(await estRows(t)).toBe(0);
+      const rest = workerFor({ sweepS: 3600, epoch: async () => epoch });
+      while ((await rest.runOnce()).read > 0);
+      expect(await createPgLedger(handle.db).snapshot(t, P)).toMatchObject({ spent: N * REAL, charges: N, holds: [], estimated: [] });
+      expect(await realRows(t)).toBe(N);
+      expect(await redisSpent(t, epoch)).toBe(N * REAL);
     });
 
     it('a settle applied after the sweeper charged the estimate replaces it, in Postgres and in a balance that took the real settle itself', async () => {
-      await onStableEpoch(async () => {
-        const t = await newTenant();
-        await settleMany(t);
-        await lapse();
-        // The sweeper gets in first (the check passed, then the settles were queued behind a stall).
-        const charged = (await chargeExpiredHolds(handle.db, 10_000, 0)).filter((c) => c.tenantId === t);
-        expect(charged).toHaveLength(N);
-        const pgl = createPgLedger(handle.db);
-        await applySettled(redis, kp, await pgl.readEpoch(), charged, 2000);
-        expect((await pgl.snapshot(t, P)).spent).toBe(N * EST);
-        expect(await redisSpent(t)).toBe(N * REAL); // Redis had the real cost all along and ignored the estimate
-        const w = workerFor({ sweepS: 3600 });
-        while ((await w.runOnce()).read > 0);
-        expect(await pgl.snapshot(t, P)).toMatchObject({ spent: N * REAL, charges: N, holds: [], estimated: [] });
-        expect(await estRows(t)).toBe(0);
-        expect(await realRows(t)).toBe(N);
-        expect(await redisSpent(t)).toBe(N * REAL);
-      });
+      const t = await newTenant();
+      const epoch = await settleMany(t);
+      await lapse();
+      // The sweeper gets in first (the check passed, then the settles were queued behind a stall).
+      const charged = (await chargeExpiredHolds(handle.db, 10_000, 0, t)).filter((c) => c.tenantId === t);
+      expect(charged).toHaveLength(N);
+      const pgl = createPgLedger(handle.db);
+      await applySettled(redis, kp, epoch, charged, 2000);
+      expect((await pgl.snapshot(t, P)).spent).toBe(N * EST);
+      expect(await redisSpent(t, epoch)).toBe(N * REAL); // Redis had the real cost all along and ignored the estimate
+      const w = workerFor({ sweepS: 3600, epoch: async () => epoch });
+      while ((await w.runOnce()).read > 0);
+      expect(await pgl.snapshot(t, P)).toMatchObject({ spent: N * REAL, charges: N, holds: [], estimated: [] });
+      expect(await estRows(t)).toBe(0);
+      expect(await realRows(t)).toBe(N);
+      expect(await redisSpent(t, epoch)).toBe(N * REAL);
     });
 
     it('a settle applied after the sweeper charged the estimate also corrects a balance that was rebuilt from the estimate', async () => {
-      await onStableEpoch(async () => {
-        const t = await newTenant();
-        const pgl = createPgLedger(handle.db);
-        const ids = Array.from({ length: N }, () => randomUUID());
-        for (const id of ids) await pgl.hold({ id, tenantId: t, period: P, estimate: EST, ttlMs: -60_000 });
-        const charged = (await chargeExpiredHolds(handle.db, 10_000, 0)).filter((c) => c.tenantId === t);
-        expect(charged).toHaveLength(N);
-        // The balance does not exist yet: it is built now, from a snapshot that has the estimates as spend.
-        const l = createRedisLedger({ redis, keyPrefix: kp, timeoutMs: 2000, loadSnapshot: (tn, pe) => pgl.snapshot(tn, pe) });
-        const epoch = await pgl.readEpoch();
-        await l.reserve({ tenantId: t, period: P, epoch, id: randomUUID(), estimate: 1, cap: 1_000_000_000, ttlMs: 60_000 });
-        expect(await redisSpent(t)).toBe(N * EST);
-        await queue(ids.map((id) => toSpendFields(spendEntry(t, { id, costMicros: REAL }))));
-        const w = workerFor({ sweepS: 3600 });
-        while ((await w.runOnce()).read > 0);
-        expect((await pgl.snapshot(t, P)).spent).toBe(N * REAL);
-        expect(await redisSpent(t)).toBe(N * REAL);
-        expect(await estRows(t)).toBe(0);
-      });
+      const t = await newTenant();
+      const pgl = createPgLedger(handle.db);
+      const epoch = await pgl.readEpoch();
+      const ids = Array.from({ length: N }, () => randomUUID());
+      for (const id of ids) await pgl.hold({ id, tenantId: t, period: P, estimate: EST, ttlMs: -60_000 });
+      const charged = (await chargeExpiredHolds(handle.db, 10_000, 0, t)).filter((c) => c.tenantId === t);
+      expect(charged).toHaveLength(N);
+      // The balance does not exist yet: it is built now, from a snapshot that has the estimates as spend.
+      const l = createRedisLedger({ redis, keyPrefix: kp, timeoutMs: 2000, loadSnapshot: (tn, pe) => pgl.snapshot(tn, pe) });
+      await l.reserve({ tenantId: t, period: P, epoch, id: randomUUID(), estimate: 1, cap: 1_000_000_000, ttlMs: 60_000 });
+      expect(await redisSpent(t, epoch)).toBe(N * EST);
+      await queue(ids.map((id) => toSpendFields(spendEntry(t, { id, costMicros: REAL }))));
+      const w = workerFor({ sweepS: 3600, epoch: async () => epoch });
+      while ((await w.runOnce()).read > 0);
+      expect((await pgl.snapshot(t, P)).spent).toBe(N * REAL);
+      expect(await redisSpent(t, epoch)).toBe(N * REAL);
+      expect(await estRows(t)).toBe(0);
     });
   });
 
@@ -389,7 +374,7 @@ describe('log worker', { timeout: 60_000 }, () => {
       await pgl.settle(charged, { requestId: charged, tenantId: t, period: P, model: 'm', promptTokens: 1, completionTokens: 1, costMicros: 150, estimated: false });
       expect(await bal(t, epoch)).toEqual({ spent: 0, reserved: 1500 });
       await sleep(20);
-      const w = workerFor({ sweepS: 0, sweepGraceS: 3600, orphanGraceS: 0 });
+      const w = workerFor({ sweepS: 0, sweepGraceS: 3600, orphanGraceS: 0, epoch: async () => epoch });
       expect((await w.runOnce()).reconciled).toBe(2);
       // phantom released (100), charged released and charged at what Postgres charged (200 -> 150); held and young stay.
       expect(await bal(t, epoch)).toEqual({ spent: 150, reserved: 1200 });
@@ -397,44 +382,40 @@ describe('log worker', { timeout: 60_000 }, () => {
     });
 
     it('finds balances through the index, with no keyspace scan, and checks Postgres in two queries however many balances there are', async () => {
-      await onStableEpoch(async () => {
-        const pgl = createPgLedger(handle.db);
-        const epoch = await pgl.readEpoch();
-        const l = ledgerFor(pgl);
-        const tenants = [await newTenant(), await newTenant(), await newTenant()];
-        for (const t of tenants) await l.reserve({ tenantId: t, period: P, epoch, id: randomUUID(), estimate: 100, cap: 1_000_000, ttlMs: 1 });
-        await sleep(20);
-        const scan = vi.spyOn(redis, 'scan');
-        const selects = vi.spyOn(handle.db, 'select');
-        try {
-          const w = workerFor({ sweepS: 0, sweepGraceS: 3600, orphanGraceS: 0 });
-          expect((await w.runOnce()).reconciled).toBe(3);
-          expect(scan).not.toHaveBeenCalled();
-          expect(selects.mock.calls.length).toBe(2 + 1); // holds, ledger, and the epoch read
-        } finally {
-          scan.mockRestore();
-          selects.mockRestore();
-        }
-      });
+      const pgl = createPgLedger(handle.db);
+      const epoch = await pgl.readEpoch();
+      const l = ledgerFor(pgl);
+      const tenants = [await newTenant(), await newTenant(), await newTenant()];
+      for (const t of tenants) await l.reserve({ tenantId: t, period: P, epoch, id: randomUUID(), estimate: 100, cap: 1_000_000, ttlMs: 1 });
+      await sleep(20);
+      const scan = vi.spyOn(redis, 'scan');
+      const selects = vi.spyOn(handle.db, 'select');
+      try {
+        const w = workerFor({ sweepS: 0, sweepGraceS: 3600, orphanGraceS: 0, epoch: async () => epoch });
+        expect((await w.runOnce()).reconciled).toBe(3);
+        expect(scan).not.toHaveBeenCalled();
+        expect(selects.mock.calls.length).toBe(2); // the holds, then the ledger rows
+      } finally {
+        scan.mockRestore();
+        selects.mockRestore();
+      }
     });
 
     it('a failed charge of expired holds does not skip the reconcile', async () => {
-      await onStableEpoch(async () => {
-        const t = await newTenant();
-        const pgl = createPgLedger(handle.db);
-        const epoch = await pgl.readEpoch();
-        await ledgerFor(pgl).reserve({ tenantId: t, period: P, epoch, id: randomUUID(), estimate: 100, cap: 1_000_000, ttlMs: 1 });
-        await sleep(20);
-        const warns: string[] = [];
-        const w = workerFor({ sweepS: 0, sweepGraceS: 3600, orphanGraceS: 0, log: { ...quiet, warn: (_o, m) => void warns.push(m) } });
-        const tx = vi.spyOn(handle.db, 'transaction').mockRejectedValueOnce(Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }));
-        try {
-          expect((await w.runOnce()).reconciled).toBeGreaterThanOrEqual(1);
-        } finally {
-          tx.mockRestore();
-        }
-        expect(warns).toContain('expired holds could not be charged, retried next interval');
-      });
+      const t = await newTenant();
+      const pgl = createPgLedger(handle.db);
+      const epoch = await pgl.readEpoch();
+      await ledgerFor(pgl).reserve({ tenantId: t, period: P, epoch, id: randomUUID(), estimate: 100, cap: 1_000_000, ttlMs: 1 });
+      await sleep(20);
+      const warns: string[] = [];
+      const w = workerFor({ sweepS: 0, sweepGraceS: 3600, orphanGraceS: 0, epoch: async () => epoch, log: { ...quiet, warn: (_o, m) => void warns.push(m) } });
+      const tx = vi.spyOn(handle.db, 'transaction').mockRejectedValueOnce(Object.assign(new Error('connection reset'), { code: 'ECONNRESET' }));
+      try {
+        expect((await w.runOnce()).reconciled).toBeGreaterThanOrEqual(1);
+      } finally {
+        tx.mockRestore();
+      }
+      expect(warns).toContain('expired holds could not be charged, retried next interval');
     });
   });
 

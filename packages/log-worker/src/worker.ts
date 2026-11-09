@@ -37,6 +37,8 @@ export interface WorkerOptions {
   log: Logger;
   /** How long a Redis catch-up call may take before it is skipped. */
   redisTimeoutMs?: number;
+  /** Replaces the read of the budget epoch from Postgres. Tests only: the epoch row is shared by every test file. */
+  epoch?: () => Promise<number>;
   /** Called once a batch has been read and before it is written. Tests only. */
   afterRead?: (count: number) => Promise<void>;
 }
@@ -75,6 +77,7 @@ export function createWorker(o: WorkerOptions): Worker {
   // it, and a settle caught up on the epoch before the move would miss the balance that now holds its request.
   // It is one primary-key select, once per batch that wrote spend and once per sweep.
   const pgLedger = createPgLedger(o.db);
+  const readEpoch = o.epoch ?? (() => pgLedger.readEpoch());
 
   async function runOnce(): Promise<PassResult> {
     if (!ensured) {
@@ -117,8 +120,7 @@ export function createWorker(o: WorkerOptions): Worker {
       for (const m of r.malformed) o.log.warn({ entryId: m.id, errClass: m.errClass }, 'log entry could not be read, left pending');
       for (const f of r.failed) o.log.warn({ entryId: f.id, errClass: f.errClass, code: f.code }, 'log entry could not be written, left pending');
       if (r.settled.length > 0) {
-        await pgLedger
-          .readEpoch()
+        await readEpoch()
           .then((e) => applySettled(o.redis, o.keyPrefix, e, r.settled, redisTimeoutMs))
           .catch((err: unknown) => o.log.warn(errInfo(err), 'live balances could not be caught up'));
       }
@@ -160,12 +162,12 @@ export function createWorker(o: WorkerOptions): Worker {
       }
       try {
         // Holds charged but not caught up here are released by the reconcile below, from the ledger.
-        if (charged.length > 0) await applySettled(o.redis, o.keyPrefix, await pgLedger.readEpoch(), charged, redisTimeoutMs);
+        if (charged.length > 0) await applySettled(o.redis, o.keyPrefix, await readEpoch(), charged, redisTimeoutMs);
       } catch (err) {
         o.log.warn(errInfo(err), 'swept holds could not be applied to the live balances');
       }
       try {
-        const rec = await reconcileHolds({ db: o.db, redis: o.redis, keyPrefix: o.keyPrefix, epoch: await pgLedger.readEpoch(), graceMs: (o.orphanGraceS ?? 600) * 1000, timeoutMs: redisTimeoutMs });
+        const rec = await reconcileHolds({ db: o.db, redis: o.redis, keyPrefix: o.keyPrefix, epoch: await readEpoch(), graceMs: (o.orphanGraceS ?? 600) * 1000, timeoutMs: redisTimeoutMs });
         result.reconciled = rec.dropped + rec.charged;
         if (result.reconciled > 0) o.log.warn(rec, 'redis holds with no postgres hold row released');
       } catch (err) {

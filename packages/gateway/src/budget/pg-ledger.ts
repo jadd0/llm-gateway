@@ -420,17 +420,18 @@ export async function applySpendBatch(tx: Tx, entries: QueuedSpend[]): Promise<{
  * Charges the estimate of holds that lapsed with no settle (the gateway died, or its entry was lost), up to
  * `limit`, in one transaction. Only holds that lapsed more than `graceMs` ago: a settle queued before the hold
  * lapsed has had that long to be applied, and a hold swept before then would be charged its estimate in place
- * of the real cost. They are recorded as estimated charges with the model unknown: the hold knows
+ * of the real cost. `tenantId` limits the sweep to one tenant (tests, which share a database). They are recorded as estimated charges with the model unknown: the hold knows
  * its amount and nothing else. A hold is never dropped uncharged. Returns what was charged.
  */
-export async function chargeExpiredHolds(db: Db['db'], limit: number, graceMs = 0): Promise<AppliedSettle[]> {
+export async function chargeExpiredHolds(db: Db['db'], limit: number, graceMs = 0, tenantId?: string): Promise<AppliedSettle[]> {
+  const mine = (col: typeof budgetReservations.tenantId) => (tenantId === undefined ? undefined : eq(col, tenantId));
   return db.transaction(async (tx) => {
     // A refused request's hold is never charged: it is deleted.
-    await tx.delete(budgetReservations).where(eq(budgetReservations.refused, true));
+    await tx.delete(budgetReservations).where(and(eq(budgetReservations.refused, true), mine(budgetReservations.tenantId)));
     const lapsed = await tx
       .select({ id: budgetReservations.id, tenantId: budgetReservations.tenantId, period: budgetReservations.period, amount: budgetReservations.amountMicros })
       .from(budgetReservations)
-      .where(and(eq(budgetReservations.refused, false), sql`${budgetReservations.expiresAt} < now() - ${graceMs} * interval '1 millisecond'`))
+      .where(and(eq(budgetReservations.refused, false), mine(budgetReservations.tenantId), sql`${budgetReservations.expiresAt} < now() - ${graceMs} * interval '1 millisecond'`))
       .orderBy(budgetReservations.expiresAt)
       .limit(limit)
       .for('update', { skipLocked: true });

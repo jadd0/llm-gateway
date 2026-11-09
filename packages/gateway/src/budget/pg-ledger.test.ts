@@ -206,7 +206,7 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
     const t = await newTenant();
     const h = reserveArgs(t, 401, 100_000, { ttlMs: -60_000 });
     await ledger.hold(h);
-    while ((await heldRows(t)) > 0) await chargeExpiredHolds(handle.db, 100);
+    while ((await heldRows(t)) > 0) await chargeExpiredHolds(handle.db, 100, 0, t);
     expect(await ledger.snapshot(t, P)).toMatchObject({ spent: 401, charges: 1, estimated: [{ id: h.id, cost: 401 }] });
     const r = await apply([queued(t, 9, { id: h.id, model: 'real-model', promptTokens: 3, completionTokens: 4 })]);
     expect(r.inserted).toBe(0);
@@ -223,7 +223,7 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
     const t = await newTenant();
     const h = reserveArgs(t, 250, 100_000, { ttlMs: -60_000 });
     await ledger.hold(h);
-    while ((await heldRows(t)) > 0) await chargeExpiredHolds(handle.db, 100);
+    while ((await heldRows(t)) > 0) await chargeExpiredHolds(handle.db, 100, 0, t);
     expect(await ledger.spent(t, P)).toBe(250);
     await apply([queued(t, 0, { kind: 'refund', id: h.id })]);
     expect(await ledger.snapshot(t, P)).toMatchObject({ spent: 0, charges: 0, estimated: [] });
@@ -234,7 +234,7 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
     const t = await newTenant();
     const h = reserveArgs(t, 300, 100_000, { ttlMs: -60_000 });
     await ledger.hold(h);
-    while ((await heldRows(t)) > 0) await chargeExpiredHolds(handle.db, 100);
+    while ((await heldRows(t)) > 0) await chargeExpiredHolds(handle.db, 100, 0, t);
     await ledger.settle(h.id, entry(t, 20, { requestId: h.id }));
     expect(await ledger.snapshot(t, P)).toMatchObject({ spent: 20, charges: 1, estimated: [] });
   });
@@ -247,7 +247,7 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
     await ledger.markRefused(h.id);
     expect((await ledger.snapshot(t, P)).holds).toEqual([]);
     expect((await ledger.reserve(reserveArgs(t, 200, 1000))).allowed).toBe(true);
-    expect((await chargeExpiredHolds(handle.db, 100, 0)).filter((c) => c.tenantId === t)).toEqual([]);
+    expect((await chargeExpiredHolds(handle.db, 100, 0, t)).filter((c) => c.tenantId === t)).toEqual([]);
     expect(await ledger.spent(t, P)).toBe(0);
     expect(await heldRows(t)).toBe(1); // the refused row is gone; the admitted one stays
   });
@@ -260,25 +260,25 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
     for (const h of lapsed) await ledger.hold(h);
     // Other test files' lapsed rows are in the table too, so the loop runs until this tenant's are gone.
     const charged = [];
-    while ((await heldRows(t)) > 1) charged.push(...(await chargeExpiredHolds(handle.db, 2)));
+    while ((await heldRows(t)) > 1) charged.push(...(await chargeExpiredHolds(handle.db, 2, 0, t)));
     expect(charged.filter((c) => c.tenantId === t)).toHaveLength(3);
     expect(await ledger.spent(t, P)).toBe(30);
     expect(await ledgerRows(t)).toBe(3);
     const rows = await handle.db.execute(sql`select estimated, model from spend_ledger where tenant_id = ${t}`);
     expect(rows.rows.every((r) => r.estimated === true && r.model === 'unknown')).toBe(true);
     expect(await heldRows(t)).toBe(1); // the live one survived
-    expect((await chargeExpiredHolds(handle.db, 2)).filter((c) => c.tenantId === t)).toEqual([]);
+    expect((await chargeExpiredHolds(handle.db, 2, 0, t)).filter((c) => c.tenantId === t)).toEqual([]);
     expect(await ledger.spent(t, P)).toBe(30);
-    expect(await chargeExpiredHolds(handle.db, 0)).toEqual([]);
+    expect(await chargeExpiredHolds(handle.db, 0, 0, t)).toEqual([]);
   });
 
   it('a hold lapsed less than the grace ago is not swept: its settle may still be queued', async () => {
     const t = await newTenant();
     const h = reserveArgs(t, 50, 1000, { ttlMs: -5_000 });
     await ledger.hold(h);
-    expect((await chargeExpiredHolds(handle.db, 1000, 60_000)).filter((c) => c.tenantId === t)).toEqual([]);
+    expect((await chargeExpiredHolds(handle.db, 1000, 60_000, t)).filter((c) => c.tenantId === t)).toEqual([]);
     expect(await heldRows(t)).toBe(1);
-    expect((await chargeExpiredHolds(handle.db, 1000, 1_000)).filter((c) => c.tenantId === t)).toHaveLength(1);
+    expect((await chargeExpiredHolds(handle.db, 1000, 1_000, t)).filter((c) => c.tenantId === t)).toHaveLength(1);
     expect(await heldRows(t)).toBe(0);
   });
 
@@ -290,7 +290,7 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
     expect((await ledger.reserve(reserveArgs(t, 1000, 1000))).allowed).toBe(false);
     expect((await ledger.reserve(reserveArgs(t, 100, 1000))).allowed).toBe(true);
     expect(await heldRows(t)).toBe(2);
-    await chargeExpiredHolds(handle.db, 100);
+    await chargeExpiredHolds(handle.db, 100, 0, t);
     expect(await heldRows(t)).toBe(1);
     expect(await ledger.spent(t, P)).toBe(900);
     expect((await ledger.reserve(reserveArgs(t, 100, 1000))).allowed).toBe(false); // 900 spent + 100 held

@@ -368,7 +368,7 @@ describe('budget', { timeout: 120_000 }, () => {
       expect(await refusedRows(t)).toBe(1);
       expect((await pgl.snapshot(t, P)).holds.map((h) => h.id)).toEqual([live.id]); // the refused row is not a hold
       await lapse();
-      const swept = (await chargeExpiredHolds(handle.db, 1000)).filter((c) => c.tenantId === t);
+      const swept = (await chargeExpiredHolds(handle.db, 1000, 0, t)).filter((c) => c.tenantId === t);
       expect(swept.map((c) => c.id)).toEqual([live.id]); // the live one lapsed too; the refused one was not charged
       expect(await count('spend_ledger', t)).toBe(1);
       expect(await count('budget_reservations', t)).toBe(0);
@@ -582,7 +582,7 @@ describe('budget', { timeout: 120_000 }, () => {
     const b = await newBudget({ reservationTtlS: 1 });
     allowed(await b.reserve(req(t, 1000, 10_000))); // the gateway dies: never settled
     await lapse();
-    const charged = (await chargeExpiredHolds(handle.db, 1000)).filter((c) => c.tenantId === t);
+    const charged = (await chargeExpiredHolds(handle.db, 1000, 0, t)).filter((c) => c.tenantId === t);
     expect(charged).toHaveLength(1);
     expect(await pgSpent(t)).toBe(1000);
     await rebuildAfterFlush(t, b, 10_000);
@@ -608,7 +608,7 @@ describe('budget', { timeout: 120_000 }, () => {
     expect(queued).toHaveLength(1);
     await redis.xdel(spendKey, queued[0]![0]); // the entry is dead-lettered: Postgres never gets the charge
     await lapse();
-    const charged = (await chargeExpiredHolds(handle.db, 1000)).filter((c) => c.tenantId === t);
+    const charged = (await chargeExpiredHolds(handle.db, 1000, 0, t)).filter((c) => c.tenantId === t);
     expect(charged).toEqual([{ tenantId: t, period: P, id: h.id, costMicros: 1000, estimated: true }]);
     await applySettled(redis, prefix, e, charged, 5000);
     expect(await redisBal(t, e)).toMatchObject({ spent: 400, reserved: 0 }); // not 1400
