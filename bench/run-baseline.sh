@@ -6,6 +6,8 @@
 # AUTH_CACHE=redis (default) is the main run; each profile is repeated once with AUTH_CACHE=none
 # (Postgres lookup on every request) to show what the cache buys. STEP_RATES="" skips the sweep.
 set -euo pipefail
+# Every client is 127.0.0.1, so the per-address failed-auth limiter would throttle the load; it is not what is measured.
+export AUTH_FAIL_LIMIT_PER_MIN="${AUTH_FAIL_LIMIT_PER_MIN:-0}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PR="${PR:-3}"
@@ -77,6 +79,13 @@ run_k6() { # name url stream rate warmup duration
   if [ ! -s "$OUT/$1.json" ]; then
     echo "k6 did not write $OUT/$1.json" >&2; exit 1
   fi
+  # A run whose requests failed (rate limit, auth throttle) measures the refusal path, not the proxy.
+  node -e '
+    if (process.argv[2].startsWith("step-")) process.exit(0); // the throughput sweep is expected to fail at its top steps
+    const m = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).metrics;
+    const n = m["http_reqs{phase:measure}"].count, f = (m["http_req_failed{phase:measure}"] || {}).passes || 0;
+    if (f / n > 0.01) { console.error(process.argv[2] + ": " + f + " of " + n + " measured requests failed; the run is not a measurement"); process.exit(1); }
+  ' "$OUT/$1.json" "$1"
 }
 
 MOCK="http://127.0.0.1:$MOCK_PORT"
@@ -84,7 +93,7 @@ GW="http://127.0.0.1:$GATEWAY_PORT"
 
 # A fresh key for this run, printed once by the CLI. It lives only in this shell variable.
 npm --prefix "$ROOT" run --silent keys -- create-tenant bench >/dev/null 2>&1 || true # exists on re-runs
-API_KEY="$(npm --prefix "$ROOT" run --silent keys -- create-key bench "run-$(date +%s)" 2>/dev/null)"
+API_KEY="$(npm --prefix "$ROOT" run --silent keys -- create-key bench "run-$(date +%s)" --rpm 999999999 --tpm 999999999 2>/dev/null)"
 case "$API_KEY" in gw_*) ;; *) echo "could not create a bench key (is Postgres up and migrated?)" >&2; exit 1;; esac
 
 for profile in instant realistic; do

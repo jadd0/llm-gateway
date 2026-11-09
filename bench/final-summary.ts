@@ -40,6 +40,11 @@ export function median(xs: number[]): number {
 }
 export const spread = (xs: number[]): Spread => ({ median: median(xs), min: Math.min(...xs), max: Math.max(...xs) });
 
+/** A percentile of the successful responses only; NaN when the slice has none (rendered as n/a). */
+function ok(k6: K6, name: string, field: string): number {
+  return k6.metrics[name]?.[field] ?? Number.NaN;
+}
+
 function need(k6: K6, name: string, field: string): number {
   const v = k6.metrics[name]?.[field];
   if (v === undefined) throw new Error(`k6 summary has no ${name} ${field}`);
@@ -63,13 +68,17 @@ export function slice(k6: K6, tags: string): Slice {
     failed: k6.metrics[`http_req_failed{${tags}}`]?.passes ?? 0,
     // k6 omits dropped_iterations when none were dropped.
     dropped: k6.metrics[`dropped_iterations{${tags}}`]?.count ?? 0,
-    p50: need(k6, `http_req_duration{${tags}}`, 'med'),
-    p95: need(k6, `http_req_duration{${tags}}`, 'p(95)'),
-    p99: need(k6, `http_req_duration{${tags}}`, 'p(99)'),
+    // Durations are of responses with a 2xx or 3xx status: a fast refusal must not pull the percentiles down.
+    p50: ok(k6, `http_req_duration{${tags},expected_response:true}`, 'med'),
+    p95: ok(k6, `http_req_duration{${tags},expected_response:true}`, 'p(95)'),
+    p99: ok(k6, `http_req_duration{${tags},expected_response:true}`, 'p(99)'),
   };
 }
 
 const ERROR_LIMIT = 0.01;
+/** A slice is a measurement only if it had requests and at most 1% of them failed. */
+export const clean = (s: Slice) => s.requests > 0 && s.failed / s.requests <= ERROR_LIMIT;
+const failNote = (s: Slice) => `FAIL (${s.failed} of ${s.requests} failed)`;
 
 export interface RampStep extends Slice {
   rate: number;
@@ -85,7 +94,7 @@ export function rampSteps(k6: K6): RampStep[] {
 }
 
 const offered = (s: Slice) => s.requests + s.dropped;
-const errorRate = (s: Slice) => (offered(s) === 0 ? 1 : s.failed / s.requests);
+const errorRate = (s: Slice) => (s.requests === 0 ? 1 : s.failed / s.requests);
 const droppedShare = (s: Slice) => (offered(s) === 0 ? 1 : s.dropped / offered(s));
 
 export type Limit = 'errors' | 'p95 over 2x the first step' | 'k6 dropped iterations' | 'end of ramp';
@@ -113,14 +122,20 @@ export function ceiling(steps: RampStep[]): Ceiling {
 
 export interface Breaking {
   rate: number | null;
-  reason: 'p95 over 10x the first step' | 'errors over 1%' | 'not reached';
+  reason: 'p95 over 10x the first step' | 'errors over 1%' | 'k6-bound (dropped iterations)' | 'not reached';
+  /** With reason 'k6-bound': the step at which the load generator could no longer send the offered rate. */
+  k6BoundAt?: number;
 }
-/** The first step whose p95 is over 10x the first step's, or whose errors (failed plus dropped) exceed 1%. */
+/**
+ * The first step whose p95 is over 10x the first step's, or whose failed requests exceed 1%: gateway behaviour only.
+ * A step that dropped more than 1% of its iterations is the load generator's limit, not a breaking point, and ends the scan.
+ */
 export function breakingPoint(steps: RampStep[]): Breaking {
   const base = steps[0]!.p95;
   for (const s of steps) {
     if (s.p95 > 10 * base) return { rate: s.rate, reason: 'p95 over 10x the first step' };
-    if (errorRate(s) > ERROR_LIMIT || droppedShare(s) > ERROR_LIMIT) return { rate: s.rate, reason: 'errors over 1%' };
+    if (errorRate(s) > ERROR_LIMIT) return { rate: s.rate, reason: 'errors over 1%' };
+    if (droppedShare(s) > ERROR_LIMIT) return { rate: null, reason: 'k6-bound (dropped iterations)', k6BoundAt: s.rate };
   }
   return { rate: null, reason: 'not reached' };
 }
@@ -149,18 +164,37 @@ export function spikeFigures(k6: K6, windowS: number): SpikeFigures {
 
 export interface RateLimitRun {
   rpm: number;
-  /** Seconds the burst was in flight: the slowest request's duration. */
+  /** Seconds from the burst's first request to its last admitted one, by the request log's own timestamps. */
   windowS: number;
   burst: number;
   /** Requests with status 200 in the request log for the run's key. */
   admittedLog: number;
   /** What the client saw: status 200 counted by k6. */
   admittedK6: number;
+  /** 429s whose error code was not rate_limit_exceeded, and answers that were neither 200 nor 429. */
+  other429?: number;
+  other?: number;
+  /** False when the request log never reached the count the client saw within the wait. */
+  logCaughtUp?: boolean;
 }
+/** The larger of the log's and the client's count: neither may hide an admission. */
+export const admissions = (r: RateLimitRun) => Math.max(r.admittedLog, r.admittedK6);
 /** A key admits its bucket plus what refilled while the burst was in flight. */
 export const maxAdmissions = (r: Pick<RateLimitRun, 'rpm' | 'windowS'>) => r.rpm + Math.floor((r.windowS * r.rpm) / 60);
-/** Over-limit admissions as the request log recorded them. */
-export const overLimit = (r: RateLimitRun) => Math.max(0, r.admittedLog - maxAdmissions(r));
+/** Over-limit admissions, from the larger of the request log's count and the client's. */
+export const overLimit = (r: RateLimitRun) => Math.max(0, admissions(r) - maxAdmissions(r));
+/** Fewer admissions than min(burst, rpm) means the limiter refused requests it owed. */
+export const underAdmitted = (r: RateLimitRun) => admissions(r) < Math.min(r.burst, r.rpm);
+/** Everything that makes a run a failure; empty means pass. */
+export function rateLimitProblems(r: RateLimitRun): string[] {
+  const p: string[] = [];
+  if (overLimit(r) > 0) p.push(`${overLimit(r)} over-limit admissions`);
+  if (underAdmitted(r)) p.push(`under-admitted (${admissions(r)} of at least ${Math.min(r.burst, r.rpm)})`);
+  if (r.logCaughtUp === false) p.push('request log did not catch up with the client');
+  if ((r.other429 ?? 0) > 0) p.push(`${r.other429} 429s not from the request limiter`);
+  if ((r.other ?? 0) > 0) p.push(`${r.other} answers other than 200 or 429`);
+  return p;
+}
 
 export interface BudgetRun {
   rounds: number;
@@ -201,7 +235,8 @@ export interface Data {
   appendices: { name: string; text: string }[];
 }
 
-const ms = (s: Spread) => `${s.median.toFixed(1)} ms (${s.min.toFixed(1)} to ${s.max.toFixed(1)})`;
+const f1 = (x: number) => (Number.isNaN(x) ? 'n/a' : x.toFixed(1));
+const ms = (s: Spread) => (Number.isNaN(s.median) ? 'n/a' : `${f1(s.median)} ms (${f1(s.min)} to ${f1(s.max)})`);
 const num = (s: Spread) => `${s.median} (${s.min} to ${s.max})`;
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 const byNumber = (a: number, b: number) => a - b;
@@ -210,8 +245,7 @@ const byNumber = (a: number, b: number) => a - b;
 export function figureIndex(d: Data): Map<string, string> {
   const idx = new Map<string, string>();
   for (const [n, runs] of [...d.ramps].sort((a, b) => a[0] - b[0])) {
-    const cs = runs.map((k) => ceiling(rampSteps(k)).rate ?? 0);
-    idx.set(`ceiling.${n}i`, `${num(spread(cs))} req/s`);
+    idx.set(`ceiling.${n}i`, `${ceilingText(runs.map((k) => ceiling(rampSteps(k))))} req/s`);
     const bs = runs.map((k) => breakingPoint(rampSteps(k)).rate);
     idx.set(`breaking.${n}i`, bs.every((b) => b !== null) ? `${num(spread(bs as number[]))} req/s` : 'not reached in every repeat');
   }
@@ -224,6 +258,15 @@ export function figureIndex(d: Data): Map<string, string> {
   idx.set('correctness.budget.roundsOverCap', String(sum(d.budget.map((b) => b.roundsOverCap))));
   idx.set('correctness.failover.roundsOverCap', String(sum(d.failover.map((b) => b.roundsOverCap))));
   return idx;
+}
+
+/** The ceiling cell: a ramp that never failed a rule found no limit, so its top rate is a lower bound. */
+export function ceilingText(cs: Ceiling[]): string {
+  const rates = cs.map((c) => c.rate ?? 0);
+  const open = cs.filter((c) => c.limit === 'end of ramp').length;
+  const body = num(spread(rates));
+  if (open === 0) return body;
+  return `${open === cs.length ? '' : `${open} of ${cs.length} repeats: `}≥ ${body} (ramp did not find the limit)`;
 }
 
 function steadyKey(inst: number, rate: number) {
@@ -243,15 +286,17 @@ export function render(d: Data): string {
   if (PROFILES.every((p) => d.overhead[p].length === 0)) out.push('No overhead files.', '');
   else {
     out.push(
-      'Source: `overhead/rep-<n>/{direct,gateway}-<profile>.json` (bench/run-baseline.sh). Added latency is the gateway run minus the direct-to-mock run, per repeat. Instant: no mock latency, non-streamed. Realistic: 200 ms to first token, streamed.',
+      'Source: `overhead/rep-<n>/{direct,gateway}-<profile>.json` (bench/run-baseline.sh). Added latency is the gateway run minus the direct-to-mock run, per repeat, over successful responses only; a run with more than 1% failed requests is marked FAIL. Instant: no mock latency, non-streamed. Realistic: 200 ms to first token, streamed.',
       '',
-      '| profile | repeats | added p50 | added p95 | added p99 |',
-      '|---|---:|---|---|---|',
+      '| profile | repeats | added p50 | added p95 | added p99 | result |',
+      '|---|---:|---|---|---|---|',
     );
     for (const p of PROFILES) {
       const rs = d.overhead[p];
       if (rs.length === 0) continue;
-      out.push(`| ${p} | ${rs.length} | ${ms(spread(rs.map((r) => r.gateway.p50 - r.direct.p50)))} | ${ms(spread(rs.map((r) => r.gateway.p95 - r.direct.p95)))} | ${ms(spread(rs.map((r) => r.gateway.p99 - r.direct.p99)))} |`);
+      const dirty = rs.flatMap((r) => [r.direct, r.gateway]).filter((x) => !clean(x));
+      const result = dirty.length === 0 ? 'ok' : dirty.map(failNote).join('; ');
+      out.push(`| ${p} | ${rs.length} | ${ms(spread(rs.map((r) => r.gateway.p50 - r.direct.p50)))} | ${ms(spread(rs.map((r) => r.gateway.p95 - r.direct.p95)))} | ${ms(spread(rs.map((r) => r.gateway.p99 - r.direct.p99)))} | ${result} |`);
     }
     out.push('');
   }
@@ -270,8 +315,11 @@ export function render(d: Data): string {
       const cs = runs.map((k) => ceiling(rampSteps(k)));
       const bs = runs.map((k) => breakingPoint(rampSteps(k)));
       const limits = [...new Set(cs.map((c) => c.limit))].sort().join(', ');
-      const bk = bs.every((b) => b.rate !== null) ? num(spread(bs.map((b) => b.rate as number))) : `not reached in ${bs.filter((b) => b.rate === null).length} of ${bs.length}`;
-      out.push(`| ${n} | ${runs.length} | ${num(spread(cs.map((c) => c.rate ?? 0)))} | ${limits} | ${bk} |`);
+      const kb = bs.filter((b) => b.reason === 'k6-bound (dropped iterations)');
+      const bk = bs.every((b) => b.rate !== null)
+        ? num(spread(bs.map((b) => b.rate as number)))
+        : `not found in ${bs.filter((b) => b.rate === null).length} of ${bs.length}${kb.length > 0 ? `; k6-bound (dropped iterations) at ${num(spread(kb.map((b) => b.k6BoundAt as number)))} req/s in ${kb.length}` : ''}`;
+      out.push(`| ${n} | ${runs.length} | ${ceilingText(cs)} | ${limits} | ${bk} |`);
     }
     out.push('');
     for (const [n, runs] of [...d.ramps].sort((a, b) => a[0] - b[0])) {
@@ -297,7 +345,7 @@ export function render(d: Data): string {
   out.push('## Steady load at 60% of the ceiling', '');
   if (d.steady.size === 0) out.push('No steady files.', '');
   else {
-    out.push('Source: `cluster/steady-<n>i-<rate>-<rep>.json`.', '', '| instances | req/s | repeats | requests | failed | p50 | p95 | p99 |', '|---:|---:|---:|---:|---:|---|---|---|');
+    out.push('Source: `cluster/steady-<n>i-<rate>-<rep>.json`. Percentiles are of successful responses; more than 1% failed marks the row FAIL.', '', '| instances | req/s | repeats | requests | failed | p50 | p95 | p99 | result |', '|---:|---:|---:|---:|---:|---|---|---|---|');
     const keys = [...d.steady.keys()].sort((a, b) => {
       const [ai, ar] = a.split(/i-/).map(Number) as [number, number];
       const [bi, br] = b.split(/i-/).map(Number) as [number, number];
@@ -307,10 +355,12 @@ export function render(d: Data): string {
       const [inst, rate] = key.split(/i-/);
       const rs = d.steady.get(key)!.map((k) => slice(k, 'phase:measure'));
       out.push(
-        `| ${inst} | ${rate} | ${rs.length} | ${sum(rs.map((r) => r.requests))} | ${sum(rs.map((r) => r.failed))} | ${ms(spread(rs.map((r) => r.p50)))} | ${ms(spread(rs.map((r) => r.p95)))} | ${ms(spread(rs.map((r) => r.p99)))} |`,
+        `| ${inst} | ${rate} | ${rs.length} | ${sum(rs.map((r) => r.requests))} | ${sum(rs.map((r) => r.failed))} | ${ms(spread(rs.map((r) => r.p50)))} | ${ms(spread(rs.map((r) => r.p95)))} | ${ms(spread(rs.map((r) => r.p99)))} | ${rs.every(clean) ? 'ok' : rs.filter((r) => !clean(r)).map(failNote).join('; ')} |`,
       );
     }
     out.push('');
+    const open = [...d.ramps].filter(([, runs]) => runs.some((k) => ceiling(rampSteps(k)).limit === 'end of ramp')).map(([n]) => n);
+    if (open.length > 0) out.push(`For ${open.map((n) => `${n} instance${n === 1 ? '' : 's'}`).join(' and ')} the ramp never failed a rule, so the steady rate is 60% of the top ramp rate, not of a ceiling.`, '');
   }
 
   out.push('## Spike', '');
@@ -319,13 +369,14 @@ export function render(d: Data): string {
     out.push(
       `Source: \`cluster/spike-<n>i-<rep>.json\` (bench/k6/spike.js). Recovery: seconds after the spike until a ${d.params.spikeWindowS} s window has p95 within 1.5x the base p95 and no errors.`,
       '',
-      '| instances | repeats | base p95 | spike p95 | failed in spike | dropped in spike | recovery (s) |',
-      '|---:|---:|---|---|---:|---:|---|',
+      '| instances | repeats | base p95 | spike p95 | failed in spike | dropped in spike | recovery (s) | base phase |',
+      '|---:|---:|---|---|---:|---:|---|---|',
     );
     for (const [n, runs] of [...d.spikes].sort((a, b) => a[0] - b[0])) {
       const fs = runs.map((k) => spikeFigures(k, d.params.spikeWindowS));
+      const bases = runs.map((k) => slice(k, 'phase:base'));
       const rec = fs.every((f) => f.recoveryS !== null) ? num(spread(fs.map((f) => f.recoveryS as number))) : `not within the windows in ${fs.filter((f) => f.recoveryS === null).length} of ${fs.length}`;
-      out.push(`| ${n} | ${fs.length} | ${ms(spread(fs.map((f) => f.baseP95)))} | ${ms(spread(fs.map((f) => f.spikeP95)))} | ${sum(fs.map((f) => f.spikeFailed))} | ${sum(fs.map((f) => f.spikeDropped))} | ${rec} |`);
+      out.push(`| ${n} | ${fs.length} | ${ms(spread(fs.map((f) => f.baseP95)))} | ${ms(spread(fs.map((f) => f.spikeP95)))} | ${sum(fs.map((f) => f.spikeFailed))} | ${sum(fs.map((f) => f.spikeDropped))} | ${rec} | ${bases.every(clean) ? 'ok' : bases.filter((b) => !clean(b)).map(failNote).join('; ')} |`);
     }
     out.push('');
   }
@@ -336,8 +387,9 @@ export function render(d: Data): string {
     out.push('| check | runs | requests | over-limit or over-cap | worst run | result |', '|---|---:|---:|---:|---:|---|');
     if (d.rateLimit.length > 0) {
       const overs = d.rateLimit.map(overLimit);
+      const bad = d.rateLimit.filter((r) => rateLimitProblems(r).length > 0).length;
       out.push(
-        `| rate limit: admissions counted from the request log, bound = rpm + refill during the burst | ${d.rateLimit.length} | ${sum(d.rateLimit.map((r) => r.burst))} | ${sum(overs)} | ${Math.max(...overs)} | ${sum(overs) === 0 ? 'pass' : 'FAIL'} |`,
+        `| rate limit: admissions = larger of request log and client count, bound = rpm + refill from first request to last admission, floor = min(burst, rpm) | ${d.rateLimit.length} | ${sum(d.rateLimit.map((r) => r.burst))} | ${sum(overs)} | ${Math.max(...overs)} | ${bad === 0 ? 'pass' : `FAIL (${bad} of ${d.rateLimit.length} runs)`} |`,
       );
     }
     for (const [label, runs] of [
@@ -351,7 +403,9 @@ export function render(d: Data): string {
     out.push('');
     if (d.rateLimit.length > 0) {
       const gap = d.rateLimit.filter((r) => r.admittedLog !== r.admittedK6).length;
-      out.push(`Rate limit: the request log and the client agreed on the admitted count in ${d.rateLimit.length - gap} of ${d.rateLimit.length} runs. The log is the count used above.`, '');
+      const problems = d.rateLimit.flatMap((r, i) => rateLimitProblems(r).map((m) => `run ${i + 1}: ${m}`));
+      if (problems.length > 0) out.push('Rate-limit failures:', '', ...problems.map((m) => `- ${m}`), '');
+      out.push(`Rate limit: the request log and the client agreed on the admitted count in ${d.rateLimit.length - gap} of ${d.rateLimit.length} runs.`, '');
     }
     const ledgerGap = [...d.budget, ...d.failover].filter((b) => b.ledgerRows !== b.admitted).length;
     if (d.budget.length + d.failover.length > 0) {
@@ -432,6 +486,17 @@ export function load(dir: string): Data {
   };
 }
 
+/** Every FAIL the summary shows, one line each; run-all exits non-zero when there are any. */
+export function failures(d: Data): string[] {
+  const f: string[] = [];
+  for (const p of PROFILES) d.overhead[p].forEach((r, i) => [r.direct, r.gateway].forEach((x) => { if (!clean(x)) f.push(`overhead ${p} repeat ${i + 1}: ${failNote(x)}`); }));
+  for (const [key, runs] of d.steady) runs.forEach((k, i) => { const x = slice(k, 'phase:measure'); if (!clean(x)) f.push(`steady ${key} repeat ${i + 1}: ${failNote(x)}`); });
+  for (const [n, runs] of d.spikes) runs.forEach((k, i) => { const x = slice(k, 'phase:base'); if (!clean(x)) f.push(`spike ${n}i repeat ${i + 1} base phase: ${failNote(x)}`); });
+  d.rateLimit.forEach((r, i) => rateLimitProblems(r).forEach((m) => f.push(`rate limit run ${i + 1}: ${m}`)));
+  for (const [label, runs] of [['budget', d.budget], ['budget failover', d.failover]] as const) runs.forEach((b, i) => { if (b.roundsOverCap > 0) f.push(`${label} run ${i + 1}: ${b.roundsOverCap} tenants over cap`); });
+  return f;
+}
+
 /** The req/s to hold for the steady runs: `fraction` of the lowest repeat's ceiling, rounded down. */
 export function steadyRate(d: Data, instances: number, fraction: number): number {
   const runs = d.ramps.get(instances);
@@ -447,8 +512,12 @@ if (import.meta.main) {
     if (!b || !c) throw new Error('usage: node bench/final-summary.ts ceiling <final-dir> <instances> [fraction]');
     console.log(steadyRate(load(b), Number(c), f ? Number(f) : 0.6));
   } else if (a) {
-    writeFileSync(join(a, 'summary.md'), render(load(a)));
+    const d = load(a);
+    writeFileSync(join(a, 'summary.md'), render(d));
     console.log(`wrote ${join(a, 'summary.md')}`);
+    const bad = failures(d);
+    for (const m of bad) console.error(`FAIL: ${m}`);
+    if (bad.length > 0) process.exitCode = 3;
   } else {
     throw new Error('usage: node bench/final-summary.ts <final-dir>');
   }

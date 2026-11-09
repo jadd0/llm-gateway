@@ -17,6 +17,8 @@
 #   Anything else in the environment (BUDGET_ENABLED, RATE_LIMIT_ENABLED, REDIS_URL, ...) reaches every gateway.
 # Needs Postgres and Redis up (docker compose up -d --wait), `npm run db:migrate` applied, nginx on PATH.
 set -euo pipefail
+# Every client is 127.0.0.1, so the per-address failed-auth limiter would throttle the load; it is not what is measured.
+export AUTH_FAIL_LIMIT_PER_MIN="${AUTH_FAIL_LIMIT_PER_MIN:-0}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MODE="${1:-up}"

@@ -3,7 +3,8 @@
 // the time to recover is read from the summary alone: the first window whose p95 is back within 1.5x the base's.
 //   TARGET_URL  base URL     API_KEY  gateway key     BASE_RATE  requests per second (default 200)
 //   SPIKE_FACTOR (10)  SPIKE_S (20)  BASE_S (30)  WARMUP_S (10)  RECOVER_WINDOWS (6)  RECOVER_WINDOW_S (5)
-//   STREAM "true" for SSE    MODEL (default mock-model)
+//   STREAM "true" for SSE    MODEL (default mock-model)    EXPECTED_LATENCY_MS (default 50): VUs are sized as rate x this x 2
+// Every phase has gracefulStop 0s, so a slow phase cannot spill requests into the next one.
 import http from 'k6/http';
 import { check } from 'k6';
 
@@ -16,6 +17,7 @@ const BASE_S = Number(__ENV.BASE_S || 30);
 const WARM_S = Number(__ENV.WARMUP_S || 10);
 const WINDOWS = Number(__ENV.RECOVER_WINDOWS || 6);
 const WINDOW_S = Number(__ENV.RECOVER_WINDOW_S || 5);
+const LATENCY_S = Number(__ENV.EXPECTED_LATENCY_MS || 50) / 1000;
 
 const scenarios = {};
 const thresholds = {};
@@ -27,13 +29,14 @@ function phase(name, rate, seconds) {
     timeUnit: '1s',
     startTime: `${t}s`,
     duration: `${seconds}s`,
-    preAllocatedVUs: Math.min(3000, Math.max(50, Math.ceil(rate / 4))),
-    maxVUs: 8000,
+    preAllocatedVUs: Math.min(6000, Math.max(50, Math.ceil(rate * LATENCY_S * 2))),
+    maxVUs: Math.min(8000, Math.max(100, Math.ceil(rate * LATENCY_S * 4))),
+    gracefulStop: '0s',
     tags: { phase: name },
   };
   t += seconds;
   if (name === 'warmup') return;
-  thresholds[`http_req_duration{phase:${name}}`] = ['max>=0'];
+  thresholds[`http_req_duration{phase:${name},expected_response:true}`] = ['max>=0'];
   thresholds[`http_req_failed{phase:${name}}`] = ['rate>=0'];
   thresholds[`http_reqs{phase:${name}}`] = ['count>=0'];
   thresholds[`dropped_iterations{phase:${name}}`] = ['count>=0'];

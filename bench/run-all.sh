@@ -8,9 +8,10 @@
 # Needs: Postgres and Redis up (docker compose up -d --wait; the semantic scenarios also want ollama), `npm run db:migrate`
 # applied, k6 and nginx on PATH (brew install k6 nginx), power connected, nothing else of ours running, the laptop left alone.
 #
-# ESTIMATED RUN TIME (full suite, a machine that stays quiet): about 3 h plus whatever bench/quiet.sh waits. Sum of:
+# ESTIMATED RUN TIME (full suite, a machine that stays quiet): about 3 h 10 min plus whatever bench/quiet.sh waits. Sum of:
 #   overhead     20 min   3 repeats x (2 profiles x 3 runs x 60 s + startup)
-#   cluster      44 min   ramp 1 and 3 instances 3 repeats x 4.2 min, steady 6 x 1.5 min, spike 6 x 1.7 min
+#   cluster      51 min   ramp 1 and 3 instances 3 repeats x 5.2 min (15 steps of 20 s, up to 32000 req/s so the limit is found
+#                         or reported as not found), steady 6 x 1.5 min, spike 6 x 1.7 min
 #   correctness  20 min   10 runs x (rate-limit burst + budget flood + budget flood with a Redis restart)
 #   cache        18 min   3 repeats x 6 min
 #   semantic     38 min   latency run 8 min, threshold evaluation allowed 30 min (not measured on this machine yet)
@@ -60,7 +61,7 @@ if [ "$SMOKE" = 1 ]; then
   RAMP_RATES="200,400"; STEP_S=6; STEP_WARMUP_S=2; STEADY_WARMUP_S=2; STEADY_S=4
   SPIKE_ENV=(BASE_RATE=40 SPIKE_FACTOR=3 WARMUP_S=2 BASE_S=3 SPIKE_S=3 RECOVER_WINDOWS=2 RECOVER_WINDOW_S=2)
   SPIKE_WINDOW_S=2
-  CORR_ENV=(FLOOD_ROUNDS=3 FLOOD=20 BURST=100 FAILOVER_AT_S=1)
+  CORR_ENV=(FLOOD_ROUNDS=3 FLOOD=20 BURST=100 BURST_RPM=20 FAILOVER_AT_S=1)
   CACHE_ENV=(RATE=20 DURATION_S=5 STAMPEDE=10 PROMPTS=100 POOL=20)
   SEM_ENV=(SEEDS=10 RATE=5 DURATION_S=5 SETTLE_S=5); EVAL_ARGS=(--qqp 40 --paws 40)
   CHAOS_ENV=(DURATION_S=16 KILL_AT_S=5 RESTART_AT_S=10 RATE_JSON=20 RATE_STREAM=5)
@@ -68,7 +69,7 @@ if [ "$SMOKE" = 1 ]; then
 else
   REPEATS=3; CORR_RUNS=10; SECONDARY_REPEATS=3
   BASE_ENV=(WARMUP_S=15 DURATION_S=45 STEP_RATES=)
-  RAMP_RATES="1000,2000,3000,4000,5000,6000,8000,10000,12000,14000,16000,20000"; STEP_S=20; STEP_WARMUP_S=5
+  RAMP_RATES="1000,2000,3000,4000,5000,6000,8000,10000,12000,14000,16000,20000,24000,28000,32000"; STEP_S=20; STEP_WARMUP_S=5
   STEADY_WARMUP_S=15; STEADY_S=60
   SPIKE_ENV=(BASE_RATE=200 SPIKE_FACTOR=10 WARMUP_S=10 BASE_S=30 SPIKE_S=20 RECOVER_WINDOWS=6 RECOVER_WINDOW_S=5)
   SPIKE_WINDOW_S=5
@@ -128,14 +129,24 @@ cluster_down() {
     CL_PID=""
   fi
 }
-sample_start() { # name: one line per process per second (t, role, %cpu, rss KB) while the cluster runs
+sample_start() { # name: one line per process per second (t, role, %cpu, rss KB) while the cluster runs: mock, gateways,
+  # worker, nginx master and its workers, and k6
   local file="$FINAL/cluster/cpu-$1.csv" start; start=$(date +%s)
   echo "t_s,role,cpu_pct,rss_kb" >"$file"
   ( while true; do
+      t=$(( $(date +%s) - start ))
       for f in "$CL_DIR"/*.pid; do
         [ -f "$f" ] || continue
-        role="$(basename "$f" .pid)"
-        ps -o %cpu=,rss= -p "$(cat "$f")" 2>/dev/null | awk -v t=$(( $(date +%s) - start )) -v r="$role" 'NF==2{print t","r","$1","$2}' >>"$file" || true
+        role="$(basename "$f" .pid)"; pid="$(cat "$f")"
+        ps -o %cpu=,rss= -p "$pid" 2>/dev/null | awk -v t="$t" -v r="$role" 'NF==2{print t","r","$1","$2}' >>"$file" || true
+        if [ "$role" = nginx ]; then
+          for w in $(pgrep -P "$pid" 2>/dev/null); do
+            ps -o %cpu=,rss= -p "$w" 2>/dev/null | awk -v t="$t" 'NF==2{print t",nginx-worker,"$1","$2}' >>"$file" || true
+          done
+        fi
+      done
+      for k in $(pgrep -x k6 2>/dev/null); do
+        ps -o %cpu=,rss= -p "$k" 2>/dev/null | awk -v t="$t" 'NF==2{print t",k6,"$1","$2}' >>"$file" || true
       done
       sleep 1
     done ) &
@@ -201,7 +212,7 @@ if want cluster; then
     for rep in $(seq 1 "$REPEATS"); do
       quiet_gate "ramp-${inst}i-$rep"; log "ramp, $inst instance(s), repeat $rep"
       cluster_up "$inst" 0 0; sample_start "ramp-${inst}i-$rep"
-      k6run "$FINAL/cluster/ramp-${inst}i-$rep.json" ramp.js TARGET_URL="http://127.0.0.1:$FRONT_PORT" API_KEY="$KEY" RATES="$RAMP_RATES" STEP_S="$STEP_S" STEP_WARMUP_S="$STEP_WARMUP_S"
+      k6run "$FINAL/cluster/ramp-${inst}i-$rep.json" ramp.js TARGET_URL="http://127.0.0.1:$FRONT_PORT" API_KEY="$KEY" RATES="$RAMP_RATES" STEP_S="$STEP_S" STEP_WARMUP_S="$STEP_WARMUP_S" EXPECTED_LATENCY_MS=50
       cluster_down
     done
   done
@@ -219,7 +230,7 @@ if want cluster; then
     for rep in $(seq 1 "$REPEATS"); do
       quiet_gate "spike-${inst}i-$rep"; log "spike, $inst instance(s), repeat $rep"
       cluster_up "$inst" 200 10; sample_start "spike-${inst}i-$rep"
-      k6run "$FINAL/cluster/spike-${inst}i-$rep.json" spike.js TARGET_URL="http://127.0.0.1:$FRONT_PORT" API_KEY="$KEY" "${SPIKE_ENV[@]}"
+      k6run "$FINAL/cluster/spike-${inst}i-$rep.json" spike.js TARGET_URL="http://127.0.0.1:$FRONT_PORT" API_KEY="$KEY" EXPECTED_LATENCY_MS=420 "${SPIKE_ENV[@]}"
       cluster_down
     done
   done
@@ -291,12 +302,14 @@ if want profile; then
   quiet_gate profile; log "profile: one instance under --cpu-prof"
   mkdir -p "$FINAL/profile"
   GATEWAY_NODE_ARGS="--cpu-prof --cpu-prof-dir=$FINAL/profile" cluster_up 1 0 0; sample_start profile
-  k6run "$FINAL/profile/ramp-1i-profile.json" ramp.js TARGET_URL="http://127.0.0.1:$FRONT_PORT" API_KEY="$KEY" RATES="$RAMP_RATES" STEP_S="$STEP_S" STEP_WARMUP_S="$STEP_WARMUP_S"
+  k6run "$FINAL/profile/ramp-1i-profile.json" ramp.js TARGET_URL="http://127.0.0.1:$FRONT_PORT" API_KEY="$KEY" RATES="$RAMP_RATES" STEP_S="$STEP_S" STEP_WARMUP_S="$STEP_WARMUP_S" EXPECTED_LATENCY_MS=50
   cluster_down # SIGTERM lets the gateway exit cleanly, which is when node writes the .cpuprofile
 fi
 
 # ---- summary ------------------------------------------------------------------------------------------------------
 echo "elapsed_s: $(( $(date +%s) - START_S ))" >"$FINAL/elapsed.txt"
 [ -s "$FINAL/skipped.txt" ] || rm -f "$FINAL/skipped.txt"
-node "$ROOT/bench/final-summary.ts" "$FINAL"
+SUMMARY_RC=0
+node "$ROOT/bench/final-summary.ts" "$FINAL" || SUMMARY_RC=$?
 log "done in $(( ($(date +%s) - START_S) / 60 )) min; summary in $FINAL/summary.md"
+[ "$SUMMARY_RC" -eq 0 ] || { echo "run-all: the summary lists FAIL rows (above); the run is not a clean measurement" >&2; exit "$SUMMARY_RC"; }

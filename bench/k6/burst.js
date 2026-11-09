@@ -15,6 +15,8 @@ const BURST = Number(__ENV.BURST || 1000);
 const ok = new Counter('status_200');
 const limited = new Counter('status_429');
 const other = new Counter('status_other');
+// A 429 that is not the request limiter's (for example the failed-auth address limiter) is not an admission decision.
+const limitedOther = new Counter('status_429_other_code');
 const withRetryAfter = new Counter('status_429_with_retry_after');
 
 export const options = {
@@ -27,6 +29,7 @@ export const options = {
     status_200: ['count>=0'],
     status_429: ['count>=0'],
     status_other: ['count>=0'],
+    status_429_other_code: ['count>=0'],
     status_429_with_retry_after: ['count>=0'],
   },
 };
@@ -45,6 +48,16 @@ export default function () {
   const res = http.post(`${TARGET}/v1/chat/completions`, body, params);
   if (res.status === 200) ok.add(1);
   else if (res.status === 429) {
+    let code = '';
+    try {
+      code = res.json('error.code');
+    } catch (e) {
+      code = '';
+    }
+    if (code !== 'rate_limit_exceeded') {
+      limitedOther.add(1);
+      return;
+    }
     limited.add(1);
     if (Number(res.headers['Retry-After']) >= 1) withRetryAfter.add(1);
   } else other.add(1);

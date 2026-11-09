@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { breakingPoint, ceiling, load, maxAdmissions, overLimit, rampSteps, render, spikeFigures, steadyRate } from './final-summary.ts';
+import { breakingPoint, ceiling, failures, load, maxAdmissions, overLimit, rampSteps, rateLimitProblems, render, spikeFigures, steadyRate } from './final-summary.ts';
 
 // A k6 export for slices given as [tags, figures]. One distinct number per field, so a swapped field shows up.
 interface S { n: number; failed?: number; dropped?: number; p50: number; p95: number; p99: number }
@@ -12,7 +12,7 @@ function k6(slices: Record<string, S>) {
     metrics[`http_reqs{${tags}}`] = { count: s.n };
     metrics[`http_req_failed{${tags}}`] = { passes: s.failed ?? 0, fails: s.n - (s.failed ?? 0) };
     if (s.dropped) metrics[`dropped_iterations{${tags}}`] = { count: s.dropped };
-    metrics[`http_req_duration{${tags}}`] = { med: s.p50, 'p(95)': s.p95, 'p(99)': s.p99 };
+    metrics[`http_req_duration{${tags},expected_response:true}`] = { med: s.p50, 'p(95)': s.p95, 'p(99)': s.p99 };
   }
   return { metrics };
 }
@@ -53,7 +53,7 @@ function fixture(): string {
   }
   for (const run of [1, 2]) {
     // The log says 105 admitted, the client saw 99: the table must use the log.
-    w(`correctness/ratelimit-${run}.json`, { rpm: 100, windowS: 3, burst: 1000, admittedLog: 105, admittedK6: 99 });
+    w(`correctness/ratelimit-${run}.json`, { rpm: 100, windowS: 3, burst: 1000, admittedLog: 105, admittedK6: 99, logCaughtUp: true });
     w(`correctness/budget-${run}.json`, { rounds: 10, requestsPerRound: 50, admitted: 200, ledgerRows: 200, roundsOverCap: 0, maxOvershootMicros: 0 });
     w(`correctness/budget-failover-${run}.json`, { rounds: 10, requestsPerRound: 50, admitted: 210, ledgerRows: 210, roundsOverCap: 0, maxOvershootMicros: 0 });
   }
@@ -101,7 +101,10 @@ describe('final summary', () => {
     expect(breakingPoint(steps)).toEqual({ rate: 5000, reason: 'p95 over 10x the first step' });
     const dropping = rampSteps(k6(Object.fromEntries([step(1000, { p95: 1 }), step(2000, { p95: 1.1, dropped: 3000 })])));
     expect(ceiling(dropping)).toEqual({ rate: 1000, limit: 'k6 dropped iterations' });
-    expect(breakingPoint(dropping)).toEqual({ rate: 2000, reason: 'errors over 1%' });
+    // Dropped iterations are the load generator's limit, never a gateway breaking point.
+    expect(breakingPoint(dropping)).toEqual({ rate: null, reason: 'k6-bound (dropped iterations)', k6BoundAt: 2000 });
+    const failing = rampSteps(k6(Object.fromEntries([step(1000, { p95: 1 }), step(2000, { p95: 1.1, failed: 400, n: 30000 })])));
+    expect(breakingPoint(failing)).toEqual({ rate: 2000, reason: 'errors over 1%' });
     const flat = rampSteps(k6(Object.fromEntries([step(1000, { p95: 1 }), step(2000, { p95: 1.2 })])));
     expect(ceiling(flat)).toEqual({ rate: 2000, limit: 'end of ramp' });
     expect(breakingPoint(flat)).toEqual({ rate: null, reason: 'not reached' });
@@ -128,23 +131,64 @@ describe('final summary', () => {
     expect(spikeFigures(k6({ 'phase:base': { n: 1, p50: 1, p95: 2, p99: 3 }, 'phase:spike': { n: 1, p50: 1, p95: 9, p99: 9 }, 'phase:recover1': { n: 1, p50: 1, p95: 9, p99: 9 } }), 5).recoveryS).toBeNull();
   });
 
-  it('correctness table counts over-limit admissions from the request log', () => {
-    const run = { rpm: 100, windowS: 3, burst: 1000, admittedLog: 105, admittedK6: 99 };
+  it('correctness table counts over-limit admissions from the larger of the request log and the client', () => {
+    const run = { rpm: 100, windowS: 3, burst: 1000, admittedLog: 105, admittedK6: 99, logCaughtUp: true };
     expect(maxAdmissions(run)).toBe(105);
     expect(overLimit(run)).toBe(0);
     // The client count would pass; the log says two admissions too many.
     expect(overLimit({ ...run, admittedLog: 107, admittedK6: 99 })).toBe(2);
-    expect(overLimit({ ...run, admittedLog: 90, admittedK6: 120 })).toBe(0);
+    // Whichever count is larger is used: a log that lags cannot hide an admission the client saw.
+    expect(overLimit({ ...run, admittedLog: 90, admittedK6: 120 })).toBe(15);
     const md = render(load(fixture()));
-    expect(md).toContain('| rate limit: admissions counted from the request log, bound = rpm + refill during the burst | 2 | 2000 | 0 | 0 | pass |');
+    expect(md).toContain('| rate limit: admissions = larger of request log and client count, bound = rpm + refill from first request to last admission, floor = min(burst, rpm) | 2 | 2000 | 0 | 0 | pass |');
     expect(md).toContain('| budget flood: tenants whose settled spend passed the cap | 2 | 1000 | 0 | 0 | pass |');
 
     const dir = fixture();
     writeFileSync(join(dir, 'correctness/ratelimit-2.json'), JSON.stringify({ ...run, admittedLog: 108 }));
     const bad = render(load(dir));
-    expect(bad).toContain('| 2 | 2000 | 3 | 3 | FAIL |');
+    expect(bad).toContain('| 2 | 2000 | 3 | 3 | FAIL (1 of 2 runs) |');
     writeFileSync(join(dir, 'correctness/budget-1.json'), JSON.stringify({ rounds: 10, requestsPerRound: 50, admitted: 200, ledgerRows: 200, roundsOverCap: 2, maxOvershootMicros: 40 }));
     expect(render(load(dir))).toContain('| budget flood: tenants whose settled spend passed the cap | 2 | 1000 | 2 | 2 | FAIL |');
+  });
+
+  it('a ramp that never fails a rule reports a lower bound, not a ceiling', () => {
+    const dir = fixture();
+    for (const rep of [1, 2, 3]) writeFileSync(join(dir, `cluster/ramp-1i-${rep}.json`), JSON.stringify(k6(Object.fromEntries([step(1000, { p95: 1 }), step(2000, { p95: 1.2 })]))));
+    const md = render(load(dir));
+    expect(md).toContain('| 1 | 3 | ≥ 2000 (2000 to 2000) (ramp did not find the limit) | end of ramp | not found in 3 of 3 |');
+    expect(md).toContain('For 1 instance the ramp never failed a rule, so the steady rate is 60% of the top ramp rate, not of a ceiling.');
+    expect(md).toContain('| 3 | 3 | 3000 (3000 to 3000) | p95 over 2x the first step |');
+  });
+
+  it('latency tables mark a slice with more than 1% failed requests as FAIL and use successful durations', () => {
+    const dir = fixture();
+    // Gateway run: 160 of 200 requests refused. The successful ones were fast, which is exactly the trap.
+    writeFileSync(join(dir, 'overhead/rep-1/gateway-instant.json'), JSON.stringify(k6({ 'phase:measure': { n: 200, failed: 160, p50: 0.5, p95: 0.9, p99: 1 } })));
+    const d = load(dir);
+    const md = render(d);
+    expect(md).toContain('FAIL (160 of 200 failed)');
+    expect(failures(d)).toEqual(['overhead instant repeat 1: FAIL (160 of 200 failed)']);
+    // The percentile is read from the expected_response:true series, not the all-requests one.
+    const onlyAll = { metrics: { 'http_reqs{phase:measure}': { count: 10 }, 'http_req_failed{phase:measure}': { passes: 0 }, 'http_req_duration{phase:measure}': { med: 1, 'p(95)': 1, 'p(99)': 1 } } };
+    writeFileSync(join(dir, 'overhead/rep-2/gateway-instant.json'), JSON.stringify(onlyAll));
+    expect(render(load(dir))).toContain('n/a');
+    // A clean fixture has nothing to report.
+    expect(failures(load(fixture()))).toEqual([]);
+  });
+
+  it('rate limit: over-admission, under-admission, a lagging log and stray 429s each fail the run', () => {
+    const ok = { rpm: 100, windowS: 3, burst: 1000, admittedLog: 105, admittedK6: 105, logCaughtUp: true };
+    expect(rateLimitProblems(ok)).toEqual([]);
+    expect(rateLimitProblems({ ...ok, admittedLog: 106, admittedK6: 106 })).toEqual(['1 over-limit admissions']);
+    // The log lags behind the client: the client's count is used, and the run is flagged.
+    expect(rateLimitProblems({ ...ok, admittedLog: 90, admittedK6: 110, logCaughtUp: false })).toEqual(['5 over-limit admissions', 'request log did not catch up with the client']);
+    expect(rateLimitProblems({ ...ok, admittedLog: 53, admittedK6: 53 })).toEqual(['under-admitted (53 of at least 100)']);
+    expect(rateLimitProblems({ ...ok, other429: 4, other: 1 })).toEqual(['4 429s not from the request limiter', '1 answers other than 200 or 429']);
+    const dir = fixture();
+    writeFileSync(join(dir, 'correctness/ratelimit-1.json'), JSON.stringify({ ...ok, admittedLog: 120, admittedK6: 120 }));
+    const md = render(load(dir));
+    expect(md).toContain('| 2 | 2000 | 15 | 15 | FAIL (1 of 2 runs) |');
+    expect(md).toContain('- run 1: 15 over-limit admissions');
   });
 
   it('superseded figures listed with their replacement', () => {

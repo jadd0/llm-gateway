@@ -5,7 +5,9 @@
 # 300 ms with 100 completion tokens (run-all.sh starts it that way), and `docker compose` for the Redis restart.
 # Each of RUNS runs does three things and writes one JSON file for each:
 #   ratelimit-<n>.json         BURST requests at once on a key limited to BURST_RPM per minute; the status-200 rows the
-#                              request log holds for that key are the admissions (the client's count is kept for comparison)
+#                              request log holds for that key are the admissions (the client's count is kept for comparison).
+#                              The refill window is first request to last admitted request by the log's own timestamps.
+#                              A 429 that is not rate_limit_exceeded, any other status, or a log that never catches up is recorded and fails the run in the summary
 #   budget-<n>.json            FLOOD_ROUNDS tenants with a FLOOD_CAP_USD cap, each hit by FLOOD requests at once; Postgres
 #                              says how many tenants settled above their cap
 #   budget-failover-<n>.json   the same flood while Redis is restarted FAILOVER_AT_S seconds in
@@ -52,23 +54,25 @@ ratelimit_run() { # n
   echo "== ratelimit run $n ($BURST at once, $BURST_RPM/min)"
   API_KEY="$key" TARGET_URL="$GW" BURST="$BURST" k6 run --quiet --summary-export "$raw" "$ROOT/bench/k6/burst.js" >"$OUT/.ratelimit-$n.log" 2>&1 || rc=$?
   k6_ok "ratelimit run $n" "$rc" "$raw"
-  local k6_ok_n log_n="" prev="-1"
+  local k6_ok_n counted="" prev="-1" caught=false log_n=0
   k6_ok_n="$(metric "$raw" status_200 count)"
   # The worker writes the log in batches: wait until the count has stopped moving and covers what the client saw.
+  # If it never does, the run is recorded as not caught up, which the summary counts as a failure.
   for _ in $(seq 1 120); do
-    log_n="$("${TOOL[@]}" "$ROOT/bench/correctness-tool.ts" count "$keyid")"
-    if [ "$log_n" = "$prev" ] && [ "$log_n" -ge "$k6_ok_n" ]; then break; fi
+    counted="$("${TOOL[@]}" "$ROOT/bench/correctness-tool.ts" count "$keyid")"
+    log_n="$(node -e 'console.log(JSON.parse(process.argv[1]).admitted)' "$counted")"
+    if [ "$log_n" = "$prev" ] && [ "$log_n" -ge "$k6_ok_n" ]; then caught=true; break; fi
     prev="$log_n"; sleep 1
   done
   node -e '
     const fs = require("fs");
-    const [raw, out, rpm, burst, log] = process.argv.slice(1);
+    const [raw, out, rpm, burst, counted, caught] = process.argv.slice(1);
     const m = JSON.parse(fs.readFileSync(raw, "utf8")).metrics;
     const c = (n) => (m[n] && m[n].count) || 0;
-    const r = { rpm: Number(rpm), windowS: (m.http_req_duration.max || 0) / 1000, burst: Number(burst), admittedLog: Number(log), admittedK6: c("status_200"), rejected429: c("status_429"), other: c("status_other") };
+    const log = JSON.parse(counted);
+    const r = { rpm: Number(rpm), windowS: log.windowS, burst: Number(burst), admittedLog: log.admitted, admittedK6: c("status_200"), rejected429: c("status_429"), other429: c("status_429_other_code"), other: c("status_other"), logCaughtUp: caught === "true" };
     fs.writeFileSync(out, JSON.stringify(r, null, 2) + "\n"); console.log(JSON.stringify(r));
-    if (r.other !== 0 || r.admittedK6 + r.rejected429 !== r.burst) { console.error("ratelimit: answers other than 200 or 429"); process.exit(1); }
-  ' "$raw" "$OUT/ratelimit-$n.json" "$BURST_RPM" "$BURST" "$log_n"
+  ' "$raw" "$OUT/ratelimit-$n.json" "$BURST_RPM" "$BURST" "$counted" "$caught"
   rm -f "$raw"
 }
 

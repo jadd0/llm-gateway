@@ -9,6 +9,8 @@
 #   burst     BURST requests at once with a key limited to 100 requests/min: how many get 200 vs 429.
 # Run it behind `bash bench/quiet.sh <OUT>`; a build running alongside invalidates the overhead numbers.
 set -euo pipefail
+# Every client is 127.0.0.1, so the per-address failed-auth limiter would throttle the load; it is not what is measured.
+export AUTH_FAIL_LIMIT_PER_MIN="${AUTH_FAIL_LIMIT_PER_MIN:-0}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PR="${PR:-4}"

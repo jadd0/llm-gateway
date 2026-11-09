@@ -6,6 +6,8 @@
 # Needs Postgres and Redis up (docker compose up -d --wait) and `npm run db:migrate` applied. Full runs
 # go behind `bash bench/quiet.sh <results-dir>`; a short run is a smoke test only.
 set -euo pipefail
+# Every client is 127.0.0.1, so the per-address failed-auth limiter would throttle the load; it is not what is measured.
+export AUTH_FAIL_LIMIT_PER_MIN="${AUTH_FAIL_LIMIT_PER_MIN:-0}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PR="${PR:-6}"
@@ -52,7 +54,7 @@ GW_PID=$!; PIDS+=("$GW_PID")
 wait_up "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" 401 "$GW_PID"
 
 npm --prefix "$ROOT" run --silent keys -- create-tenant bench >/dev/null 2>&1 || true
-API_KEY="$(npm --prefix "$ROOT" run --silent keys -- create-key bench "providers-$(date +%s)" 2>/dev/null)"
+API_KEY="$(npm --prefix "$ROOT" run --silent keys -- create-key bench "providers-$(date +%s)" --rpm 999999999 --tpm 999999999 2>/dev/null)"
 case "$API_KEY" in gw_*) ;; *) echo "could not create a bench key (is Postgres up and migrated?)" >&2; exit 1;; esac
 
 GW="http://127.0.0.1:$GATEWAY_PORT"
