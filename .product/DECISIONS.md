@@ -55,3 +55,5 @@ Format — one entry per decision under its category, newest last, ids never reu
   Src: chat 2026-11-09 · Code: vitest.config.ts include
 - **D-009** 2026-11-09 · founder · active — Docs are organised as one folder per part (`docs/<part>/`), each with a plain-English README and an archify diagram explaining that part; this replaces per-PR explainers and a separate decisions folder. Why: founder in chat: "docs should be organised as folders in docs. ie docs/interpreter. each part should have an archify diagram explaining".
   Src: chat 2026-11-09 · Code: docs/README.md
+- **D-010** 2026-11-09 · founder · active — The PR 2 framework comparison runs each contender as one process (no cluster) and compares only node:http, Express 5 and Fastify (no Hono). Why: one process is the like-for-like per-core test and leaves cores for k6 and the mock.
+  Src: .product/plans/pr-2.md; founder chose both recommended options in chat · Code: bench/frameworks/
