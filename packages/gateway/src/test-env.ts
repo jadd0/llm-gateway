@@ -43,6 +43,8 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
     // tests of other parts see one upstream call per request.
     RETRY_MAX_ATTEMPTS_PER_MODEL: '1',
     BREAKER_MIN_FAILURES: '1000000',
+    // Test files run in parallel against one Postgres with a hundred connections; a gateway under test does not need 20.
+    DB_POOL_SIZE: '5',
     ...overrides,
     OPENAI_BASE_URL: upstreamUrl,
     // The mock adds its own /v1 for the OpenAI format, so it gets the origin. Tests stand one stub in for
