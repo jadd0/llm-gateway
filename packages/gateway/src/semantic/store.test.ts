@@ -34,7 +34,7 @@ const row = (scope: string, c: string, key: string, embedding: number[], over: P
   ...over,
 });
 const ask = (scope: string, c: string, embedding: number[], extra: { embedder?: string; now?: Date } = {}) =>
-  store.nearest({ scope: `${run}-${scope}`, contextHash: ctx(c), embedding, now: extra.now ?? NOW, timeoutMs: 5000, ...(extra.embedder ? { embedder: extra.embedder } : {}) });
+  store.nearest({ scope: `${run}-${scope}`, contextHash: ctx(c), embedding, now: extra.now ?? NOW, ...(extra.embedder ? { embedder: extra.embedder } : {}) });
 
 describe('semantic store (postgres + pgvector)', () => {
   it('nearest within scope and context only', async () => {
@@ -128,10 +128,10 @@ describe('semantic store on a private table', () => {
   // large table; with statistics it would read a few qualifying rows through the btree index and sort them.
   const adverse = [...stingy, '-c enable_seqscan=off', '-c enable_bitmapscan=off'];
   const url = (options: string[]) => `${config.databaseUrl}${config.databaseUrl.includes('?') ? '&' : '?'}options=${encodeURIComponent([`-c search_path=${schema},public`, ...options].join(' '))}`;
-  const ownDb = (options: string[] = []) => createDb({ databaseUrl: url(options), poolSize: 4 });
+  const ownDb = (options: string[] = [], statementTimeoutMs?: number) => createDb({ databaseUrl: url(options), poolSize: 4, ...(statementTimeoutMs ? { statementTimeoutMs } : {}) });
   const made: Array<{ close(): Promise<void> }> = [];
-  const open = (options: string[] = [], storeOptions: SemanticStoreOptions = {}) => {
-    const h = ownDb(options);
+  const open = (options: string[] = [], storeOptions: SemanticStoreOptions = {}, statementTimeoutMs?: number) => {
+    const h = ownDb(options, statementTimeoutMs);
     made.push(h);
     return { h, store: createSemanticStore(h.db, storeOptions) };
   };
@@ -151,14 +151,15 @@ describe('semantic store on a private table', () => {
   };
 
   it('a postgres query that runs past its budget is cancelled there, and its connection is free again', async () => {
-    const { h, store: own } = open();
+    // The pool's statement timeout is the lookup budget; the store has no timer of its own.
+    const { h, store: own } = open([], {}, 80);
     const locker = new pg.Client({ connectionString: url([]) });
     await locker.connect();
     try {
       await locker.query('BEGIN');
       await locker.query('LOCK TABLE semantic_cache IN ACCESS EXCLUSIVE MODE');
       const t0 = performance.now();
-      const failure = await own.nearest({ scope: `${run}-t`, contextHash: ctx('1'), embedding: angle(0), now: NOW, timeoutMs: 80 }).catch((e: unknown) => e);
+      const failure = await own.nearest({ scope: `${run}-t`, contextHash: ctx('1'), embedding: angle(0), now: NOW }).catch((e: unknown) => e);
       const took = performance.now() - t0;
       expect(((failure as { cause?: { code?: string } }).cause ?? (failure as { code?: string })).code).toBe('57014'); // query_canceled: statement timeout
       expect(took).toBeGreaterThan(60);
@@ -168,14 +169,43 @@ describe('semantic store on a private table', () => {
         sql`SELECT count(*) AS n FROM pg_stat_activity WHERE datname = current_database() AND wait_event_type = 'Lock' AND query LIKE '%FROM semantic_cache%' AND pid <> ${(locker as unknown as { processID: number }).processID}`,
       );
       expect(Number(waiting.rows[0]!.n)).toBe(0);
+      // And no transaction of the lookup is left open on the server: it was one statement, not a transaction.
+      const open_ = await handle.db.execute<{ n: string }>(
+        sql`SELECT count(*) AS n FROM pg_stat_activity WHERE datname = current_database() AND state LIKE 'idle in transaction%' AND pid <> ${(locker as unknown as { processID: number }).processID}`,
+      );
+      expect(Number(open_.rows[0]!.n)).toBe(0);
       await locker.query('ROLLBACK');
       // The same pool answers at once afterwards.
       await own.upsert(row('t', '1', 'after', angle(0)));
-      expect((await own.nearest({ scope: `${run}-t`, contextHash: ctx('1'), embedding: angle(0), now: NOW, timeoutMs: 1000 }))?.exactKey).toBe('k-after');
+      expect((await own.nearest({ scope: `${run}-t`, contextHash: ctx('1'), embedding: angle(0), now: NOW }))?.exactKey).toBe('k-after');
       expect(h.pool.waitingCount).toBe(0);
     } finally {
       await locker.end();
     }
+  });
+
+  it('a lookup is one statement sent to Postgres: no transaction, no second round trip', async () => {
+    const { h, store: own } = open([], { exactMax: 3 });
+    await own.upsert(row('one', '1', 'a', angle(10)));
+    const sent: string[] = [];
+    const wrapped = new WeakSet<object>();
+    h.pool.on('acquire', (client) => {
+      if (wrapped.has(client)) return;
+      wrapped.add(client);
+      const original = client.query.bind(client) as (...a: unknown[]) => unknown;
+      (client as unknown as { query: unknown }).query = (...a: unknown[]) => {
+        sent.push(String((a[0] as { text?: string })?.text ?? a[0]));
+        return original(...a);
+      };
+    });
+    // The few-rows path, then the many-rows path (exactMax 3, 5 rows): each is one statement.
+    expect((await own.nearest({ scope: `${run}-one`, contextHash: ctx('1'), embedding: angle(0), now: NOW }))?.exactKey).toBe('k-a');
+    expect(sent).toHaveLength(1);
+    for (let i = 0; i < 4; i++) await own.upsert(row('one', '1', `b${i}`, angle(20 + i)));
+    sent.length = 0;
+    expect((await own.nearest({ scope: `${run}-one`, contextHash: ctx('1'), embedding: angle(0), now: NOW }))?.exactKey).toBe('k-a');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatch(/semantic_nearest/);
   });
 
   it('a scope and context with few rows is found even when the vector index would give up first', async () => {
@@ -183,7 +213,7 @@ describe('semantic store on a private table', () => {
     await crowd(own, 1500);
     await own.upsert(row('mine', 'm', 'far', angle(80)));
     await own.upsert(row('mine', 'm', 'nearer', angle(70)));
-    const q = { scope: `${run}-mine`, contextHash: ctx('m'), embedding: angle(0), now: NOW, timeoutMs: 5000 };
+    const q = { scope: `${run}-mine`, contextHash: ctx('m'), embedding: angle(0), now: NOW };
     expect((await own.nearest(q))?.exactKey).toBe('k-nearer');
     expect((await own.nearest(q))?.similarity).toBeCloseTo(Math.cos((70 * Math.PI) / 180), 5);
     // The same query with the crowd's own scope is answered too (and by the nearest of the crowd).
@@ -197,7 +227,7 @@ describe('semantic store on a private table', () => {
       await crowd(own, 1500);
       const scoped = `${iterativeScan}`;
       for (const [i, deg] of [90, 85, 75, 60, 55, 50].entries()) await own.upsert(row(`many-${scoped}`, 'm', `m${i}`, angle(deg)));
-      const got = await own.nearest({ scope: `${run}-many-${scoped}`, contextHash: ctx('m'), embedding: angle(0), now: NOW, timeoutMs: 5000 });
+      const got = await own.nearest({ scope: `${run}-many-${scoped}`, contextHash: ctx('m'), embedding: angle(0), now: NOW });
       expect(got?.exactKey).toBe('k-m5');
       expect(got?.similarity).toBeCloseTo(Math.cos((50 * Math.PI) / 180), 5);
     }, 60_000);

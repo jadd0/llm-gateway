@@ -77,10 +77,10 @@ describe('semantic lookup', () => {
     const w = world({ q: angle(0) });
     const dangling = `${run}-gone`;
     await w.store.upsert({ scope: dangling, contextHash: CTX, exactKey: `${prefix}missing`, embedding: atSimilarity(0.99), embedder: 'voyage-4-lite', guardSig: guardSignature('q'), expiresAt: new Date(NOW + 3600_000) });
-    const before = await w.store.nearest({ scope: dangling, contextHash: CTX, embedding: angle(0), now: new Date(NOW), timeoutMs: 5000 });
+    const before = await w.store.nearest({ scope: dangling, contextHash: CTX, embedding: angle(0), now: new Date(NOW) });
     expect(before?.exactKey).toBe(`${prefix}missing`);
     expect(await w.lookup.find(dangling, split('q'))).toEqual({ status: 'miss' });
-    expect(await w.store.nearest({ scope: dangling, contextHash: CTX, embedding: angle(0), now: new Date(NOW), timeoutMs: 5000 })).toBeUndefined();
+    expect(await w.store.nearest({ scope: dangling, contextHash: CTX, embedding: angle(0), now: new Date(NOW) })).toBeUndefined();
   });
 
   it('a Redis that cannot answer is unavailable and the row stays', async () => {
@@ -90,7 +90,7 @@ describe('semantic lookup', () => {
     const down = { get: async () => ({ status: 'unavailable' as const }) };
     const lookup = createSemanticLookup({ embedder: w.stub.embedder, store: w.store, cache: down, threshold: 0.95, guard: { tokenSet: true, maxDiff: 2 }, crossModel: true, maxChars: 100, pgTimeoutMs: 500, clock: () => NOW });
     expect(await lookup.find(scoped, split('q'))).toEqual({ status: 'unavailable' });
-    expect((await w.store.nearest({ scope: scoped, contextHash: CTX, embedding: angle(0), now: new Date(NOW), timeoutMs: 5000 }))?.exactKey).toBe(`${prefix}x`);
+    expect((await w.store.nearest({ scope: scoped, contextHash: CTX, embedding: angle(0), now: new Date(NOW) }))?.exactKey).toBe(`${prefix}x`);
   });
 
   it('no embedding is no lookup, and a long prompt is not embedded at all', async () => {
@@ -111,6 +111,25 @@ describe('semantic lookup', () => {
     expect(performance.now() - t0).toBeLessThan(400);
     const broken: SemanticStore = { ...real, nearest: async () => Promise.reject(Object.assign(new Error('secret prompt text'), { code: 'ECONNREFUSED' })) };
     expect(await world({ q: angle(0) }, { store: broken }).lookup.find(scope, split('q'))).toEqual({ status: 'unavailable' });
+  });
+
+  it('a Drizzle-wrapped Postgres error is logged with the code of its cause and none of its text', async () => {
+    const real = createSemanticStore(handle.db);
+    const wrapped = Object.assign(new Error('Failed query: select ... secret prompt text', { cause: Object.assign(new Error('secret prompt text'), { code: '57014' }) }), { name: 'DrizzleQueryError' });
+    const logged: object[] = [];
+    const lookup = createSemanticLookup({
+      embedder: stubEmbedder({ q: angle(0) }).embedder,
+      store: { ...real, nearest: async () => Promise.reject(wrapped) },
+      cache: createCacheStore({ redis, ttlS: 3600, maxEntryBytes: 10_000, timeoutMs: 500 }),
+      threshold: 0.95,
+      guard: { tokenSet: true, maxDiff: 2 },
+      crossModel: true,
+      maxChars: 100,
+      pgTimeoutMs: 500,
+      log: { warn: (o) => void logged.push(o), info: () => {} },
+    });
+    expect(await lookup.find(scope, split('q'))).toEqual({ status: 'unavailable' });
+    expect(logged).toEqual([{ errClass: 'DrizzleQueryError', code: '57014', op: 'nearest' }]);
   });
 
   it('with cross-model off only the same model is compared; with it on either is', async () => {

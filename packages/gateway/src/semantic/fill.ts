@@ -1,3 +1,4 @@
+import { pgErrorInfo } from '../db/pg-error.ts';
 import type { SemanticSplit } from './context.ts';
 import type { Embedder } from './embedder.ts';
 import { guardSignature } from './guards.ts';
@@ -47,9 +48,6 @@ export interface SemanticFillOptions {
   log?: { warn(obj: object, msg: string): void };
 }
 
-// Drizzle wraps a driver error and keeps the Postgres code on its cause.
-const errInfo = (err: unknown) => ({ errClass: (err as Error)?.name, code: (err as { code?: string })?.code ?? (err as { cause?: { code?: string } })?.cause?.code });
-
 /**
  * Embeds and stores prompts off the request path. A bounded in-memory queue: when it is full the new job is
  * dropped (that prompt just stays exact-only until it is asked again), so a burst of fills can never grow
@@ -91,7 +89,7 @@ export function createSemanticFill(opts: SemanticFillOptions): SemanticFill {
       stats.filled += 1;
     } catch (err) {
       stats.failed += 1;
-      opts.log?.warn({ ...errInfo(err), op: 'fill' }, 'semantic fill failed');
+      opts.log?.warn({ ...pgErrorInfo(err), op: 'fill' }, 'semantic fill failed');
     }
   }
 

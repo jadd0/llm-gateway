@@ -174,6 +174,7 @@ const schema = z
     SEMANTIC_MAX_INPUT_CHARS: int(2000, 1),
     SEMANTIC_PG_TIMEOUT_MS: int(100, 1),
     SEMANTIC_PG_POOL: int(4, 1),
+    SEMANTIC_PG_FILL_POOL: int(2, 1),
     SEMANTIC_GUARD_TOKENSET: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
     SEMANTIC_GUARD_MAX_DIFF: int(2, 0),
     SEMANTIC_FILL_QUEUE: int(1000, 1),
@@ -333,6 +334,8 @@ export interface Config {
   semanticPgTimeoutMs: number;
   /** Connections of the pool the semantic cache's queries use, so auth and budgets never queue behind them. */
   semanticPgPool: number;
+  /** Connections for its fills, removals and cleanup, apart from the lookup pool. */
+  semanticPgFillPool: number;
   /** Whether the content-word guard runs (the number, quote, name and negation guards always do). */
   semanticGuardTokenSet: boolean;
   /** The content-word guard: the two prompts' word sets may differ (symmetric difference) by at most this many words. */
@@ -424,6 +427,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     semanticMaxInputChars: e.SEMANTIC_MAX_INPUT_CHARS,
     semanticPgTimeoutMs: e.SEMANTIC_PG_TIMEOUT_MS,
     semanticPgPool: e.SEMANTIC_PG_POOL,
+    semanticPgFillPool: e.SEMANTIC_PG_FILL_POOL,
     semanticGuardTokenSet: e.SEMANTIC_GUARD_TOKENSET === 'true',
     semanticGuardMaxDiff: e.SEMANTIC_GUARD_MAX_DIFF,
     semanticFillQueue: e.SEMANTIC_FILL_QUEUE,

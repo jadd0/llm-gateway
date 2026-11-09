@@ -4,6 +4,7 @@ import { keyStoreFromConfig } from './auth/key-store.ts';
 import { createIpLimiter } from './auth/ip-limit.ts';
 import type { Config } from './config.ts';
 import { createDb } from './db/client.ts';
+import { pgErrorInfo } from './db/pg-error.ts';
 import type { PgLedger } from './budget/pg-ledger.ts';
 import { budgetGuard } from './budget/plugin.ts';
 import { errorBody } from './errors.ts';
@@ -17,6 +18,7 @@ import { createRedis } from './redis.ts';
 import { fallbackEmbedder, localEmbedder, voyageEmbedder, type Embedder } from './semantic/embedder.ts';
 import { createSemanticFill } from './semantic/fill.ts';
 import { createSemanticLookup } from './semantic/lookup.ts';
+import { createSemanticPools } from './semantic/pools.ts';
 import { checkPgvector, createSemanticStore, sweepExpired, type SemanticStoreOptions } from './semantic/store.ts';
 import { createBreaker, probeLockTtlMs, type Breaker } from './resilience/breaker.ts';
 import { chainFor } from './resilience/fallback.ts';
@@ -167,14 +169,16 @@ export function buildApp(
           // A failed API is left alone this long, so an outage costs one timeout, not one per request.
           { backoffMs: 5_000 },
         );
-      // Its own small pool: a slow vector query, a fill burst or the sweep can only queue behind each other, never
-      // behind authentication or the budget. A query that cannot get a connection within its budget fails fast.
-      const semanticDb = createDb({ databaseUrl: config.databaseUrl, poolSize: config.semanticPgPool, connectionTimeoutMs: config.semanticPgTimeoutMs });
-      const storeOptions: SemanticStoreOptions = {};
-      const semanticStore = createSemanticStore(semanticDb.db, storeOptions);
+      // Pools of their own, apart from authentication and the budget: lookups have one (a statement timeout of the
+      // lookup budget, warm connections), and fills, removals and the sweep another, so a burst of fills can queue
+      // only behind itself and never takes a connection a lookup needs.
+      const pools = createSemanticPools({ databaseUrl: config.databaseUrl, lookupPool: config.semanticPgPool, writePool: config.semanticPgFillPool, lookupTimeoutMs: config.semanticPgTimeoutMs });
+      const storeOptions: SemanticStoreOptions = { lookupDb: pools.lookup.db };
+      const semanticStore = createSemanticStore(pools.write.db, storeOptions);
       // The start-up check: no pgvector, no start, and the error says what to install. The version picks the query.
       app.addHook('onReady', async () => {
-        const found = await checkPgvector(semanticDb.db);
+        const found = await checkPgvector(handle.db);
+        await pools.warm();
         storeOptions.pgvector = found;
         app.log.info({ pgvector: found.version, iterativeScan: found.iterativeScan }, 'pgvector found');
       });
@@ -205,7 +209,7 @@ export function buildApp(
       // Expired rows are deleted in batches; one that outlives its answer by a moment is a miss in the lookup anyway.
       const sweep = setInterval(() => {
         sweepExpired(semanticStore, new Date(clock()), 500).catch((err: unknown) => {
-          app.log.warn({ errClass: (err as Error)?.name, code: (err as { code?: string })?.code, op: 'cleanup' }, 'semantic cleanup failed');
+          app.log.warn({ ...pgErrorInfo(err), op: 'cleanup' }, 'semantic cleanup failed');
         });
       }, config.semanticCleanupS * 1000);
       sweep.unref();
@@ -213,7 +217,7 @@ export function buildApp(
         clearInterval(sweep);
         await fill.close();
         await embedder.close?.();
-        await semanticDb.close();
+        await pools.close();
       });
     }
     app.register(responseCache, {

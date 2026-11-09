@@ -69,6 +69,17 @@ describe('semantic fill', () => {
     expect(logged).toEqual([{ errClass: 'Error', code: 'XX000', op: 'fill' }]);
   });
 
+  it('a Drizzle-wrapped Postgres error is logged with the code of its cause and none of its text', async () => {
+    const stub = stubEmbedder({ ok: angle(1) });
+    const wrapped = Object.assign(new Error('Failed query: insert ... prompt text', { cause: Object.assign(new Error('prompt text'), { code: '57P01' }) }), { name: 'DrizzleQueryError' });
+    const failing: SemanticStore = { ...store, upsert: async () => Promise.reject(wrapped) };
+    const logged: object[] = [];
+    const fill = createSemanticFill({ embedder: stub.embedder, store: failing, queueMax: 5, maxChars: 100, log: { warn: (o) => void logged.push(o) } });
+    fill.enqueue(job('ok'));
+    await fill.idle();
+    expect(logged).toEqual([{ errClass: 'DrizzleQueryError', code: '57P01', op: 'fill' }]);
+  });
+
   it('a prompt over the length limit is not queued; a closed fill takes nothing', async () => {
     const stub = stubEmbedder({});
     const fill = createSemanticFill({ embedder: stub.embedder, store, queueMax: 5, maxChars: 4 });

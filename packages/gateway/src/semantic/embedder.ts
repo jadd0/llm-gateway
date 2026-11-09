@@ -1,4 +1,5 @@
 import { Pool } from 'undici';
+import { pgErrorInfo } from '../db/pg-error.ts';
 
 /** A vector and the model that made it. Vectors are unit length and `dimensions` long. */
 export interface Embedded {
@@ -19,7 +20,6 @@ export interface Embedder {
 }
 
 type Log = { warn(obj: object, msg: string): void; info(obj: object, msg: string): void };
-const errInfo = (err: unknown) => ({ errClass: (err as Error)?.name, code: (err as { code?: string })?.code });
 
 /** How much longer a patient caller may wait than the request path. */
 export const PATIENT_FACTOR = 10;
@@ -54,7 +54,7 @@ function outage(log: Log | undefined, embedder: string) {
     failed(err: unknown) {
       if (down) return;
       down = true;
-      log?.warn({ ...errInfo(err), embedder }, 'embedder unavailable, falling back or skipping the semantic step');
+      log?.warn({ ...pgErrorInfo(err), embedder }, 'embedder unavailable, falling back or skipping the semantic step');
     },
     answered() {
       if (!down) return;

@@ -1,3 +1,4 @@
+import { pgErrorInfo } from '../db/pg-error.ts';
 import { replyWithin } from '../redis.ts';
 import type { CachedCompletion } from '../cache/replay.ts';
 import type { CacheStore } from '../cache/store.ts';
@@ -39,7 +40,7 @@ export interface SemanticLookupOptions {
   crossModel: boolean;
   /** A last user message longer than this is not looked up. */
   maxChars: number;
-  /** Time allowed for the nearest-neighbour query; Postgres cancels it then. */
+  /** How long a lookup waits for the nearest-neighbour query; the store's pool makes Postgres cancel it at the same budget. */
   pgTimeoutMs: number;
   /** Unix ms. Expiry is judged on this clock, the one that wrote `expires_at`. */
   clock?: () => number;
@@ -50,16 +51,13 @@ class Slow extends Error {
   override name = 'SemanticQueryTimeout';
 }
 
-// Drizzle wraps a driver error and keeps the Postgres code on its cause.
-const errInfo = (err: unknown) => ({ errClass: (err as Error)?.name, code: (err as { code?: string })?.code ?? (err as { cause?: { code?: string } })?.cause?.code });
-
 export function createSemanticLookup(opts: SemanticLookupOptions): SemanticLookup {
   const now = opts.clock ?? Date.now;
   let down = false;
   const failed = (err: unknown) => {
     if (down) return;
     down = true;
-    opts.log?.warn({ ...errInfo(err), op: 'nearest' }, 'semantic lookup failed, skipping the semantic step');
+    opts.log?.warn({ ...pgErrorInfo(err), op: 'nearest' }, 'semantic lookup failed, skipping the semantic step');
   };
   const answered = () => {
     if (!down) return;
@@ -81,10 +79,9 @@ export function createSemanticLookup(opts: SemanticLookupOptions): SemanticLooku
             contextHash: split.contextHash,
             embedding: embedded.vector,
             now: new Date(now()),
-            timeoutMs: opts.pgTimeoutMs,
             ...(opts.crossModel ? {} : { embedder: embedded.embedder }),
           }),
-          // Postgres cancels the query at pgTimeoutMs; this only bounds a wait for a connection or a reply that never comes.
+          // Postgres cancels the statement at the pool's timeout (the same budget); this only bounds a wait for a connection or a reply that never comes.
           opts.pgTimeoutMs + 25,
           () => new Slow(),
         );
@@ -103,7 +100,7 @@ export function createSemanticLookup(opts: SemanticLookupOptions): SemanticLooku
       if (found.status === 'miss') {
         // The answer is gone (evicted, expired, replaced by something unreadable): the row points at nothing.
         // Not awaited: the request is a miss either way, and a slow delete must not hold it.
-        void opts.store.remove(near.id).catch((err: unknown) => opts.log?.warn({ ...errInfo(err), op: 'remove' }, 'semantic row could not be removed'));
+        void opts.store.remove(near.id).catch((err: unknown) => opts.log?.warn({ ...pgErrorInfo(err), op: 'remove' }, 'semantic row could not be removed'));
         return { status: 'miss' };
       }
       return { status: 'hit', entry: { entry: found.entry, similarity: Math.min(1, near.similarity) } };
