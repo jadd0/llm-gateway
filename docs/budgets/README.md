@@ -16,10 +16,14 @@ ends, the reservation is replaced by what was really spent. Over the cap the ans
 2. The worst case is `ceil(prompt chars / 4)` prompt tokens plus `max_tokens` (or `RATE_LIMIT_DEFAULT_MAX_TOKENS`
    when the caller set none), priced from the static table in `pricing/prices.ts`, rounded up in micro-USD.
    Unlike the rate limiter, the output is never trimmed to a per-minute size: money is held for the most the call can cost.
-3. `budget.lua` does the check and the hold in one atomic Redis script: `spent + reserved + estimate > cap` refuses,
-   otherwise the estimate is added to `reserved`. Two gateways can never both see "10 cents left" and both spend it.
-   The hold is then **also written to Postgres** (`budget_reservations`). If that write fails the Redis hold is given
-   back and the answer is `503 budget_unavailable`. The response carries `x-budget-remaining-usd` (after this reservation).
+3. The hold is **written to Postgres first** (`budget_reservations`), then `budget.lua` does the check and the hold in
+   one atomic Redis script: `spent + reserved + estimate > cap` refuses, otherwise the estimate is added to `reserved`.
+   Two gateways can never both see "10 cents left" and both spend it. Postgres goes first so a rebuild or a
+   Postgres-path decision running in between already counts the hold; if Redis refuses, the row is deleted before the
+   402 is returned. If the Postgres write fails nothing is held anywhere and the answer is `503 budget_unavailable`.
+   The response carries `x-budget-remaining-usd` (after this reservation). Holds that a rebuild imported for requests
+   not yet decided are decided by arrival order (the script checks everything counted still fits, and drops the
+   request's hold if it doesn't), so exactly the money that fits is admitted.
 4. When the call ends, one shared step (`usage/settle.ts`) tells the rate limiter and the budget the same thing:
    - **used**: the provider reported usage. The budget charges the actual cost.
    - **refund**: the gateway or the provider did no work (non-2xx before any bytes, upstream unreachable). Nothing is charged.
@@ -47,7 +51,9 @@ The lock is held for the check only, never across the provider call. The rate li
 not, because that would uncap spend. If neither store can decide the answer is `503 budget_unavailable`.
 
 Redis is declared down only when a failed call is followed by a failed PING, or after `BUDGET_OUTAGE_FAILURES` (3) failed
-calls in a row: one slow call is retried, it does not move the fleet. The **epoch** is a number in Postgres that is part
+calls in a row: one slow call is retried, it does not move the fleet. The instance goes back to Redis only after the
+epoch bump has committed and it has adopted the new epoch; if the bump fails it is retried and the instance stays on
+Postgres even though Redis answers (the old epoch's balance missed what Postgres decided). The **epoch** is a number in Postgres that is part
 of every Redis balance key. Declaring an outage bumps it with a compare-and-set from the value seen when the failures
 began, so of three gateways that see the same outage one bumps and the other two adopt the new number. After recovery
 the new epoch's key doesn't exist and the next reserve rebuilds it from Postgres in one snapshot: `spent` and the charge
@@ -55,12 +61,29 @@ count from `tenant_spend`, plus every live hold, so the rebuilt balance equals t
 requests. A reservation also lapses on its own (`BUDGET_RESERVATION_TTL_S`, which must exceed `UPSTREAM_TIMEOUT_MS` or
 the gateway won't start), so a gateway that crashes mid-request can't hold money forever.
 
+## Other behaviour worth knowing
+
+- **Only priced models are served.** A model with no price gets `400 model_not_priced`: a cap can't be enforced
+  without a price. Only `mock-*` models are priced now; real prices arrive in PR 6.
+- **A streamed request with a `stream_options` shape the gateway can't rewrite** (not an object) is forwarded untouched,
+  so no usage chunk is requested and it can't be reconciled: it is charged the full estimate.
+- **A total deadline per upstream call (`UPSTREAM_MAX_DURATION_MS`, default 240 s).** `UPSTREAM_TIMEOUT_MS` only limits
+  silence, so a slow stream that keeps trickling could outlive the hold that covers it, and its money would be given to
+  other requests. A call past the deadline is cut: non-streamed answers `504 upstream_max_duration`, streamed ends with an
+  OpenAI-shaped error event; the estimate stays charged (the provider may have worked). The gateway refuses to start
+  unless `BUDGET_RESERVATION_TTL_S` x 1000 exceeds `UPSTREAM_MAX_DURATION_MS` + 30 s, so a hold always outlives its call.
+- **A client that leaves before the request is sent upstream gets everything back** (limiter tokens and budget);
+  after it was sent the estimate stays, because the provider may bill.
+- **Lapsed holds** are deleted from Postgres by a bounded sweep (1000 rows every `BUDGET_SWEEP_INTERVAL_S`, 60 s, per
+  instance) as well as on the Postgres path; the holds table also goes with its tenant (`on delete cascade`).
+
 ## Known limits (documented, not closed here)
 
-- **R6, partial outages.** With some instances on Redis and some on Postgres, the Postgres-path instance sees every
-  hold; Redis-path instances see the Postgres-path holds only when they next rebuild, which happens at the next
-  epoch refresh (`BUDGET_EPOCH_REFRESH_S`). The verifier measured 1.92x the cap with Redis-only holds; the bound with
-  Postgres holds has not been measured yet and is to be measured in PR 12 with 3 instances.
+- **R6, partial outages.** An instance that didn't see the outage keeps using the old epoch's balance for up to
+  `BUDGET_EPOCH_REFRESH_S` (it also learns the epoch from every settle). The Postgres-path instance sees every hold;
+  Redis-path instances see the Postgres-path holds only after they move to the new epoch and rebuild. The verifier
+  measured 1.92x the cap with Redis-only holds and 1.02x with Postgres holds; PR 12 measures the bound properly with
+  3 instances.
 - **R7, settled-spend writes are in-process.** The Postgres transaction that removes the hold and records the charge
   runs after the response, with 3 retries. If it still fails, or the process dies before it runs, nothing is written:
   the hold stays in Redis and Postgres until its TTL and then the whole charge is lost (the tenant is under-billed,

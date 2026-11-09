@@ -17,7 +17,7 @@ migration: next free number at generate time. Residuals owned by this PR: none.
 | path | change |
 |---|---|
 | `packages/gateway/src/db/schema.ts` | `tenants.monthly_budget_micros`; new tables `tenant_spend` (with `charges`), `spend_ledger`, `budget_reservations` (every hold), `budget_epoch` |
-| `packages/gateway/drizzle/0002_outstanding_bedlam.sql`, `packages/gateway/drizzle/meta/0002_snapshot.json`, `packages/gateway/drizzle/meta/_journal.json` | generated migration |
+| `packages/gateway/drizzle/0002_new_stellaris.sql`, `packages/gateway/drizzle/meta/0002_snapshot.json`, `packages/gateway/drizzle/meta/_journal.json` | generated migration |
 | `packages/gateway/src/pricing/prices.ts` | **new**. Price table (micro-USD per 1M input / output tokens) and `costMicros(model, in, out)` |
 | `packages/gateway/src/pricing/prices.test.ts` | **new** |
 | `packages/gateway/src/budget/budget.lua` | **new**. `reserve`, `settle` and `init` scripts (see Invariants) |
@@ -35,7 +35,7 @@ migration: next free number at generate time. Residuals owned by this PR: none.
 | `packages/gateway/src/app.ts` | register budget plugin after rate limit |
 | `packages/gateway/src/usage/settle.ts`, `packages/gateway/src/usage/settle.test.ts` | **new**. The one shared settle step (used / refund / keep) feeding the rate limiter and the budget |
 | `packages/gateway/src/usage/estimate.ts`, `packages/gateway/src/usage/estimate.test.ts` | `estimateWorstCase`: prompt plus max_tokens or the default, no tpm clamp |
-| `packages/gateway/src/routes/chat.ts` | settles through the shared step; `keep` on every exit |
+| `packages/gateway/src/routes/chat.ts`, `packages/gateway/src/routes/chat.test.ts` | settles through the shared step; `keep` on every exit; a total deadline per upstream call; refund when the client left before dispatch |
 | `packages/gateway/src/budget/period.ts`, `packages/gateway/src/budget/period.test.ts` | **new**. UTC month helpers |
 | `packages/gateway/src/test-env.ts` | budgets off by default in tests |
 | `packages/gateway/src/config.test.ts` | **new**. Budget settings: the TTL-versus-upstream-timeout check, defaults |
@@ -72,7 +72,7 @@ create table spend_ledger (
   created_at timestamptz not null default now()
 );
 create table budget_reservations (                  -- every hold, whichever store decided it
-  id uuid primary key, tenant_id uuid not null, period char(7) not null,
+  id uuid primary key, tenant_id uuid not null references tenants(id) on delete cascade, period char(7) not null,
   amount_micros bigint not null, expires_at timestamptz not null
 );
 create index budget_reservations_tenant_period_idx on budget_reservations (tenant_id, period);
@@ -91,12 +91,18 @@ create table budget_epoch (id int primary key check (id = 1), epoch bigint not n
   from `estimateWorstCase` (never clamped to a key's tpm). Output can't exceed `max_tokens`; a prompt
   estimate below the truth is the one overshoot source, inherent to estimating before the call.
 - **Reserve, Redis path** (the normal one). Two steps, in this order:
-  1. `budget.lua` `reserve`, atomic: purge expired holds; `REBUILD` if the balance is missing; refuse if
-     `spent + reserved + estimate > cap`; else add the hold. Key `bud:{<tenantId>}:<period>:<epoch>`.
-  2. INSERT the hold into `budget_reservations` (id = request id, tenant, period, amount,
-     `expires_at = now() + BUDGET_RESERVATION_TTL_S`). If that insert fails the Redis hold is released and the
+  1. INSERT the hold into `budget_reservations` (id = request id, tenant, period, amount,
+     `expires_at = now() + BUDGET_RESERVATION_TTL_S`). If that insert fails nothing is held anywhere and the
      request is refused with 503 `budget_unavailable` (fail closed, D-023).
-  Every hold is therefore in Postgres whichever store decided it.
+  2. `budget.lua` `reserve`, atomic: purge expired holds; `REBUILD` if the balance is missing; if the id is
+     already in the balance (a retry, or a hold a rebuild imported for a request not yet decided) admit it
+     when `spent + reserved <= cap`, else drop its hold and refuse; otherwise refuse if
+     `spent + reserved + estimate > cap`, else add the hold. Key `bud:{<tenantId>}:<period>:<epoch>`.
+     If Redis refuses, the Postgres row is deleted before the 402 is returned; if Redis fails, the request
+     is decided on the Postgres path with its row replaced (not counted twice).
+  Postgres goes first so a snapshot or a Postgres-path decision running between the two steps counts the hold.
+  Every hold is therefore in Postgres whichever store decided it. A Redis reserve that times out but still
+  runs leaves a hold nothing else knows of; the request's settle releases it by id.
 - **Reserve, Postgres path** (Redis declared down): one transaction locks the `tenant_spend` row (upserted
   first), deletes this tenant's lapsed holds, sums the unexpired `budget_reservations` (Redis-path holds
   included), checks the cap and inserts the hold. The lock is held for the check only, never across the call.
@@ -112,6 +118,9 @@ create table budget_epoch (id int primary key check (id = 1), epoch bigint not n
      (returning both values, taken under the row lock); read the budget epoch. Retried 3x with backoff. If it
      still fails, nothing was written: the hold stays (in both stores) until its TTL, then the charge is lost
      (residual R7). A refund deletes the hold and writes no ledger row.
+  Lost reply: if the transaction committed but its answer was lost, the retry finds the ledger row and returns
+  the CURRENT `charges` and `spent_micros` of the tenant and period (not zeros), so step 2 still runs with
+  numbers that include this charge.
   2. The Redis correction on the **current** epoch's key (the epoch read in step 1, adopted if newer than the
      local one, whatever epoch the request reserved under): release the hold if its id is present; if
      `charges > ver`, set `spent = spentAfter` and `ver = charges`.
@@ -129,18 +138,31 @@ create table budget_epoch (id int primary key check (id = 1), epoch bigint not n
   and a PING then fails too, or after `BUDGET_OUTAGE_FAILURES` (default 3) consecutive failed calls; any
   success resets the count. Until Redis is declared down a failed call is retried (settle) or decided on
   Postgres for that request alone (reserve); the instance stays on the Redis path.
+- **Leaving the Postgres path.** An instance leaves it only when its epoch bump has committed (or another
+  instance's bump was adopted) AND a Redis call has then succeeded. While the bump is pending or failing the
+  instance retries it on each reserve and decides on Postgres even if Redis answers; a Redis success during
+  that time does not bring it back.
 - **Epoch.** The epoch is part of every Redis balance key. Declaring an outage bumps it with
   `UPDATE budget_epoch SET epoch = epoch + 1 WHERE epoch = <epoch seen when the failures began>`: of every
   instance that saw the same outage exactly one bumps and the rest adopt the new value (also adopted from the
   epoch read in each settle and every `BUDGET_EPOCH_REFRESH_S`). No decision is taken until the bump has
-  landed. After recovery the first reserve at the new epoch finds no balance and rebuilds it from Postgres.
+  landed, and a bump that failed is retried. After recovery the first reserve at the new epoch finds no balance and rebuilds it from Postgres.
   Old-epoch keys expire.
 - **Recovery.** While on the Postgres path an instance tries Redis again at most once a second; a success
   returns it to the Redis path.
 - **Period** is the UTC calendar month at reserve time; settle charges the reserve's period. Redis budget
   keys expire 35 days after period start.
-- **Startup check:** `BUDGET_RESERVATION_TTL_S * 1000` must exceed `UPSTREAM_TIMEOUT_MS` or the config fails
-  to load, naming both settings.
+- **A hold outlives its call.** `UPSTREAM_TIMEOUT_MS` limits silence, not total time, so every upstream call
+  has a total deadline, `UPSTREAM_MAX_DURATION_MS` (default 240000), that aborts it: non-streamed answers 504
+  `upstream_max_duration`; streamed ends with an OpenAI-shaped error event (after a blank line that closes any
+  interrupted event) and the upstream is aborted once the response has finished. The estimate stays charged.
+  Startup check: `BUDGET_RESERVATION_TTL_S * 1000 > UPSTREAM_MAX_DURATION_MS + 30000` or the config fails to
+  load, naming both settings.
+- **A client that leaves before dispatch** (its socket is gone before anything is sent upstream) is refunded in
+  full for both the limiter and the budget; after dispatch the estimate is kept.
+- **Lapsed holds** are removed from `budget_reservations` by a bounded delete (`LIMIT 1000`, every
+  `BUDGET_SWEEP_INTERVAL_S`, default 60, per instance) and inside the Postgres-path reserve; Redis forgets its
+  own. The table's `tenant_id` references `tenants` with `on delete cascade`.
 - **Unknown model (no price):** 400 `{error:{type:"invalid_request_error",code:"model_not_priced"}}`,
   nothing reserved; a budget can't be enforced without a price.
 - **402 body:** `{error:{type:"insufficient_quota",code:"budget_exhausted",message:"..."}}`; **503**
@@ -164,6 +186,7 @@ create table budget_epoch (id int primary key check (id = 1), epoch bigint not n
 - `expired reservation is released without a settle`
 - `missing balance triggers rebuild from Postgres; two concurrent rebuilds don't double it`
 - `a rebuilt balance counts the live holds, releases them on settle, and does not count a charge it already holds twice`
+- `holds a rebuild imported for requests not yet decided are decided by arrival: exactly the money that fits is admitted`
 - `period rolls over`
 
 `budget/pg-ledger.test.ts` (worktree Postgres):
@@ -183,14 +206,22 @@ create table budget_epoch (id int primary key check (id = 1), epoch bigint not n
 - `every settle lands in spend_ledger and tenant_spend exactly once`; retries; give-up logging
 - `a failed Postgres hold insert refuses the request and releases the Redis hold`
 - `reserve reports unavailable when neither Redis nor Postgres can decide`
+- `while the epoch bump is failing or pending, reserves stay on Postgres even though Redis answers; the first one after the bump rebuilds the new key`
+- `a settle whose first reply was lost still corrects the live balance when it is retried`
+- `the Postgres hold is written before Redis decides: a snapshot taken in between includes it`; `a hold Redis refuses is removed from Postgres before the refusal is returned`; `a request decided on Postgres after its hold was written is counted once`
+- `a Redis reserve that times out but still runs leaves no phantom hold once the request settles`
+- `lapsed holds are deleted from Postgres while Redis is healthy, a bounded number at a time`; `the sweep runs on its timer`
 
 `budget/plugin.test.ts`: 402 body and no upstream call; `model_not_priced`; `aborted stream is charged its full
 reservation and marked estimated`; `x-budget-remaining-usd`; default allowance not clamped; used / refund / keep
 match the rate limiter; `503 budget_unavailable when the Postgres copy of a hold cannot be written`; exactly the
-requests that fit are admitted under a 30-request flood.
+requests that fit are admitted under a 30-request flood; `a streamed call past the maximum duration is cut with an
+error event and its hold is settled at the estimate`; `a non-streamed call past the maximum duration answers 504 and
+keeps the estimate`; `a client that leaves before the request is dispatched upstream gets everything back`; `a
+client that leaves after the request was dispatched is charged the estimate`.
 
 `pricing/prices.test.ts`: `cost rounds up in micro-USD`. `cli/keys.test.ts`: `set-budget then show-spend`.
-`config.test.ts`: `a reservation TTL that does not outlast the upstream timeout stops the gateway starting`; defaults.
+`config.test.ts`: `a reservation TTL that does not outlast the longest upstream call plus 30 s stops the gateway starting`; defaults.
 
 ## Acceptance proof
 
@@ -238,8 +269,8 @@ requests that fit are admitted under a 30-request flood.
 - **Prices:** mock models only (`mock-*`, a clearly labelled fictitious price). Real model prices are added in
   PR 6, from the providers' pricing pages with the date recorded.
 - **Config rows:** `BUDGET_DEFAULT_MONTHLY_USD=10`, `BUDGET_RESERVATION_TTL_S=300` (must exceed
-  `UPSTREAM_TIMEOUT_MS`), `BUDGET_REDIS_TIMEOUT_MS=50`, `BUDGET_EPOCH_REFRESH_S=5`, `BUDGET_OUTAGE_FAILURES=3`,
-  `BUDGET_ENABLED=true`.
+  `UPSTREAM_MAX_DURATION_MS` + 30 s), `BUDGET_REDIS_TIMEOUT_MS=50`, `BUDGET_EPOCH_REFRESH_S=5`, `BUDGET_OUTAGE_FAILURES=3`,
+  `BUDGET_SWEEP_INTERVAL_S=60`, `BUDGET_ENABLED=true`; and `UPSTREAM_MAX_DURATION_MS=240000` (a gateway-wide setting).
 - **Docs** (R2): interview Qs incl. "why reserve the worst case?", "why not just check balance > 0?",
   "why integer micro-dollars?", "what happens if Redis dies mid-month?", "what's the epoch for?",
   "where can the cap still be broken, and by how much?".
@@ -254,3 +285,11 @@ requests that fit are admitted under a 30-request flood.
 - A request refused by the budget (402, 400 model_not_priced, 503) returns the tokens the limiter had taken.
 - `testConfig()` turns budgets off by default; the budget tests turn them on. Tests that read a tenant's
   spend read Postgres, because another test file may move the shared epoch while they run.
+- Review-fix pass: stay on Postgres until the epoch bump has landed (retried if it fails); the Postgres hold is written
+  before Redis decides (a rebuild then imports undecided holds, which the reserve script resolves by arrival order);
+  a settle retried after a lost reply carries the current totals; total call deadline `UPSTREAM_MAX_DURATION_MS`;
+  refund when the client left before dispatch; bounded sweep of lapsed holds and an FK from holds to tenants
+  (migration 0002 regenerated, main did not have it yet).
+- The phantom hold the verifier saw (Redis `reserved` at exactly one estimate, no Postgres row) is reproduced by a
+  Redis reserve that times out but still runs; it is released when the request settles (by id). The old
+  ordering and the old early return to Redis could also leave one.
