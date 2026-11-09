@@ -77,6 +77,44 @@ describe('keys CLI', { timeout: 30_000 }, () => {
     expect(listed.stdout).not.toContain(key);
   });
 
+  it('create-key --rpm --tpm stores the limits; set-limits changes them, in Postgres and in the cache', async () => {
+    const tenant = await newTenant();
+    const key = (await cli('create-key', tenant, '--rpm', '100', '--tpm', '50000')).stdout.trim();
+    const hash = hashKey(config.apiKeyPepper, key);
+    const row = async () => (await handle.db.select().from(apiKeys).where(eq(apiKeys.keyHash, hash)))[0]!;
+    expect(await row()).toMatchObject({ rpmLimit: 100, tpmLimit: 50_000 });
+
+    // The gateway has the key cached with the old limits.
+    const store = keyStoreFromConfig(config, handle.db, redis);
+    expect(await store.lookup(hash)).toMatchObject({ rpmLimit: 100, tpmLimit: 50_000 });
+
+    const out = await cli('set-limits', key.slice(0, 12), '--rpm', '5');
+    expect(out.stdout).toContain('rpm 5, tpm 50000');
+    expect(await row()).toMatchObject({ rpmLimit: 5, tpmLimit: 50_000 }); // tpm untouched
+    expect(await store.lookup(hash)).toMatchObject({ rpmLimit: 5, tpmLimit: 50_000 });
+
+    await cli('set-limits', key.slice(0, 12), '--tpm', 'default');
+    expect(await row()).toMatchObject({ rpmLimit: 5, tpmLimit: null });
+    expect(await store.lookup(hash)).toMatchObject({ rpmLimit: 5, tpmLimit: null });
+  });
+
+  it('limits that are not whole numbers are refused, and so is a revoked key', async () => {
+    const tenant = await newTenant();
+    const key = (await cli('create-key', tenant)).stdout.trim();
+    for (const bad of ['0', '-1', '1.5', 'abc', '']) {
+      await expect(cli('set-limits', key.slice(0, 12), `--rpm=${bad}`)).rejects.toMatchObject({
+        stderr: expect.stringContaining('--rpm must be a whole number'),
+      });
+    }
+    await expect(cli('set-limits', key.slice(0, 12))).rejects.toMatchObject({
+      stderr: expect.stringContaining('give --rpm and/or --tpm'),
+    });
+    await cli('revoke-key', key.slice(0, 12));
+    await expect(cli('set-limits', key.slice(0, 12), '--rpm', '5')).rejects.toMatchObject({
+      stderr: expect.stringContaining('is revoked'),
+    });
+  });
+
   it('revoke-key by prefix revokes exactly one key', async () => {
     const tenant = await newTenant();
     const a = (await cli('create-key', tenant)).stdout.trim();
