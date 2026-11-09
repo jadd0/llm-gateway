@@ -33,7 +33,7 @@ const caller = (
   tpmLimit: limits.tpm ?? null,
   monthlyBudgetMicros: limits.budget ?? null,
   cacheShared: false,
-  semanticCache: true,
+  semanticCache: false,
 });
 
 const seed = async () => {
@@ -272,24 +272,25 @@ describe('key store', () => {
     expect((await store.lookup(s.hash))!.cacheShared).toBe(false);
     const { cacheShared: _dropped, ...old } = JSON.parse((await redis.get(key))!);
     await redis.set(key, JSON.stringify(old), 'EX', 60);
-    expect(await store.setCacheShared(s.tenantId, true)).toEqual({ updated: true, cached: true });
+    expect(await store.setTenantFlag(s.tenantId, 'cacheShared', true)).toEqual({ updated: true, cached: true });
     await redis.set(key, JSON.stringify(old), 'EX', 60); // an old-format entry again
     expect((await store.lookup(s.hash))!.cacheShared).toBe(true);
     expect(await redis.get(key)).toContain('"cacheShared":true');
-    expect(await store.setCacheShared('00000000-0000-4000-8000-000000000000', true)).toEqual({ updated: false, cached: false });
+    expect(await store.setTenantFlag('00000000-0000-4000-8000-000000000000', 'cacheShared', true)).toEqual({ updated: false, cached: false });
   });
 
   it('a cached entry from before the semantic switch is a miss that reads the real switch', async () => {
     const s = await seed();
     const key = `${config.redisKeyPrefix}apikey:${s.hash}`;
     const store = storeFor(redis);
-    expect((await store.lookup(s.hash))!.semanticCache).toBe(true);
-    const { semanticCache: _dropped, ...old } = JSON.parse((await redis.get(key))!);
-    expect(await store.setSemanticCache(s.tenantId, false)).toEqual({ updated: true, cached: true });
-    await redis.set(key, JSON.stringify(old), 'EX', 60); // an old-format entry again
+    // A new tenant has not opted in.
     expect((await store.lookup(s.hash))!.semanticCache).toBe(false);
-    expect(await redis.get(key)).toContain('"semanticCache":false');
-    expect(await store.setSemanticCache('00000000-0000-4000-8000-000000000000', true)).toEqual({ updated: false, cached: false });
+    const { semanticCache: _dropped, ...old } = JSON.parse((await redis.get(key))!);
+    expect(await store.setTenantFlag(s.tenantId, 'semanticCache', true)).toEqual({ updated: true, cached: true });
+    await redis.set(key, JSON.stringify(old), 'EX', 60); // an old-format entry again
+    expect((await store.lookup(s.hash))!.semanticCache).toBe(true);
+    expect(await redis.get(key)).toContain('"semanticCache":true');
+    expect(await store.setTenantFlag('00000000-0000-4000-8000-000000000000', 'semanticCache', true)).toEqual({ updated: false, cached: false });
   });
 
   it('a tombstone written after a corrupt value was read survives the fill', async () => {

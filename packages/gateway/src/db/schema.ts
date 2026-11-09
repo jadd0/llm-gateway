@@ -1,5 +1,6 @@
-import { bigint, bigserial, boolean, char, check, index, integer, pgTable, primaryKey, text, timestamp, unique, uuid, vector } from 'drizzle-orm/pg-core';
+import { bigint, bigserial, boolean, char, check, index, integer, jsonb, pgTable, primaryKey, text, timestamp, unique, uuid, vector } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
+import type { GuardSignature } from '../semantic/guards.ts';
 
 export const tenants = pgTable('tenants', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -10,8 +11,9 @@ export const tenants = pgTable('tenants', {
   monthlyBudgetMicros: bigint('monthly_budget_micros', { mode: 'number' }),
   // True when the tenant reads and writes the shared response-cache pool instead of its own (keys set-cache-sharing).
   cacheShared: boolean('cache_shared').notNull().default(false),
-  // False when the tenant wants exact-match caching only (keys set-semantic-cache).
-  semanticCache: boolean('semantic_cache').notNull().default(true),
+  // Off until the tenant opts in (keys set-semantic-cache): a similar prompt is not the same prompt, so the
+  // default is exact-match caching only.
+  semanticCache: boolean('semantic_cache').notNull().default(false),
 });
 
 export const apiKeys = pgTable(
@@ -129,6 +131,9 @@ export const semanticCache = pgTable(
     embedding: vector('embedding', { dimensions: 1024 }).notNull(),
     // Which model made the vector: 'voyage-4-lite' or 'voyage-4-nano'.
     embedder: text('embedder').notNull(),
+    // What the guards compare (semantic/guards.ts): truncated hashes of the prompt's numbers, quoted
+    // strings, names and content words, and its negation count. The prompt itself is never stored here.
+    guardSig: jsonb('guard_sig').$type<GuardSignature>().notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   },

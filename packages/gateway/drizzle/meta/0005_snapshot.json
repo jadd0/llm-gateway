@@ -1,5 +1,5 @@
 {
-  "id": "d8e67ab2-fcd2-4770-91e8-65f1b94bb51a",
+  "id": "3312d6d9-858e-4839-886a-15805555375a",
   "prevId": "ba9a6a10-3c60-4342-b5df-4c15298c9483",
   "version": "7",
   "dialect": "postgresql",
@@ -272,6 +272,12 @@
         "embedder": {
           "name": "embedder",
           "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "guard_sig": {
+          "name": "guard_sig",
+          "type": "jsonb",
           "primaryKey": false,
           "notNull": true
         },
@@ -591,7 +597,7 @@
           "type": "boolean",
           "primaryKey": false,
           "notNull": true,
-          "default": true
+          "default": false
         }
       },
       "indexes": {},

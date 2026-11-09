@@ -78,13 +78,14 @@ export interface KeyStore {
    */
   setBudget(tenantId: string, micros: number | null): Promise<{ updated: boolean; cached: boolean }>;
   /**
-   * Writes the tenant's cache-sharing flag in Postgres, then overwrites the cached entry of each of its
+   * Writes one of the tenant's on/off flags in Postgres, then overwrites the cached entry of each of its
    * active keys. `updated` and `cached` mean what they do for `setBudget`.
    */
-  setCacheShared(tenantId: string, shared: boolean): Promise<{ updated: boolean; cached: boolean }>;
-  /** Writes the tenant's semantic-cache switch the same way. */
-  setSemanticCache(tenantId: string, on: boolean): Promise<{ updated: boolean; cached: boolean }>;
+  setTenantFlag(tenantId: string, flag: TenantFlag, value: boolean): Promise<{ updated: boolean; cached: boolean }>;
 }
+
+/** The tenant columns that are plain on/off switches. */
+export type TenantFlag = 'cacheShared' | 'semanticCache';
 
 export interface KeyStoreOptions {
   db: Db['db'];
@@ -341,20 +342,10 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
       return { updated: true, cached: await refreshTenantKeys(tenantId) };
     },
 
-    async setCacheShared(tenantId, shared) {
+    async setTenantFlag(tenantId, flag, value) {
       const updated = await db
         .update(tenants)
-        .set({ cacheShared: shared })
-        .where(eq(tenants.id, tenantId))
-        .returning({ id: tenants.id });
-      if (updated.length === 0) return { updated: false, cached: false };
-      return { updated: true, cached: await refreshTenantKeys(tenantId) };
-    },
-
-    async setSemanticCache(tenantId, on) {
-      const updated = await db
-        .update(tenants)
-        .set({ semanticCache: on })
+        .set({ [flag]: value })
         .where(eq(tenants.id, tenantId))
         .returning({ id: tenants.id });
       if (updated.length === 0) return { updated: false, cached: false };
