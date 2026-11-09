@@ -51,6 +51,7 @@ headers), both closed here.
 | `packages/gateway/src/test-env.ts` | test defaults: one attempt per model, breaker that does not open; old `UPSTREAM_TIMEOUT_MS` blanked |
 | `packages/gateway/src/upstream.test.ts` | **new**. Separate timeouts |
 | `vitest.config.ts` | also collects `bench/*.test.ts` |
+| `packages/gateway/src/budget/plugin.test.ts`, `packages/gateway/src/routes/chat-providers.test.ts` | an error answer whose body hangs is now cut at the deadline with a 504; R13 header assertions |
 
 ## Schema
 
