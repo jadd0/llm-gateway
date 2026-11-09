@@ -45,6 +45,12 @@ headers), both closed here.
 | `docs/README.md`, `docs/architecture/*`, `docs/gateway/README.md`, `docs/budgets/README.md`, `docs/providers/README.md`, `docs/mock-provider/README.md` | resilience built; request path updated |
 | `docs/diagrams/flows.md` | register the two new flows |
 | `.product/RESIDUALS.md`, `.product/DECISIONS.md` | close R2, R13; D-027–D-030 |
+| `.product/FOUNDER-TODO.md` | ratify D-031 |
+| `docs/budgets/budget-flow.html`, `docs/gateway/chat-passthrough.html`, `docs/providers/providers.html`, `docs/rate-limiter/token-bucket.html` | redrawn: their code globs changed (attempt loop, settle at serving model) |
+| `packages/gateway/src/budget/budget.ts` | a charge may name the serving model for the ledger row |
+| `packages/gateway/src/test-env.ts` | test defaults: one attempt per model, breaker that does not open; old `UPSTREAM_TIMEOUT_MS` blanked |
+| `packages/gateway/src/upstream.test.ts` | **new**. Separate timeouts |
+| `vitest.config.ts` | also collects `bench/*.test.ts` |
 
 ## Schema
 
