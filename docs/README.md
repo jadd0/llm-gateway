@@ -12,6 +12,7 @@ One folder per part of the system. Each holds a `README.md` and a diagram drawn 
 - [budgets/](budgets/README.md): monthly spend caps per tenant, reserve-then-settle in Redis, Postgres fallback, the epoch.
 - [cache/](cache/README.md): exact-match response cache in Redis, tenant-scoped keys, single-flight, streamed replay, zero-cost hits.
 - [request-log/](request-log/README.md): one row per request through a Redis stream and a log worker, spend carried by the same queue, nothing lost on shutdown.
+- [dashboard/](dashboard/README.md): a read-only admin page over pre-aggregated rollups the log worker writes with each batch; percentiles from histograms.
 - [benchmarks/](benchmarks/README.md): how overhead is measured, and why the rig runs natively.
 
 Flow registry for the diagram check: [diagrams/flows.md](diagrams/flows.md). Numbers live in [../BENCHMARKS.md](../BENCHMARKS.md).

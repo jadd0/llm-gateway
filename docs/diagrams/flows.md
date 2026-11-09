@@ -27,3 +27,4 @@ lines verbatim; for any plan in the branch's diff, a flow line missing from this
 - Chat completion attempts (retry, breaker, fallback) → `docs/resilience/request-attempts.html` → `packages/gateway/src/{routes/chat.ts,resilience/*.ts}`
 - Breaker state → `docs/resilience/breaker.html` → `packages/gateway/src/resilience/{breaker.ts,breaker.lua}`
 - Exact-match cache lookup, single-flight and fill → `docs/cache/cache-flow.html` → `packages/gateway/src/{cache/*.ts,routes/chat.ts}`
+- Rollups: log worker batch → rollup tables → dashboard → `docs/dashboard/rollups.html` → `packages/{log-worker/src/{rollup,histogram}.ts,dashboard/lib/queries.ts}`

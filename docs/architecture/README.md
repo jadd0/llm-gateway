@@ -26,11 +26,12 @@ hop (auth, limits, budgets, resilience, caching, logging).
 - **Response cache** (`packages/gateway/src/cache`): identical `temperature: 0` requests are answered from Redis, scoped per
   tenant, with one upstream call per burst of identical misses. See [../cache/README.md](../cache/README.md).
 - **Request log** (`packages/gateway/src/requestlog`, `packages/log-worker`): every request becomes one entry in a Redis stream, and settled spend travels in the same stream; the log worker writes both to Postgres in batches. See [../request-log/README.md](../request-log/README.md).
+- **Dashboard** (`packages/dashboard`): a Next.js admin page showing latency percentiles, spend by tenant, cache hit rate and error rate from rollups the log worker writes in each batch's transaction, read through a read-only Postgres role. See [../dashboard/README.md](../dashboard/README.md).
 - **Resilience** (`packages/gateway/src/resilience`): timeouts, retries, a Redis-shared circuit breaker and fallback chains. See [../resilience/README.md](../resilience/README.md).
 
 ## Planned (marked dashed in the diagram)
 
-The semantic cache and the dashboard.
+The semantic cache.
 
 ## Request flow today
 
