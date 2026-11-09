@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { like, sql } from 'drizzle-orm';
-import { afterAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, describe, expect, it } from 'vitest';
 import { semanticCache } from '../db/schema.ts';
 import { testConfig } from '../test-env.ts';
 import { guardSignature } from './guards.ts';
@@ -21,10 +21,15 @@ const open = (over: Partial<Parameters<typeof createSemanticPools>[0]> = {}) => 
 const rowOf = (key: string, scope = 'p') => ({ scope: `${run}-${scope}`, contextHash: ctx, exactKey: `k-${key}`, embedding: angle(10), embedder: 'voyage-4-lite', guardSig: guardSignature('q'), expiresAt: new Date(NOW.getTime() + 3600_000) });
 const q = (scope = 'p') => ({ scope: `${run}-${scope}`, contextHash: ctx, embedding: angle(0), now: NOW });
 
+// Pools are closed after each test: the suite runs beside many others that share one Postgres connection limit.
+afterEach(async () => {
+  for (const m of made.splice(0)) await m.close();
+});
 afterAll(async () => {
-  const pools = open();
+  const pools = open({ lookupPool: 1, writePool: 1 });
   await pools.write.db.delete(semanticCache).where(like(semanticCache.scope, `${run}%`));
-  for (const m of made) await m.close();
+  await pools.close();
+  made.length = 0;
 });
 
 describe('semantic pools', () => {

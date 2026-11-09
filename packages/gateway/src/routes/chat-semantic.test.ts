@@ -46,7 +46,6 @@ const appConfig = () =>
     CACHE_REDIS_TIMEOUT_MS: '2000',
     CACHE_REPLAY_CHUNK_CHARS: '4',
   });
-const others: FastifyInstance[] = [];
 
 beforeAll(async () => {
   upstream = http.createServer((req, res) => {
@@ -81,7 +80,6 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  for (const o of others) await o.close();
   await app.close();
   upstream.closeAllConnections();
   await new Promise((resolve) => upstream.close(resolve));
@@ -476,7 +474,6 @@ describe('semantic cache on POST /v1/chat/completions', () => {
     await seed(t, req(a));
     const stub2 = stubEmbedder(table);
     const app2 = buildApp(appConfig(), { rateLimitClock: () => T0, cacheClock: () => T0, semanticEmbedder: stub2.embedder });
-    others.push(app2);
     await app2.listen({ port: 0, host: '127.0.0.1' });
     const gw2 = `http://127.0.0.1:${(app2.server.address() as AddressInfo).port}`;
     const post2 = (body: object) =>
@@ -490,6 +487,7 @@ describe('semantic cache on POST /v1/chat/completions', () => {
     await new Promise((r) => setTimeout(r, 150));
     stub.release();
     const results = await Promise.all([leader, ...followers]);
+    await app2.close();
     expect(results.map((r) => r.headers.get('x-gateway-cache'))).toEqual(['semantic-hit', 'semantic-hit', 'semantic-hit']);
     expect(calls - before).toBe(0);
     // They were handed the leader's answer: neither asked an embedder.
