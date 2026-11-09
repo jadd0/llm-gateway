@@ -52,14 +52,17 @@ afterAll(async () => {
 const newTenant = async () => {
   const t = await createTenant(handle.db, `t-${randomUUID().slice(0, 8)}`);
   tenantIds.push(t.id);
+  lastTenant = t.id;
   return t.id;
 };
+// The hold sweep is scoped to the test's newest tenant: other files hold lapsed holds on purpose.
+let lastTenant: string = randomUUID();
 let groupN = 0;
 const workerFor = (extra: Partial<WorkerOptions> = {}, group = `g${++groupN}-${randomUUID().slice(0, 6)}`): Worker & { group: string } =>
   Object.assign(
     createWorker({
       db: handle.db, redis, keyPrefix: kp, group, consumer: extra.consumer ?? 'w1', batchSize: 500, batchWaitMs: 50,
-      claimIdleMs: 3_600_000, maxDeliveries: 5, sweepS: 3600, log: quiet, ...extra,
+      claimIdleMs: 3_600_000, maxDeliveries: 5, sweepS: 3600, sweepTenantId: lastTenant, log: quiet, ...extra,
     }),
     { group },
   );

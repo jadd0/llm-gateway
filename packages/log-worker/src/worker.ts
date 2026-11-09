@@ -29,6 +29,8 @@ export interface WorkerOptions {
   sweepS: number;
   /** A hold is charged only this long after it lapsed (seconds). */
   sweepGraceS?: number;
+  /** Tests only: limits the hold sweep to one tenant, so a test's worker never charges another file's holds. */
+  sweepTenantId?: string;
   /** A Redis hold with no Postgres row is dropped once this far past its expiry (seconds). */
   orphanGraceS?: number;
   /** An hour of rollups is folded into the hour table once it ended this long ago (minutes). Set both to fold and trim on the sweep timer. */
@@ -160,7 +162,7 @@ export function createWorker(o: WorkerOptions): Worker {
         if (await group.spendBusy()) {
           o.log.info({}, 'hold sweep skipped: spend entries are waiting to be applied');
         } else {
-          charged = await chargeExpiredHolds(o.db, 1000, (o.sweepGraceS ?? 0) * 1000);
+          charged = await chargeExpiredHolds(o.db, 1000, (o.sweepGraceS ?? 0) * 1000, o.sweepTenantId);
           result.swept = charged.length;
           if (charged.length > 0) o.log.warn({ holds: charged.length }, 'expired holds charged at their estimate');
         }

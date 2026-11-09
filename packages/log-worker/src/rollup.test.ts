@@ -319,7 +319,7 @@ describe('worker', () => {
       const quiet = { info() {}, warn() {}, error() {} };
       const w = createWorker({
         db, redis, keyPrefix: prefix, group: 'g', consumer: 'c', batchSize: 500, batchWaitMs: 50, claimIdleMs: 3_600_000, maxDeliveries: 5,
-        sweepS: 0, sweepGraceS: 0, rollupFoldAfterMin: 90, rollupMinuteRetentionH: 48, now: () => NOW, epoch: async () => 1, log: quiet,
+        sweepS: 0, sweepGraceS: 0, sweepTenantId: randomUUID(), rollupFoldAfterMin: 90, rollupMinuteRetentionH: 48, now: () => NOW, epoch: async () => 1, log: quiet,
       });
       await w.runOnce();
       await w.runOnce(); // the sweep of the first pass ran before this batch was a minute old; the second sees it all written
