@@ -10,22 +10,25 @@ only; there is no user login and no admin UI.
 |---|---|
 | `db/schema.ts` | `tenants` and `api_keys` tables (Drizzle); SQL migration in `packages/gateway/drizzle/` |
 | `auth/keys.ts` | Generate a key (`gw_` + 32 random bytes, base64url), derive its 12-char display prefix, HMAC-SHA256 it |
-| `auth/key-store.ts` | `lookup(hash)`: Redis, then Postgres on a miss, then fill the cache. `revoke(hash)` |
-| `auth/ip-limit.ts` | Per-address bucket of failed authentications, checked before the lookup |
-| `auth/plugin.ts` | `onRequest` hook: address check, parse the bearer key, look it up, 401 or attach the tenant |
+| `auth/key-store.ts` | `lookup(hash, ip)`: Redis, then (after the address guard) Postgres on a miss, then fill the cache. `revoke(hash)` |
+| `auth/ip-limit.ts` | Per-address bucket of failed authentications: an atomic take (`ip-take.lua`) with a refund, run by the key store before a Postgres query |
+| `auth/plugin.ts` | `onRequest` hook: parse the bearer key, look it up (the key store applies the address guard on a miss), 401, 429 or attach the tenant |
 | `cli/keys.ts` | `create-tenant`, `create-key [--rpm --tpm]`, `set-limits <prefix> --rpm --tpm`, `revoke-key <prefix>`, `list-keys` (`npm run keys -- ...`) |
 
 ## How a request is checked
 
-0. Before anything else the client's address is checked (`auth/ip-limit.ts`): a token bucket in Redis, the same
-   script as the per-key limiter, that only **failed** authentications draw from (`AUTH_FAIL_LIMIT_PER_MIN`, 30).
-   An address with an empty bucket gets 429 `auth_rate_limit_exceeded` with `retry-after`, before any Redis key
-   lookup or Postgres query. The check only reads the bucket and a failure charges it afterwards, so a valid key
-   is never charged and a busy client is never limited by it; the cost is that requests already in flight when
-   the bucket empties still reach the lookup. An IPv6 client shares one bucket per /64. The address is the
-   socket peer's, unless the peer is in `TRUSTED_PROXIES` (default `127.0.0.1`), in which case
-   `X-Forwarded-For` is believed. An address refused this way is refused even with a valid key until its bucket
-   refills. If Redis is down the check is skipped (fails open).
+0. A valid key that is already cached is never limited. The address limit (`auth/ip-limit.ts`) applies only where a
+   request would cost a Postgres query or has already failed: a token bucket in Redis (`AUTH_FAIL_LIMIT_PER_MIN`,
+   30) that **failed** authentications draw from. On a key-cache miss the key store, just before the Postgres query,
+   runs one atomic Redis script that takes a token, or refuses when the bucket is empty (429
+   `auth_rate_limit_exceeded` with `retry-after`, no query). If the key proves valid the token is handed back, so a
+   valid client is only ever charged for the moment of its lookup. A cached "unknown key" is charged to the address
+   without a query; a missing or malformed key is charged too. Because the take is atomic, a flood of random keys
+   at any concurrency reaches Postgres at most as often as the bucket has tokens. The cost: more cold-cache valid
+   keys at once from one address than the limit (right after a restart) can be refused until tokens return. An IPv6
+   client shares one bucket per /64. The address is the socket peer's, unless the peer is in `TRUSTED_PROXIES`
+   (default `127.0.0.1`), in which case `X-Forwarded-For` is believed. If Redis is down the check is skipped (fails
+   open).
 1. Parse `Authorization: Bearer <key>`; anything not shaped like a gateway key gets 401 without a lookup.
 2. Hash the key with `HMAC-SHA256(API_KEY_PEPPER, key)` and look the hash up: Redis `GET apikey:<hash>`.
 3. A cached tenant passes. `"revoked"` and `"unknown"` markers mean 401. A miss reads Postgres

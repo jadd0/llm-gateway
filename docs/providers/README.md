@@ -77,7 +77,7 @@ Each model name is one attempt target: retries, the circuit breaker and fallback
 - **Default output cap per model.** A caller who names no `max_tokens` gets the model's `defaultMaxTokens`
   (4096 for the thinking models in the table, which spend output tokens on reasoning; `RATE_LIMIT_DEFAULT_MAX_TOKENS`
   for the rest). The same number is sent to Anthropic and Gemini and used to size the budget hold, per chain model.
-  None of the provider pages documents a default for these models, so 4096 is the gateway's choice.
+  None of the provider pages documents a default for these models, so 4096 is the gateway's choice. `RATE_LIMIT_DEFAULT_MAX_TOKENS` is separate: it is only the rate limiter's tokens-per-minute estimate and does not change what is sent or held.
 
 ## Configuration
 

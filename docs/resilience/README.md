@@ -42,7 +42,7 @@ is safe to retry, stops calling a provider that is down, and moves to a backup m
    refunded otherwise. A 401, 403 or 404 that moves the request on is logged at warn (model, provider, status).
 
 Every reply carries `x-gateway-model` (the model that served, or the last one tried) and `x-gateway-attempts` (upstream
-calls made; 0 when every breaker was open, and also on a 400, 402 or 429 refused before dispatch, where `x-gateway-model` is the model asked for). The body's `model` is whatever the serving provider returned. Each attempt logs
+calls made; 0 when every breaker was open, and also on a 400, 402 or 429 refused before dispatch, where `x-gateway-model` is the model asked for). A name that is not printable ASCII of 1 to 128 characters is not echoed: the header is left out. The body's `model` is whatever the serving provider returned. Each attempt logs
 one line: model, provider target, outcome, milliseconds, never a body or message.
 
 ## The breaker, line by line
