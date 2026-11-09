@@ -149,6 +149,9 @@ Pending quiet run. See [../../BENCHMARKS.md](../../BENCHMARKS.md); no figure is 
 - **Redis Cluster is not supported.** The settle script writes the spend stream and the tenant's keys in one call; on a
   cluster that fails with CROSSSLOT. The gateway and the worker refuse to start when `INFO cluster` says `cluster_enabled:1`.
   Sharding the spend stream per tenant would fix it and is not built: it would make the worker read a stream per tenant.
+- **A refused request's hold row** is dropped straight away; if that delete fails it is retried in the background and
+  marked `refused`, so it counts against no cap and the sweeper deletes it instead of charging its estimate. A row that
+  cannot be reached at all, with its gateway gone, is charged like any lapsed hold once Postgres is back.
 - **Redis holds with no Postgres row** (a rebuild imported the hold of a request Postgres then refused, or a catch-up was
   lost) are released by the worker's reconcile once `BUDGET_ORPHAN_GRACE_S` past their expiry, and charged what Postgres charged
   if it has a ledger row. A refused request also releases its hold at the newest epoch straight away.

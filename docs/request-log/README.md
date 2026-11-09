@@ -17,8 +17,8 @@ timings); a value that is not the right type does not parse. The log is for oper
    path, with `MAXLEN ~ LOG_STREAM_MAX` (default 1,000,000) so a stopped worker cannot fill Redis: past the cap the oldest log
    entries go first, and the worker warns at 80%. Spend entries are in their own stream, `{prefix}requestlog:spend`, which is never capped (an entry there is money and leaves only once Postgres has it). While Redis is away entries wait in a bounded in-memory buffer (`LOG_BUFFER_MAX`), in order, and are sent when it
    returns; past the bound they are dropped and counted. On shutdown the buffer is flushed before Redis is released.
-3. **Log worker** (`packages/log-worker`, `npm run worker`). A consumer group reads both streams (spend first) in batches (`LOG_BATCH_SIZE`, waiting at
-   most `LOG_BATCH_WAIT_MS`), writes each batch in **one Postgres transaction**, and only then acknowledges it. An entry
+3. **Log worker** (`packages/log-worker`, `npm run worker`). A consumer group reads both streams in batches of at most `LOG_BATCH_SIZE` (at least 2; spend entries are read first and the
+   log stream fills the rest; waiting at most `LOG_BATCH_WAIT_MS`), writes each batch in **one Postgres transaction**, and only then acknowledges it. An entry
    another worker read and never acknowledged is taken over after `LOG_CLAIM_IDLE_MS`; one delivered more than
    `LOG_MAX_DELIVERIES` times moves to `{prefix}requestlog:dead` so it cannot block the stream. Each stream is trimmed, on an interval, below the
    oldest pending entry, never past it.
@@ -38,9 +38,16 @@ request's hold at its estimate (never less than the real charge) until the worke
 no settle at all is charged its estimate by the worker's sweeper, on a timer of its own (`LOG_SWEEP_S`) whether or not the
 stream is busy, and only once the hold has been lapsed for `LOG_SWEEP_GRACE_S` so that a settle queued before it lapsed has
 been applied first (set the grace above your worst worker lag; a settle later than that is overtaken by the estimate, which is
-never less than the real cost). The same timer reconciles Redis against Postgres: a Redis hold more than
+never less than the real cost). The sweep also waits while the spend stream has entries the group has not read or not
+acknowledged, so a worker that is behind never has the estimate charged ahead of a settle it is about to apply; if a settle
+still arrives after its estimate was charged (it was queued just after the check), applying it replaces the estimate with the
+real cost in the ledger and moves `tenant_spend` by the difference, in the same transaction, and a refund removes the charge.
+The live balances follow: each remembers the requests it counted at their estimate (`:est`) and takes the same difference
+once, while a balance that took the real settle itself has no such entry and ignores it, so Redis and Postgres end equal.
+The worker reads the budget epoch from Postgres for every batch it catches up and every sweep, never from a cache. The same timer reconciles Redis against Postgres: a Redis hold more than
 `BUDGET_ORPHAN_GRACE_S` past its expiry with no Postgres hold row is released, and charged what Postgres charged if it has a
-ledger row. While Redis is down, settles are written to Postgres directly, as before. Details: [../budgets/README.md](../budgets/README.md).
+ledger row. Reconcile finds the live balances in a Redis sorted set the gateway keeps (`{prefix}bud:index`, a member per
+balance, scored by the time it expires and added when the balance is built), not by scanning the keyspace. While Redis is down, settles are written to Postgres directly, as before. Details: [../budgets/README.md](../budgets/README.md).
 
 ## Shutdown
 
@@ -61,3 +68,9 @@ Redis Cluster is not supported: the settle script writes the spend stream and th
 stream is not in the tenant's hash slot. The gateway and the worker check `INFO cluster` at start and refuse a cluster. A single Redis (or a primary with replicas) is the supported shape.
 Redis runs with an append-only file (`appendfsync everysec`) so the queue survives a restart; at worst about a second of
 entries is lost, and the sweeper covers any settle among them.
+
+## Upgrading from a build with one stream
+
+Spend entries used to share the capped request-log stream. Nothing running has that layout, but a deployment that does must
+drain its worker before switching: during a mixed deploy the old stream's `MAXLEN ~` trimming can drop a spend entry that was
+queued there and not yet applied. After the drain nothing is left in the old layout.
