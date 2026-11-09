@@ -64,21 +64,3 @@ local state is dropped.
 Figures are pending. The chaos run (`bench/run-chaos.sh`) kills one mock mid-load and records client success and latency
 per phase, with and without the fallback chain; it is run by the orchestrator, and its output will be committed under
 `bench/results/pr-7/`. See [../../BENCHMARKS.md](../../BENCHMARKS.md).
-
-## Interview questions
-
-**Why not retry a timed-out POST on the same provider?** The provider may still be generating, and billing, the request we
-abandoned. A second copy could be billed twice. The next model in the chain is a different provider's job, so that is safe.
-
-**Why full jitter?** Plain exponential backoff makes every client that failed together retry together. Picking a random
-wait between zero and the ceiling spreads them out, so a provider that is recovering is not hit by a synchronised wave.
-
-**What happens to the breaker when Redis dies?** Each process falls back to its own in-memory breaker with identical rules,
-within 50 ms, and drops that state when Redis returns. The cost is that processes no longer share what they learn.
-
-**Why can't you retry a stream?** Once the gateway has written reply headers and the first bytes, the client has seen part
-of an answer. A retry would either repeat or splice text. So the gateway retries only until the upstream answers 200.
-
-**How do fallbacks interact with budgets?** The budget holds the worst case of the dearest model in the chain, so falling
-back to a dearer model can never push a tenant past its cap. When the request is done, it is charged at the price of the
-model that actually served it, and the ledger names that model.
