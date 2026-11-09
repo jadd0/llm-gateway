@@ -4,6 +4,7 @@
 //   RATE        requests per second (constant arrival rate, not fixed users)
 //   WARMUP_S    seconds of warm-up, excluded from the measured window
 //   DURATION_S  seconds of measured load
+//   MODEL       model name (default mock-model; mock-anthropic-1 and mock-gemini-1 use the other formats)
 //   API_KEY     gateway API key, sent as "Authorization: Bearer <key>" when set
 import http from 'k6/http';
 import { check } from 'k6';
@@ -52,7 +53,7 @@ export const options = {
 };
 
 const body = JSON.stringify({
-  model: 'mock-model',
+  model: __ENV.MODEL || 'mock-model',
   stream: STREAM,
   messages: [{ role: 'user', content: 'Summarise the plot of Hamlet in one sentence.' }],
 });
