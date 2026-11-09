@@ -568,4 +568,37 @@ describe('budget plugin', { timeout: 60_000 }, () => {
       await short.close();
     }
   });
+
+  it('a reading client of a stream that is still flooding gets the cut event and a clean end', async () => {
+    // Data from the upstream is still arriving when the deadline hits; none of it may be written after the
+    // response side has been ended, or the client sees a reset instead of the event.
+    const short = capped({ UPSTREAM_MAX_DURATION_MS: '500' });
+    await short.listen({ port: 0, host: '127.0.0.1' });
+    try {
+      const s = await fresh(1_000_000);
+      const { port } = short.server.address() as AddressInfo;
+      let tail = '';
+      let complete = false;
+      let failed = false;
+      await new Promise<void>((resolve) => {
+        const req = http.request(
+          { port, host: '127.0.0.1', method: 'POST', path: '/v1/chat/completions', headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` } },
+          (res) => {
+            res.on('data', (c: Buffer) => (tail = (tail + c.toString('utf8')).slice(-400)));
+            res.on('end', () => (complete = true));
+            res.on('error', () => (failed = true));
+            res.on('aborted', () => (failed = true));
+          },
+        );
+        req.on('error', () => (failed = true));
+        req.on('close', () => resolve());
+        req.end(JSON.stringify(body('mock-flood', { stream: true })));
+      });
+      expect(failed).toBe(false);
+      expect(complete).toBe(true);
+      expect(tail).toContain('"code":"upstream_max_duration"');
+    } finally {
+      await short.close();
+    }
+  });
 });

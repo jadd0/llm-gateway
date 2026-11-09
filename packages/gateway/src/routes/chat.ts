@@ -183,6 +183,9 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
       if (guard) {
         guard.cutWith(maxDurationEvent);
         abort.abort(); // the upstream goes at once; the relay below lets the response still finish cleanly
+        // Nothing more may be written to the relay once it is ended (a write after end would reset the client
+        // before the cut event), so the upstream is detached first.
+        if (relay) upstreamStream?.unpipe(relay);
         relay?.end();
         // A client that doesn't read what is left is dropped rather than kept waiting forever.
         timers.drain = setTimeout(() => reply.raw.destroy(), cutDrainMs);

@@ -109,6 +109,7 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
   const redisRetryMs = opts.redisRetryMs ?? 1000;
   const retryDelays = opts.retryDelaysMs ?? [50, 200, 800];
 
+  await pg.ensureEpoch();
   let epoch = await pg.readEpoch();
   let onPostgres = false;
   let nextRedisTryAt = 0;
@@ -146,13 +147,11 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
   // Redis lost a balance this instance had been using, so every instance's balances are suspect. Move the
   // epoch on (the same compare-and-set as an outage: of everyone who noticed, one bumps, the rest adopt),
   // so all of them rebuild together from Postgres instead of each trusting what it rebuilt at its own moment.
+  // Every tenant whose balance vanished comes through here; they share one bump attempt (and its back-off).
   const onRebuild = (a: { tenantId: string; period: string; epoch: number }) => {
     const k = seenKey(a.tenantId, a.period, a.epoch);
     if (!seen.delete(k)) return; // never used here: a new tenant or month, or the first use after a bump
-    const p = pg.bumpEpoch(a.epoch).then(
-      (r) => adopt(r.epoch),
-      (e: unknown) => log?.warn(errInfo(e), 'budget epoch bump after a lost balance failed'),
-    );
+    const p = startBump(a.epoch);
     pending.add(p);
     void p.finally(() => pending.delete(p));
   };
@@ -162,14 +161,16 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
   // first reserve after recovery rebuilds it from Postgres. The bump is compare-and-set from the epoch
   // seen when the failures began: of every instance that saw this outage, one bumps and the rest adopt.
   // One bump attempt at a time; a failed one is simply tried again by the next caller.
-  const startBump = (): Promise<void> => {
+  // At most one attempt is in flight per instance, whoever asks (an outage, or any number of lost balances).
+  const startBump = (from: number): Promise<void> => {
     // After a failure the next attempt waits (exponentially, at most 2 s): a database that is struggling
     // is not hit with an UPDATE per request.
     if (!bumping && Date.now() < nextBumpAt) return Promise.resolve();
-    bumping ??= pg.bumpEpoch(streakEpoch).then(
+    bumping ??= pg.bumpEpoch(from).then(
       (r) => {
         adopt(r.epoch);
-        bumpDone = true;
+        // An outage's bump is done once the epoch is past the one its failures began at.
+        if (epoch > streakEpoch) bumpDone = true;
         bumpFailures = 0;
       },
       (e: unknown) => {
@@ -188,7 +189,7 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
     onPostgres = true;
     bumpDone = false;
     log?.warn(errInfo(err), 'redis unavailable, budget decisions moved to postgres');
-    void startBump();
+    void startBump(streakEpoch);
   };
   const redisAnswered = () => {
     failures = 0;
@@ -243,7 +244,7 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
   // Corrects the live balance after Postgres has the settle. It lands on the current epoch whatever epoch
   // the request reserved under, and is safe to repeat, so a failed try is simply tried again.
   async function settleRedis(res: Reservation, rec: SettleRecord): Promise<void> {
-    adopt(rec.epoch);
+    if (rec.epoch !== null) adopt(rec.epoch);
     // A charge's totals are passed on even when this call found it already recorded (a retry after a lost
     // reply): the live balance takes them only if it is behind.
     const args = { tenantId: res.tenantId, period: res.period, epoch, id: res.id, charges: rec.charges, spentAfter: rec.spent };
@@ -251,9 +252,11 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
     const tries = onPostgres ? 1 : Math.max(1, opts.outageFailures);
     for (let i = 0; i < tries; i++) {
       try {
-        await redisLedger.settle({ ...args, epoch });
+        const applied = await redisLedger.settle({ ...args, epoch });
         redisAnswered();
-        markSeen(res.tenantId, res.period, epoch);
+        // 'rebuild' means there is no balance at this epoch: nothing to have seen. Marking it would make the
+        // next rebuild look like a lost balance and move the epoch again.
+        if (applied !== 'rebuild') markSeen(res.tenantId, res.period, epoch);
         return;
       } catch (err) {
         if (await redisFailed(err)) {
@@ -325,7 +328,7 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
 
       // An outage's epoch bump must have landed before anything is decided: while it hasn't (or failed), the
       // Redis balance is the old epoch's and only Postgres can be trusted.
-      if (!bumpDone) await startBump();
+      if (!bumpDone) await startBump(streakEpoch);
       const tryRedis = bumpDone && (!onPostgres || Date.now() >= nextRedisTryAt);
       if (tryRedis) {
         if (onPostgres) nextRedisTryAt = Date.now() + redisRetryMs; // one probe per interval
@@ -345,7 +348,7 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
         }
         if (outcome !== 'failed') return hold('redis', usedEpoch, outcome.remaining);
         redisMayHaveRun = true;
-        if (!bumpDone) await startBump();
+        if (!bumpDone) await startBump(streakEpoch);
       }
 
       // Anything but an admission leaves nothing behind: a Redis hold the failed attempt may have made is

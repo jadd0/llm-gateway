@@ -39,8 +39,11 @@ export interface SettleRecord {
    */
   spent: number;
   charges: number;
-  /** The budget epoch just after the transaction committed: the one the live balance should be corrected on. */
-  epoch: number;
+  /**
+   * The budget epoch just after the transaction committed: the one the live balance should be corrected on.
+   * null if it could not be read; the charge is committed regardless.
+   */
+  epoch: number | null;
 }
 
 export interface PgLedger {
@@ -68,7 +71,9 @@ export interface PgLedger {
    * refund.
    */
   settle(id: string, entry: SpendEntry | null): Promise<SettleRecord>;
-  /** Reads the budget epoch, creating it at 1 on first use. */
+  /** Creates the single epoch row (at 1) if it is missing. Once, when a budget starts. */
+  ensureEpoch(): Promise<void>;
+  /** Reads the budget epoch: a plain select, safe to run every few hundred milliseconds. */
   readEpoch(): Promise<number>;
   /**
    * Moves the epoch on from `observed`, only if it is still `observed`. Of several instances that saw
@@ -229,14 +234,22 @@ export function createPgLedger(db: Db['db']): PgLedger {
       });
       // The epoch is read after the commit. A balance rebuilt from a snapshot taken before the commit still
       // holds this request's hold, and it can only be at an epoch that is current now or older.
-      const [e] = await db.select({ epoch: budgetEpoch.epoch }).from(budgetEpoch).where(eq(budgetEpoch.id, 1));
-      return { ...rec, epoch: e?.epoch ?? 1 };
+      // The charge is committed whatever happens to this read: failing here must not look like a failed settle.
+      try {
+        const [e] = await db.select({ epoch: budgetEpoch.epoch }).from(budgetEpoch).where(eq(budgetEpoch.id, 1));
+        return { ...rec, epoch: e?.epoch ?? 1 };
+      } catch {
+        return { ...rec, epoch: null };
+      }
+    },
+
+    async ensureEpoch() {
+      await db.insert(budgetEpoch).values({ id: 1, epoch: 1 }).onConflictDoNothing();
     },
 
     async readEpoch() {
-      await db.insert(budgetEpoch).values({ id: 1, epoch: 1 }).onConflictDoNothing();
       const [row] = await db.select({ epoch: budgetEpoch.epoch }).from(budgetEpoch).where(eq(budgetEpoch.id, 1));
-      return row!.epoch;
+      return row?.epoch ?? 1;
     },
 
     async bumpEpoch(observed) {

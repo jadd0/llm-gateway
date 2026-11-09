@@ -1,7 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
 import { sql } from 'drizzle-orm';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createTenant } from '../cli/keys.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { cleanup, testConfig } from '../test-env.ts';
@@ -569,6 +569,68 @@ describe('budget', { timeout: 120_000 }, () => {
     for (let i = 0; i < 20; i++) allowed(await budget.reserve(req(t, 10, 100_000)));
     expect(calls).toBe(1); // the first attempt; the next is a minute away
     expect(budget.mode()).toBe('postgres');
+  });
+
+  it('settles that find no balance at the new epoch do not make the next rebuild look like a lost balance', async () => {
+    const t = await newTenant();
+    const budget = await newBudget();
+    const e0 = budget.epoch();
+    const inFlight = allowed(await budget.reserve(req(t, 100, 100_000))); // held at e0
+    await flush(t); // Redis restarted empty
+    allowed(await budget.reserve(req(t, 100, 100_000))); // rebuilds at e0, and that moves the epoch on
+    const waitUntil = Date.now() + 10_000;
+    while (budget.epoch() === e0 && Date.now() < waitUntil) await new Promise((r) => setTimeout(r, 5));
+    expect(budget.epoch()).toBe(e0 + 1);
+    // Its settle lands at the new epoch, where no balance exists yet ...
+    await budget.settle(inFlight, charge(50));
+    // ... and the next reserve builds that balance for the first time. Nothing was lost: no second bump.
+    allowed(await budget.reserve(req(t, 100, 100_000)));
+    await budget.close(); // waits for any bump
+    expect(await pgl.readEpoch()).toBe(e0 + 1);
+  });
+
+  it('a flush that takes the balances of many tenants costs one bump attempt, not one per tenant', async () => {
+    let attempts = 0;
+    const pgLedger: PgLedger = { ...pgl, bumpEpoch: (o) => (attempts++, pgl.bumpEpoch(o)) };
+    const budget = await newBudget({ pgLedger });
+    const e0 = budget.epoch();
+    const tenants = await Promise.all(Array.from({ length: 20 }, () => newTenant()));
+    for (const t of tenants) await budget.settle(allowed(await budget.reserve(req(t, 10, 100_000))), { kind: 'refund' });
+    await Promise.all(tenants.map(flush));
+    await Promise.all(tenants.map((t) => budget.reserve(req(t, 10, 100_000))));
+    await budget.close();
+    expect(attempts).toBe(1);
+    expect(await pgl.readEpoch()).toBe(e0 + 1);
+  });
+
+  it('a settle whose charge committed is not treated as failed when the epoch read after it fails', async () => {
+    const t = await newTenant();
+    let settleCalls = 0;
+    const pgLedger: PgLedger = { ...pgl, settle: (id, e) => (settleCalls++, pgl.settle(id, e)) };
+    const budget = await newBudget({ pgLedger });
+    const h = allowed(await budget.reserve(req(t, 1000, 10_000)));
+    // Only the select of the epoch fails, once: the one right after the settle transaction commits.
+    const query = handle.pool.query.bind(handle.pool) as (...a: unknown[]) => Promise<unknown>;
+    let failed = false;
+    const spy = vi.spyOn(handle.pool, 'query').mockImplementation(((...a: unknown[]) => {
+      const text = String((a[0] as { text?: string })?.text ?? a[0]);
+      if (!failed && /from "budget_epoch"/.test(text)) {
+        failed = true;
+        return Promise.reject(new Error('connection reset'));
+      }
+      return query(...a);
+    }) as never);
+    try {
+      await budget.settle(h, charge(700));
+    } finally {
+      spy.mockRestore();
+    }
+    expect(failed).toBe(true);
+    expect(settleCalls).toBe(1); // not retried
+    expect(await pgSpent(t)).toBe(700);
+    expect(await count('spend_ledger', t)).toBe(1);
+    // Redis was still corrected, at the instance's own epoch.
+    expect(await redisBal(t, budget.epoch())).toMatchObject({ spent: 700, reserved: 0, ver: 1 });
   });
 
   it('reserve reports unavailable when neither Redis nor Postgres can decide', async () => {

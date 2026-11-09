@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { sql } from 'drizzle-orm';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createTenant } from '../cli/keys.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { cleanup, testConfig } from '../test-env.ts';
@@ -170,6 +170,24 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
     // The first hold lapsed already, so the full cap is free again.
     expect((await ledger.reserve(reserveArgs(t, 1000, 1000))).allowed).toBe(true);
     expect(await heldRows(t)).toBe(1);
+  });
+
+  it('refreshing the epoch is a plain select: no statement that writes', async () => {
+    await ledger.ensureEpoch(); // the one write, when a budget starts
+    const seen: string[] = [];
+    const query = handle.pool.query.bind(handle.pool) as (...a: unknown[]) => Promise<unknown>;
+    const spy = vi.spyOn(handle.pool, 'query').mockImplementation(((...a: unknown[]) => {
+      seen.push(String((a[0] as { text?: string })?.text ?? a[0]));
+      return query(...a);
+    }) as never);
+    try {
+      for (let i = 0; i < 3; i++) await ledger.readEpoch();
+    } finally {
+      spy.mockRestore();
+    }
+    expect(seen).toHaveLength(3);
+    expect(seen.every((q) => /^\s*select/i.test(q))).toBe(true);
+    expect(seen.some((q) => /\b(insert|update|delete)\b/i.test(q))).toBe(false);
   });
 
   it('lapsed holds are found by an index on expires_at', async () => {
