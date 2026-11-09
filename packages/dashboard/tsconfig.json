@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "jsx": "react-jsx",
+    "lib": ["dom", "dom.iterable", "es2024"],
+    "plugins": [{ "name": "next" }]
+  },
+  "include": ["app", "components", "lib", "proxy.ts", "proxy.test.ts", "instrumentation.ts", "next-env.d.ts", ".next/types/**/*.ts", "next.config.ts"],
+  "exclude": ["node_modules"]
+}

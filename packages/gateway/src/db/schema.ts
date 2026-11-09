@@ -186,5 +186,67 @@ export const requestLog = pgTable(
     // Time-ordered appends: a block-range index stays tiny and answers time-window scans.
     index('request_log_created_brin').using('brin', t.createdAt),
     index('request_log_tenant_time').on(t.tenantId, t.createdAt),
+    // The dashboard's "last errors" table reads the newest failures; this partial index keeps that read flat
+    // however large the log grows. Its predicate is the one the rollups count errors by (see isError).
+    index('request_log_errors_recent')
+      .on(t.createdAt.desc())
+      .where(sql`${t.status} >= 500 OR ${t.errorCode} = 'upstream_stream_broken'`),
   ],
+);
+
+/**
+ * What counts as an error everywhere (rollups, the last-errors table, the partial index above): a 5xx, or a stream
+ * that broke after a 200 was already sent. A client that left (499, client_closed) and refusals (4xx) are not errors.
+ */
+export const ERROR_STATUS_MIN = 500;
+export const STREAM_BROKEN_CODE = 'upstream_stream_broken';
+export const isError = (status: number, errorCode: string | null): boolean => status >= ERROR_STATUS_MIN || errorCode === STREAM_BROKEN_CODE;
+
+/** The tenant of a request that never authenticated, so rollup keys need no null. */
+export const NO_TENANT = '00000000-0000-0000-0000-000000000000';
+
+// Pre-aggregated request-log counts, written by the log worker in the same transaction as the log rows they
+// summarise. The dashboard reads only these. Latency is a histogram (counts per fixed log-scale bucket), never a
+// percentile, so any range can be merged exactly.
+//   rollup_minute / rollup_hour             per (time bucket, tenant, model): who spent what, which model
+//   rollup_total_minute / rollup_total_hour per time bucket across everything: the time series and the percentiles.
+//                                           A merged histogram per tenant and model would cost thousands of rows per
+//                                           chart; these have one row per minute or hour.
+// `*_minute` holds recent minutes, `*_hour` all history.
+const measures = () => ({
+  requests: integer('requests').notNull(),
+  errors: integer('errors').notNull(),
+  cacheHits: integer('cache_hits').notNull(),
+  semanticHits: integer('semantic_hits').notNull(),
+  costMicros: bigint('cost_micros', { mode: 'number' }).notNull(),
+  savedMicros: bigint('saved_micros', { mode: 'number' }).notNull(),
+  promptTokens: bigint('prompt_tokens', { mode: 'number' }).notNull(),
+  completionTokens: bigint('completion_tokens', { mode: 'number' }).notNull(),
+  latencyHist: integer('latency_hist').array().notNull(),
+});
+const bucketCol = () => timestamp('bucket', { withTimezone: true }).notNull();
+const dimColumns = () => ({
+  bucket: bucketCol(),
+  tenantId: uuid('tenant_id').notNull(),
+  model: text('model').notNull().default(''),
+  ...measures(),
+});
+const totalColumns = () => ({ bucket: bucketCol(), ...measures() });
+
+export const rollupMinute = pgTable('rollup_minute', dimColumns(), (t) => [primaryKey({ columns: [t.bucket, t.tenantId, t.model] })]);
+export const rollupHour = pgTable('rollup_hour', dimColumns(), (t) => [primaryKey({ columns: [t.bucket, t.tenantId, t.model] })]);
+export const rollupTotalMinute = pgTable('rollup_total_minute', totalColumns(), (t) => [primaryKey({ columns: [t.bucket] })]);
+export const rollupTotalHour = pgTable('rollup_total_hour', totalColumns(), (t) => [primaryKey({ columns: [t.bucket] })]);
+
+// One row. Minutes before `folded_through` are in the hour tables. A batch holding a row older than the mark adds
+// it to the hour tables, and to the minute tables too (for the minute-grain views, until retention drops it); the
+// fold only ever reads minutes at or after the mark, so nothing is folded twice. The fold moves the mark forward
+// under a row lock that every batch takes shared, so a request is counted once in the hour tables whatever the order.
+export const rollupState = pgTable(
+  'rollup_state',
+  {
+    id: integer('id').primaryKey(),
+    foldedThrough: timestamp('folded_through', { withTimezone: true }).notNull(),
+  },
+  (t) => [check('rollup_state_single_row', sql`${t.id} = 1`)],
 );

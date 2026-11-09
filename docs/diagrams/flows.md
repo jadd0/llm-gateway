@@ -29,3 +29,4 @@ lines verbatim; for any plan in the branch's diff, a flow line missing from this
 - Exact-match cache lookup, single-flight and fill → `docs/cache/cache-flow.html` → `packages/gateway/src/{cache/*.ts,routes/chat.ts}`
 - Semantic cache lookup and async fill → `docs/semantic-cache/semantic-flow.html` → `packages/gateway/src/{semantic/*.ts,cache/plugin.ts}`
 - Benchmark rig (k6, nginx, three gateways, Redis, Postgres, mock, log worker) → `docs/benchmarks/cluster.html` → `bench/{cluster.sh,nginx/nginx.conf}`
+- Rollups: log worker batch → rollup tables → dashboard → `docs/dashboard/rollups.html` → `packages/{log-worker/src/{rollup,histogram}.ts,dashboard/lib/queries.ts}`

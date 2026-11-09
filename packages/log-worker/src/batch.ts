@@ -3,8 +3,7 @@ import type { Db } from '../../gateway/src/db/client.ts';
 import { requestLog } from '../../gateway/src/db/schema.ts';
 import { fromStreamFields, toRequestLogRow, type LogEntry, type SpendEntry } from '../../gateway/src/requestlog/entry.ts';
 import type { Raw } from './claim.ts';
-
-type Tx = Parameters<Parameters<Db['db']['transaction']>[0]>[0];
+import { writeRollups, type Tx } from './rollup.ts';
 
 export interface Parsed {
   raw: Raw;
@@ -40,22 +39,25 @@ export function parse(raw: Raw[]): { parsed: Parsed[]; malformed: BatchResult['m
   return { parsed, malformed };
 }
 
-// Writes request-log rows. A row that is already there (a redelivery) is left alone.
-async function insertLogs(tx: Tx, entries: LogEntry[]): Promise<number> {
+// Writes request-log rows. A row that is already there (a redelivery) is left alone. Returns the entries that were
+// really inserted, which are the only ones the rollups may count.
+async function insertLogs(tx: Tx, entries: LogEntry[]): Promise<LogEntry[]> {
   const byId = new Map<string, LogEntry>();
   for (const e of entries) if (!byId.has(e.requestId)) byId.set(e.requestId, e);
-  if (byId.size === 0) return 0;
+  if (byId.size === 0) return [];
   const rows = [...byId.values()].map(toRequestLogRow);
   const inserted = await tx.insert(requestLog).values(rows).onConflictDoNothing().returning({ id: requestLog.requestId });
-  return inserted.length;
+  return inserted.flatMap((r) => byId.get(r.id) ?? []);
 }
 
-// One transaction: the ledger (and the spend and holds that go with it) and the request log. Either all of it is
-// written or none, so an acknowledged entry is always fully applied.
+// One transaction: the ledger (and the spend and holds that go with it), the request log and the rollups that
+// summarise the log rows. Either all of it is written or none, so an acknowledged entry is always fully applied
+// and a rollup can never count a row twice or miss one.
 async function applyIn(tx: Tx, items: Parsed[]) {
   const spend = await applySpendBatch(tx, items.flatMap((i) => (i.spend ? [i.spend] : [])));
-  const logRows = await insertLogs(tx, items.flatMap((i) => (i.log ? [i.log] : [])));
-  return { ledgerRows: spend.inserted, logRows, settled: spend.settled };
+  const inserted = await insertLogs(tx, items.flatMap((i) => (i.log ? [i.log] : [])));
+  await writeRollups(tx, inserted);
+  return { ledgerRows: spend.inserted, logRows: inserted.length, settled: spend.settled };
 }
 
 /**
