@@ -5600,8 +5600,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         </div>
         <ul>
           <li>&bull; Postgres is updated first, then a tombstone overwrites the cache entry once the client is ready</li>
-          <li>&bull; Fills use NX, so a racing fill cannot undo the tombstone</li>
-          <li>&bull; Tombstone TTL is longer than the cache TTL</li>
+          <li>&bull; Every cache fill uses NX, including the refill after a corrupt value is removed, so none can undo the tombstone</li>
+          <li>&bull; revoke-key is safe to repeat: it rewrites the tombstone if Redis was down the first time</li>
         </ul>
       </div>
 

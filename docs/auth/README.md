@@ -32,10 +32,12 @@ The client's `Authorization` header is not forwarded upstream; the upstream key 
 ## Revocation without a race
 
 `revoke-key` updates `revoked_at` in Postgres first, then overwrites the Redis entry with a `"revoked"`
-tombstone (TTL longer than the cache TTL). Cache fills use `NX`, so a request that read Postgres just before the
+tombstone (TTL longer than the cache TTL). Every cache fill uses `NX`, so a request that read Postgres just before the
 revoke cannot write the key back as valid after the tombstone exists. A test holds a lookup between its
 Postgres read and its fill, revokes, releases it, and checks the tombstone survived. If Redis is unreachable at
-revoke time the CLI exits non-zero and says a cached copy can live for up to `AUTH_CACHE_TTL_S`.
+revoke time the CLI exits non-zero and says a cached copy can live for up to `AUTH_CACHE_TTL_S`; running the
+same `revoke-key` again once Redis is up rewrites the tombstone (it is safe to repeat, and says so when the
+key was already revoked).
 
 ## Removing a tenant
 
@@ -75,7 +77,7 @@ With auth and the Redis cache: 0.617 ms p50 / 0.372 ms p95 over a direct run at 
 2. **Why not Auth.js?** It logs humans into websites. This checks machines on every API request, with no
    sessions or cookies.
 3. **How is revocation instant without a race?** Postgres first, then an overwriting tombstone in Redis, while
-   cache fills use `NX` so they can never overwrite it. The cost is one Redis round trip per request.
+   every cache fill uses `NX` so none can overwrite it (a corrupt cached value is removed by a compare-and-delete, then refilled with `NX`). The cost is one Redis round trip per request.
 4. **What if Redis dies?** Requests fall back to Postgres; revoked keys stay rejected. Revoking while Redis is
    down still works in Postgres, and the CLI warns that a cached copy may linger.
 5. **How do you avoid a key-existence oracle?** One 401 body for every failure, and unknown routes also answer
