@@ -126,6 +126,34 @@ describe('breaker (real Redis)', () => {
     expect((await b.acquire(t)).allowed).toBe(true);
   });
 
+  it.each(['answered', 'failure'] as const)('a probe that ends %s reopens for a cooldown; only a 2xx closes', async (result) => {
+    const b = make();
+    const t = target();
+    await record(b, t, fails(5));
+    now += 15_000;
+    const probe = await b.acquire(t);
+    if (!probe.allowed) throw new Error('no probe');
+    await b.record(probe.permit, result);
+    expect(await b.acquire(t)).toEqual({ allowed: false, retryInMs: 15_000 });
+  });
+
+  it('a probe only releases the lock it took', async () => {
+    const b = make({ probeTtlMs: 150 });
+    const t = target();
+    await record(b, t, fails(5));
+    now += 15_000;
+    const first = await b.acquire(t);
+    if (!first.allowed) throw new Error('no probe');
+    await new Promise((r) => setTimeout(r, 250)); // the first probe's lock lapses
+    const second = await b.acquire(t);
+    if (!second.allowed) throw new Error('no second probe');
+    await b.record(first.permit, 'abandoned'); // the late first probe reports
+    // The second probe's lock is still held: nobody else gets through.
+    expect((await b.acquire(t)).allowed).toBe(false);
+    await b.record(second.permit, 'abandoned');
+    expect((await b.acquire(t)).allowed).toBe(true);
+  });
+
   it('an abandoned probe hands the probe to the next caller', async () => {
     const b = make();
     const t = target();
@@ -216,6 +244,28 @@ describe('breaker with Redis down', () => {
     expect((await b.acquire(t)).allowed).toBe(true);
   });
 
+  it('a record Redis refuses outright is counted locally; only a timed-out one is dropped', async () => {
+    const refusing = {
+      defineCommand: (name: string, def: object) => (redis as any).defineCommand(name, def),
+      brk: (...a: unknown[]) =>
+        a[2] === 'record' ? Promise.reject(Object.assign(new Error('refused'), { code: 'ECONNREFUSED' })) : (redis as any).brk(...a),
+    } as unknown as Redis;
+    const b = make({ redis: refusing, redisRetryMs: 600_000 });
+    const t = target();
+    const first = await b.acquire(t);
+    if (!first.allowed) throw new Error('closed breaker refused');
+    expect(first.permit.source).toBe('redis');
+    await b.record(first.permit, 'failure'); // Redis did not store it: it counts here
+    for (let i = 0; i < 4; i++) {
+      const a = await b.acquire(t);
+      if (!a.allowed) throw new Error('opened early');
+      expect(a.permit.source).toBe('local');
+      await b.record(a.permit, 'failure');
+    }
+    // 1 refused + 4 local = 5 failures: the local breaker is open.
+    expect((await b.acquire(t)).allowed).toBe(false);
+  });
+
   it('local state dropped when Redis returns', async () => {
     let broken = true;
     const flaky = {
@@ -254,5 +304,35 @@ describe('local breaker probe', () => {
     expect(b.acquire('x')).toEqual({ allowed: false, retryInMs: 2_000 });
     t += 2_000; // the probe never reported: another is let through
     expect(b.acquire('x')).toMatchObject({ allowed: true, permit: { probe: true } });
+  });
+});
+
+describe('local breaker probe outcomes', () => {
+  it('a 429-style answered probe reopens, success closes, and a stale probe leaves the live probe alone', () => {
+    let t = T0;
+    const b = new LocalBreaker(settings, () => t, 3_000);
+    const open = () => {
+      for (let i = 0; i < 5; i++) {
+        const a = b.acquire('y');
+        if (!a.allowed) throw new Error('opened early');
+        b.record(a.permit, 'failure');
+      }
+    };
+    open();
+    t += 15_000;
+    const p1 = b.acquire('y');
+    if (!p1.allowed) throw new Error('no probe');
+    b.record(p1.permit, 'answered');
+    expect(b.acquire('y')).toEqual({ allowed: false, retryInMs: 15_000 });
+    t += 15_000;
+    const p2 = b.acquire('y');
+    if (!p2.allowed) throw new Error('no probe');
+    t += 3_000; // p2's lock lapses; p3 takes the probe
+    const p3 = b.acquire('y');
+    if (!p3.allowed) throw new Error('no probe');
+    b.record(p2.permit, 'abandoned'); // the stale one must not free p3's lock
+    expect(b.acquire('y').allowed).toBe(false);
+    b.record(p3.permit, 'success');
+    expect(b.acquire('y')).toMatchObject({ allowed: true, permit: { probe: false } });
   });
 });

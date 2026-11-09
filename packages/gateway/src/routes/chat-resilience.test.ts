@@ -5,6 +5,7 @@ import { sql } from 'drizzle-orm';
 import { Redis } from 'ioredis';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createMockServer, type Settings } from '../../../mock-provider/src/server.ts';
+import type { Breaker } from '../resilience/breaker.ts';
 import { buildApp } from '../app.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { tenants } from '../db/schema.ts';
@@ -513,6 +514,152 @@ describe('what counts as a failure, and where a failure leads', { timeout: 60_00
     expect(res.status).toBe(503);
     expect(res.headers.get('retry-after')).toBe('20');
     expect(B.hits).toBe(bHits);
+  });
+});
+
+describe('probe, billing and breaker bookkeeping', { timeout: 60_000 }, () => {
+  const openA = async (env: Record<string, string>, now: { v: number }, extra: Parameters<typeof buildApp>[1] = {}) => {
+    A.settings.outage = 'error';
+    A.settings.errorStatus = 503;
+    const gw = await gateway({ BREAKER_MIN_FAILURES: '2', RETRY_MAX_ATTEMPTS_PER_MODEL: '1', BREAKER_OPEN_MS: '15000', ...env }, { breakerClock: () => now.v, ...extra });
+    const s = await tenant();
+    for (let i = 0; i < 2; i++) expect((await send(gw, s.key)).status).toBe(200);
+    expect(A.hits).toBe(2);
+    return { gw, s };
+  };
+
+  it('a half-open probe is one attempt even when retries are allowed, and falls over', async () => {
+    const now = { v: 1_700_000_000_000 };
+    const { gw, s } = await openA({}, now);
+    // The retries are switched on only now: the two failures above were one attempt each.
+    // (A fresh gateway shares the breaker through Redis.)
+    const gw3 = await gateway({ BREAKER_MIN_FAILURES: '2', RETRY_MAX_ATTEMPTS_PER_MODEL: '3', BREAKER_OPEN_MS: '15000' }, { breakerClock: () => now.v });
+    void gw;
+    now.v += 15_000;
+    const res = await send(gw3, s.key);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-gateway-model')).toBe(MODELS.b);
+    expect(res.headers.get('x-gateway-attempts')).toBe('2');
+    expect(A.hits).toBe(3); // exactly one probe call
+  });
+
+  it('a probe answered 429 reopens the breaker instead of closing it', async () => {
+    const now = { v: 1_700_000_000_000 };
+    const { gw, s } = await openA({}, now);
+    A.settings.errorStatus = 429;
+    now.v += 15_000;
+    expect((await send(gw, s.key)).status).toBe(200); // the probe: 429, then B answers
+    expect(A.hits).toBe(3);
+    expect((await send(gw, s.key)).headers.get('x-gateway-attempts')).toBe('1'); // open again: A skipped
+    expect(A.hits).toBe(3);
+  });
+
+  it('a retry is not made once the breaker has opened meanwhile', async () => {
+    let first = true;
+    const stub = await stubServer((req, res) => {
+      stub.hits++;
+      req.resume();
+      const headers: Record<string, string> = { 'content-type': 'application/json' };
+      if (first) {
+        first = false;
+        headers['retry-after'] = '1'; // the first request sits out a second between its attempts
+      }
+      res.writeHead(503, headers);
+      res.end('{"error":{"message":"down"}}');
+    });
+    closers.push(() => new Promise((r) => (stub.server.closeAllConnections(), stub.server.close(r))));
+    const gw = await gateway({ MOCK_BASE_URL: stub.url, BREAKER_MIN_FAILURES: '2', BREAKER_OPEN_MS: '60000' });
+    const s = await tenant();
+    const slow = send(gw, s.key);
+    await until(async () => stub.hits, (h) => h === 1);
+    // Two more requests fail on A (3 attempts each) while the first waits, and open the breaker.
+    for (let i = 0; i < 2; i++) expect((await send(gw, s.key)).status).toBe(200);
+    expect(stub.hits).toBe(7);
+    const res = await slow;
+    expect(res.status).toBe(200);
+    expect(res.headers.get('x-gateway-model')).toBe(MODELS.b);
+    expect(stub.hits).toBe(7); // the waiting request did not call A again
+  });
+
+  it('reporting to the breaker is never waited for, and a failing report is harmless', async () => {
+    let released = 0;
+    const slow = (b: Breaker): Breaker => ({
+      acquire: (t) => b.acquire(t),
+      record: async (p, r) => {
+        await b.record(p, r);
+        await new Promise((res) => setTimeout(res, 1500));
+        released++;
+        throw new Error('boom');
+      },
+    });
+    A.settings.outage = 'error';
+    A.settings.errorStatus = 503;
+    const gw = await gateway({ RETRY_MAX_ATTEMPTS_PER_MODEL: '1' }, { wrapBreaker: slow });
+    const s = await tenant();
+    const started = performance.now();
+    const res = await send(gw, s.key);
+    expect(res.status).toBe(200);
+    expect(performance.now() - started).toBeLessThan(1000);
+    expect(released).toBe(0);
+  });
+
+  it('retry-after from an open breaker is added to a 5xx answer but never to a 4xx', async () => {
+    const now = { v: 1_700_000_000_000 };
+    // B alone opens; A then answers 404 (falls over to the open B) or 503.
+    B.settings.outage = 'error';
+    B.settings.errorStatus = 503;
+    A.settings.outage = 'error';
+    const gw = await gateway({ BREAKER_MIN_FAILURES: '2', RETRY_MAX_ATTEMPTS_PER_MODEL: '1', BREAKER_OPEN_MS: '20000' }, { breakerClock: () => now.v });
+    const s = await tenant();
+    A.settings.errorStatus = 503;
+    for (let i = 0; i < 2; i++) expect((await send(gw, s.key, { model: MODELS.b })).status).toBe(503);
+    A.settings.errorStatus = 400;
+    const four = await send(gw, s.key, { model: MODELS.a });
+    expect(four.status).toBe(400);
+    expect(four.headers.has('retry-after')).toBe(false);
+    A.settings.errorStatus = 404;
+    const nf = await send(gw, s.key, { model: MODELS.a });
+    expect(nf.status).toBe(404); // falls over to the open B, and the answer is A's 404
+    expect(nf.headers.has('retry-after')).toBe(false);
+    A.settings.errorStatus = 503;
+    const five = await send(gw, s.key, { model: MODELS.a });
+    expect(five.status).toBe(503);
+    expect(five.headers.get('retry-after')).toBe('20');
+  });
+
+  it('a provider-side 404 is logged at warn with the model, provider and status', async () => {
+    A.settings.outage = 'error';
+    A.settings.errorStatus = 404;
+    const lines: string[] = [];
+    const logStream = new (await import('node:stream')).Writable({ write: (c, _e, cb) => (lines.push(String(c)), cb()) });
+    const gw = await gateway({ LOG_LEVEL: 'warn' }, { logStream });
+    const s = await tenant();
+    expect((await send(gw, s.key)).status).toBe(200);
+    const entry = lines.map((l) => JSON.parse(l) as Record<string, unknown>).find((l) => l.msg === 'provider rejected the request, trying the next model');
+    expect(entry).toMatchObject({ level: 40, model: MODELS.a, status: 404 });
+    expect(typeof entry?.target).toBe('string');
+  });
+
+  it('a headers timeout on A keeps the estimate even when B then refuses the connection', async () => {
+    A.settings.outage = 'hang';
+    const dead = await deadUrl();
+    const gw = await gateway({ UPSTREAM_HEADERS_TIMEOUT_MS: '200', MOCK_ANTHROPIC_BASE_URL: dead, RETRY_MAX_ATTEMPTS_PER_MODEL: '1' });
+    const s = await tenant();
+    const res = await send(gw, s.key);
+    expect(res.status).toBe(502);
+    const rows = await until(() => ledger(s.tenantId), (r) => r.length === 1);
+    expect(rows[0]).toMatchObject({ estimated: true });
+    await until(() => heldMicros(s.tenantId), (h) => h === 0);
+  });
+
+  it('a connect refusal on every model bills nothing', async () => {
+    const dead = await deadUrl();
+    const gw = await gateway({ MOCK_BASE_URL: dead, MOCK_ANTHROPIC_BASE_URL: dead, RETRY_MAX_ATTEMPTS_PER_MODEL: '1' });
+    const s = await tenant();
+    const res = await send(gw, s.key);
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    await until(() => heldMicros(s.tenantId), (h) => h === 0);
+    expect(await ledger(s.tenantId)).toEqual([]);
   });
 });
 
