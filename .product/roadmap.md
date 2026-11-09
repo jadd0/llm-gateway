@@ -43,13 +43,13 @@ completed_at: 2026-11-09
 notes: Requests+tokens per minute in one atomic Lua script on Redis TIME; verified live: exactly 100/1000 across two gateways with one clock skewed +30s; fail-open on Redis loss, limits back from the first request after recovery. Benchmark pending quiet run (R4/R8). R10 opened.
 
 ## PR 5 — Budgets: pre-estimate and reconcile
-status: pending
+status: done
 acceptance: each tenant has a hard spend cap; cost is reserved atomically before the call from an estimate and reconciled to actual tokens after; a test hammering a tenant with a small cap under concurrency never lets settled spend exceed the cap; exhausted budget returns 402.
 scope_notes: prices come from a static model price table in config. No billing integration.
 base_branch: main
-commit:
-completed_at:
-notes:
+commit: 665ff89
+completed_at: 2026-11-09
+notes: Budgets: reserve-then-settle, holds mirrored in Postgres, epoch failover; verifier PASS 0 breaches in 7 runs, accounting exact; benchmarks provisional (R8)
 
 ## PR 6 — Provider adapters: Anthropic, OpenAI and a third
 status: pending
