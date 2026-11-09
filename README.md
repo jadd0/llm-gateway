@@ -62,7 +62,7 @@ sizes will live in `BENCHMARKS.md`, with the raw k6 output committed alongside.
 
 | Area | What is measured | Result |
 |---|---|---|
-| Throughput | Sustained load against the mock provider | 10000 req/s through one gateway process, zero errors (laptop, k6 on the same machine; see [BENCHMARKS.md](BENCHMARKS.md)) |
+| Throughput | Sustained load against the mock provider | 10000 req/s through one gateway process, zero errors. One run per step, 15 s steps, "good" judged by a p95 criterion, k6, gateway and mock on one laptop; see [BENCHMARKS.md](BENCHMARKS.md) |
 | Overhead | Gateway-added latency, p50 / p95 | 0.23 ms / 0.98 ms non-streamed at 1000 req/s; 0.24 ms / 0.25 ms to first streamed byte at 200 req/s |
 | Correctness | Over-limit requests across 3+ instances under concurrent load | _not yet measured_ |
 | Resilience | Client success rate while a provider is down | _not yet measured_ |
@@ -81,7 +81,7 @@ cp .env.example .env.local
 docker compose up -d --wait      # Redis and Postgres+pgvector (not yet used by gateway code)
 npm run dev:mock                 # mock provider on :9000
 npm run dev:gateway              # gateway on :8080
-curl -N localhost:8080/v1/chat/completions \
+curl -N localhost:8080/v1/chat/completions -H 'content-type: application/json' \
   -d '{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}'
 npm run check                    # typecheck and tests
 npm run bench:baseline           # k6 baseline, writes bench/results/pr-1/

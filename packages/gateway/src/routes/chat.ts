@@ -1,4 +1,4 @@
-import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyError, FastifyPluginAsync, FastifyReply } from 'fastify';
 import { pipeline } from 'node:stream/promises';
 import { z } from 'zod';
 import type { Upstream } from '../upstream.ts';
@@ -32,6 +32,18 @@ function upstreamFailure(reply: FastifyReply, err: unknown): FastifyReply {
 
 export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app, opts) => {
   const { upstream } = opts;
+
+  // Fastify's own request errors (unsupported content-type, oversized body) use the OpenAI shape too.
+  app.setErrorHandler((err: FastifyError, _request, reply) => {
+    const status = typeof err.statusCode === 'number' ? err.statusCode : 500;
+    reply.log.warn({ errClass: err.name, code: err.code }, 'request error');
+    if (status >= 400 && status < 500) {
+      const message =
+        status === 415 ? 'content-type must be application/json' : 'request could not be processed';
+      return reply.code(status).send(errorBody(message, 'invalid_request_error'));
+    }
+    return reply.code(500).send(errorBody('internal error', 'gateway_error'));
+  });
 
   // Keep the original bytes so the upstream receives exactly what the client sent.
   app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) =>

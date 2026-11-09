@@ -134,6 +134,15 @@ describe('POST /v1/chat/completions', () => {
     expect(upstreamRequests).toBe(0);
   });
 
+  it('unsupported content-type returns 415 with an OpenAI-shaped error', async () => {
+    const res = await post(payload(), { headers: { 'content-type': 'application/x-www-form-urlencoded' } });
+    expect(res.status).toBe(415);
+    const err = ((await res.json()) as any).error;
+    expect(err.type).toBe('invalid_request_error');
+    expect(typeof err.message).toBe('string');
+    expect(upstreamRequests).toBe(0);
+  });
+
   it('upstream down returns 502 with an OpenAI-shaped error', async () => {
     const down = buildApp(
       loadConfig({ OPENAI_BASE_URL: 'http://127.0.0.1:1', LOG_LEVEL: 'silent' }),

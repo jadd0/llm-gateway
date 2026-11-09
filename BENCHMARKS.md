@@ -40,11 +40,12 @@ as an overhead figure. Time to first byte is the streamed measure.
 
 ### Cross-check against the gateway's own timing
 
-The gateway reports `server-timing` (`gw` for non-streamed, `gw-pre` for streamed). Its own bookkeeping
-time was 0.008 ms p50 / 0.010 ms p95 (instant) and 0.010 ms p50 / 0.018 ms p95 (realistic). k6's difference
-is about 0.23 ms at p50, so the two agree to within the 1 ms tolerance set for this PR. The remaining
-roughly 0.2 ms is the cost of the second HTTP hop (parsing the request, an extra socket round trip, writing
-the response), which the header does not and cannot see.
+The gateway reports `server-timing` (`gw` for non-streamed, `gw-pre` for streamed). That header measures
+only the gateway's in-process time: 0.008 ms p50 / 0.010 ms p95 (instant) and 0.010 ms p50 / 0.018 ms p95
+(realistic). It is not the overhead figure. k6's direct-versus-gateway difference, about 0.23 ms at p50, is
+the real overhead, because it includes the extra HTTP hop (parsing the request, an extra socket round trip,
+writing the response) that the header cannot see. The plan's check was that the two must not differ by more
+than 1 ms at p50; they differ by about 0.22 ms, and the difference is explained by that hop.
 
 ## Throughput
 
@@ -69,8 +70,8 @@ requests completed in the measured window divided by 15 s.
 **Result: 10000 req/s** is the last good step through the gateway, one Node process. Every step up to
 20000 req/s completed with zero errors, but from 12000 req/s the gateway's p95 left the band (99.091 ms at
 12000, then 2.785, 3.094, 25.948 and 14.863 ms), while the mock called directly stayed at or below 1.437 ms
-across the same range. The tail growth is the signal that the gateway process, sharing CPU with k6 and the
-mock, is the first thing to saturate; the 12000 req/s step also delivered 11878 req/s, showing that one
+across the same range. The tail growth is consistent with the gateway process, sharing CPU with k6 and the
+mock, being the first thing to saturate; the 12000 req/s step also delivered 11878 req/s, showing that one
 step stalled briefly. Steps were run once each, so the single 99 ms p95 is one observation, not a trend.
 Whether it is the single event loop, the pool size or CPU contention is not established here.
 
