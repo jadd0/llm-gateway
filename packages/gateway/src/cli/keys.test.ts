@@ -276,6 +276,26 @@ describe('keys CLI', { timeout: 30_000 }, () => {
     expect((await handle.db.select().from(tenants).where(eq(tenants.name, tenant)))[0]!.cacheShared).toBe(false);
   });
 
+  it('set-semantic-cache toggles the switch and refreshes the key cache', async () => {
+    const tenant = await newTenant();
+    const key = (await cli('create-key', tenant)).stdout.trim();
+    const hash = hashKey(config.apiKeyPepper, key);
+    const store = keyStoreFromConfig(config, handle.db, redis);
+    expect((await store.lookup(hash))!.semanticCache).toBe(true); // on by default
+
+    expect((await cli('set-semantic-cache', tenant, 'off')).stdout).toContain(`${tenant}: semantic cache off`);
+    expect((await handle.db.select().from(tenants).where(eq(tenants.name, tenant)))[0]!.semanticCache).toBe(false);
+    expect((await store.lookup(hash))!.semanticCache).toBe(false); // the cached entry was overwritten
+    expect((await cli('set-semantic-cache', tenant, 'on')).stdout).toContain('semantic cache on');
+    expect((await store.lookup(hash))!.semanticCache).toBe(true);
+
+    for (const bad of ['yes', 'ON', '']) {
+      await expect(cli('set-semantic-cache', tenant, bad)).rejects.toMatchObject({ stderr: expect.stringContaining('"on" or "off"') });
+    }
+    await expect(cli('set-semantic-cache', tenant)).rejects.toMatchObject({ stderr: expect.stringContaining('usage:') });
+    await expect(cli('set-semantic-cache', 'no-such-tenant', 'on')).rejects.toMatchObject({ stderr: expect.stringContaining('no tenant named') });
+  });
+
   it('show-spend prints cache hits and what they saved, not counting ordinary rows', async () => {
     const tenant = await newTenant();
     const [row] = await handle.db.select().from(tenants).where(eq(tenants.name, tenant));
@@ -283,9 +303,9 @@ describe('keys CLI', { timeout: 30_000 }, () => {
     const base = { tenantId: row!.id, period, model: 'mock-1', promptTokens: 10, completionTokens: 5, estimated: false };
     await handle.db.insert(spendLedger).values([
       { ...base, requestId: randomUUID(), costMicros: 400 },
-      { ...base, requestId: randomUUID(), costMicros: 0, cached: true, savedMicros: 400 },
-      { ...base, requestId: randomUUID(), costMicros: 0, cached: true, savedMicros: 350 },
+      { ...base, requestId: randomUUID(), costMicros: 0, cached: true, cacheKind: 'exact', savedMicros: 400 },
+      { ...base, requestId: randomUUID(), costMicros: 0, cached: true, cacheKind: 'semantic', savedMicros: 350 },
     ]);
-    expect((await cli('show-spend', tenant)).stdout).toContain('cache hits 2, saved $0.000750');
+    expect((await cli('show-spend', tenant)).stdout).toContain('cache hits 2 (exact 1, semantic 1), saved $0.000750');
   });
 });

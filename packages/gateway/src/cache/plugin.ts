@@ -23,6 +23,8 @@ export interface CacheHit {
   /** The model that served the answer the first time. */
   model: string;
   usage: Usage | null;
+  /** Which lookup found it. */
+  kind: 'exact' | 'semantic';
 }
 
 declare module 'fastify' {
@@ -142,10 +144,10 @@ const cachePlugin: FastifyPluginAsync<CachePluginOptions> = async (app, opts) =>
 
   // A hit: no provider, no budget hold. It counts as one request against the key's rpm and gives the token
   // estimate back; the ledger gets a zero-cost row with what it saved.
-  function hit(request: FastifyRequest, reply: FastifyReply, entry: CachedCompletion, streamed: boolean, includeUsage: boolean) {
+  function hit(request: FastifyRequest, reply: FastifyReply, entry: CachedCompletion, streamed: boolean, includeUsage: boolean, kind: CacheHit['kind'] = 'exact') {
     void request.rateLimit?.settle(0);
     if (app.recordCacheHit) {
-      void app.recordCacheHit({ tenantId: request.tenant!.tenantId, model: entry.model, usage: entry.usage }).catch(() => {});
+      void app.recordCacheHit({ tenantId: request.tenant!.tenantId, model: entry.model, usage: entry.usage, kind }).catch(() => {});
     }
     const who = { id: `chatcmpl-cache-${randomUUID()}`, created: Math.floor(now() / 1000) };
     reply.header('x-gateway-cache', 'hit').header('x-gateway-model', entry.model).header('x-gateway-attempts', '0');

@@ -145,6 +145,21 @@ export function parseSharing(raw: string | undefined): boolean {
   throw new CliError('set-cache-sharing needs "on" or "off"');
 }
 
+// "on" or "off" for set-semantic-cache. Anything else is refused.
+export function parseSwitch(raw: string | undefined): boolean {
+  if (raw === 'on') return true;
+  if (raw === 'off') return false;
+  throw new CliError('set-semantic-cache needs "on" or "off"');
+}
+
+// Switches a tenant's semantic cache on or off (off: exact-match caching only).
+export async function setSemanticCache(db: Db['db'], keyStore: KeyStore, tenantName: string, on: boolean) {
+  const [tenant] = await db.select({ id: tenants.id }).from(tenants).where(eq(tenants.name, tenantName));
+  if (!tenant) throw new CliError(`no tenant named "${tenantName}"`);
+  const r = await keyStore.setSemanticCache(tenant.id, on);
+  return { tenant: tenantName, on, cached: r.cached };
+}
+
 // Switches a tenant between its own response-cache scope and the shared pool.
 export async function setCacheSharing(db: Db['db'], keyStore: KeyStore, tenantName: string, shared: boolean) {
   const [tenant] = await db.select({ id: tenants.id }).from(tenants).where(eq(tenants.name, tenantName));
@@ -167,7 +182,12 @@ export async function showSpend(db: Db['db'], tenantName: string, period = perio
     .where(and(eq(tenantSpend.tenantId, tenant.id), eq(tenantSpend.period, period)));
   // Cache hits are zero-cost rows in the same ledger; what they saved is what the same usage would have cost.
   const [hits] = await db
-    .select({ hits: sql<string>`count(*)`, saved: sql<string>`coalesce(sum(${spendLedger.savedMicros}), 0)` })
+    .select({
+      hits: sql<string>`count(*)`,
+      exact: sql<string>`count(*) filter (where ${spendLedger.cacheKind} = 'exact')`,
+      semantic: sql<string>`count(*) filter (where ${spendLedger.cacheKind} = 'semantic')`,
+      saved: sql<string>`coalesce(sum(${spendLedger.savedMicros}), 0)`,
+    })
     .from(spendLedger)
     .where(and(eq(spendLedger.tenantId, tenant.id), eq(spendLedger.period, period), eq(spendLedger.cached, true)));
   return {
@@ -176,6 +196,8 @@ export async function showSpend(db: Db['db'], tenantName: string, period = perio
     spentMicros: row?.spent ?? 0,
     capMicros: tenant.cap,
     cacheHits: Number(hits?.hits ?? 0),
+    exactHits: Number(hits?.exact ?? 0),
+    semanticHits: Number(hits?.semantic ?? 0),
     savedMicros: Number(hits?.saved ?? 0),
   };
 }
@@ -187,6 +209,7 @@ const USAGE = `usage:
   keys set-limits <prefix> [--rpm <n|default>] [--tpm <n|default>]
   keys set-budget <tenant> --monthly-usd <amount|default>
   keys set-cache-sharing <tenant> on|off
+  keys set-semantic-cache <tenant> on|off
   keys show-spend <tenant> [--period YYYY-MM]
   keys revoke-key <prefix>
   keys list-keys [tenant]`;
@@ -317,13 +340,33 @@ async function main(argv: string[]) {
       }
       return;
     }
+    case 'set-semantic-cache': {
+      if (!args[0] || args.length !== 2) throw new CliError(USAGE);
+      const tenant = args[0];
+      const on = parseSwitch(args[1]);
+      const config = loadCacheConfig();
+      const redis = config.authCache === 'redis' && config.redisUrl ? createRedis(config.redisUrl) : null;
+      try {
+        const r = await withDb(config.databaseUrl, (db) => setSemanticCache(db, keyStoreFromConfig(config, db, redis), tenant, on));
+        console.log(`${r.tenant}: semantic cache ${r.on ? 'on' : 'off'}`);
+        if (config.authCache === 'redis' && (config.redisUrl === undefined || (redis !== null && !r.cached))) {
+          // The database has the new setting; a cached copy of a key keeps the old one until it expires.
+          throw new CliError(
+            `warning: the key cache was not refreshed, so the old setting can stay in effect for up to ${config.authCacheTtlS}s (AUTH_CACHE_TTL_S); set REDIS_URL / bring Redis up and run this command again`,
+          );
+        }
+      } finally {
+        redis?.disconnect();
+      }
+      return;
+    }
     case 'show-spend': {
       const { values, positionals } = parseFlags(args);
       if (!positionals[0]) throw new CliError(USAGE);
       const tenant = positionals[0];
       const r = await withDb(loadDbConfig().databaseUrl, (db) => showSpend(db, tenant, values.period));
       const cap = r.capMicros === null ? 'default cap' : 'cap ' + DOLLAR + formatUsd(r.capMicros);
-      console.log(`${r.tenant} ${r.period}: spent ${DOLLAR}${formatUsd(r.spentMicros)} (${cap}); cache hits ${r.cacheHits}, saved ${DOLLAR}${formatUsd(r.savedMicros)}`);
+      console.log(`${r.tenant} ${r.period}: spent ${DOLLAR}${formatUsd(r.spentMicros)} (${cap}); cache hits ${r.cacheHits} (exact ${r.exactHits}, semantic ${r.semanticHits}), saved ${DOLLAR}${formatUsd(r.savedMicros)}`);
       return;
     }
     case 'revoke-key': {

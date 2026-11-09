@@ -512,9 +512,10 @@ describe('response cache on POST /v1/chat/completions', () => {
       tenantId: t.tenantId,
       model: 'model-without-a-price',
       usage: { promptTokens: 7, completionTokens: 5, totalTokens: 12 },
+      kind: 'exact',
     });
     const [row] = await handle.db.select().from(spendLedger).where(eq(spendLedger.tenantId, t.tenantId));
-    expect(row).toMatchObject({ cached: true, model: 'model-without-a-price', promptTokens: 7, completionTokens: 5, costMicros: 0, savedMicros: 0 });
+    expect(row).toMatchObject({ cached: true, model: 'model-without-a-price', promptTokens: 7, completionTokens: 5, costMicros: 0, savedMicros: 0, cacheKind: 'exact' });
   });
 
   it('identical concurrent misses make one upstream call', async () => {

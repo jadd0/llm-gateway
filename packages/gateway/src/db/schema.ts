@@ -1,4 +1,4 @@
-import { bigint, boolean, char, check, index, integer, pgTable, primaryKey, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { bigint, bigserial, boolean, char, check, index, integer, pgTable, primaryKey, text, timestamp, unique, uuid, vector } from 'drizzle-orm/pg-core';
 import { sql } from 'drizzle-orm';
 
 export const tenants = pgTable('tenants', {
@@ -10,6 +10,8 @@ export const tenants = pgTable('tenants', {
   monthlyBudgetMicros: bigint('monthly_budget_micros', { mode: 'number' }),
   // True when the tenant reads and writes the shared response-cache pool instead of its own (keys set-cache-sharing).
   cacheShared: boolean('cache_shared').notNull().default(false),
+  // False when the tenant wants exact-match caching only (keys set-semantic-cache).
+  semanticCache: boolean('semantic_cache').notNull().default(true),
 });
 
 export const apiKeys = pgTable(
@@ -68,10 +70,15 @@ export const spendLedger = pgTable(
     cached: boolean('cached').notNull().default(false),
     // For a cached row, what the same usage would have cost at the model that first served it.
     savedMicros: bigint('saved_micros', { mode: 'number' }).notNull().default(0),
+    // For a cached row, which cache served it; null for a row that was not a hit.
+    cacheKind: text('cache_kind'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   // The month's spend and savings are summed per tenant and period.
-  (t) => [index('spend_ledger_tenant_period_idx').on(t.tenantId, t.period)],
+  (t) => [
+    index('spend_ledger_tenant_period_idx').on(t.tenantId, t.period),
+    check('spend_ledger_cache_kind_check', sql`${t.cacheKind} IN ('exact', 'semantic')`),
+  ],
 );
 
 // Money held for in-flight requests: every hold, whichever store decided it. The Postgres path counts
@@ -103,4 +110,34 @@ export const budgetEpoch = pgTable(
     epoch: bigint('epoch', { mode: 'number' }).notNull(),
   },
   (t) => [check('budget_epoch_single_row', sql`${t.id} = 1`)],
+);
+
+// The prompt of every cached answer, as a vector, so a differently worded question can find the answer. The
+// answer itself stays in the response cache (Redis); `exact_key` names it. Scope and context hash decide who
+// may be matched with whom (see semantic/context.ts); the vector only ranks the candidates inside them.
+export const semanticCache = pgTable(
+  'semantic_cache',
+  {
+    id: bigserial('id', { mode: 'number' }).primaryKey(),
+    // A tenant id, or 'shared' (the response cache's scope rule).
+    scope: text('scope').notNull(),
+    // Everything about the request except its last user message.
+    contextHash: char('context_hash', { length: 64 }).notNull(),
+    // The response-cache key holding the answer.
+    exactKey: text('exact_key').notNull(),
+    // L2-normalised, SEMANTIC_DIMENSIONS long.
+    embedding: vector('embedding', { dimensions: 1024 }).notNull(),
+    // Which model made the vector: 'voyage-4-lite' or 'voyage-4-nano'.
+    embedder: text('embedder').notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [
+    unique('semantic_cache_scope_exact_key_unique').on(t.scope, t.exactKey),
+    index('semantic_cache_scope_context_idx').on(t.scope, t.contextHash),
+    // The expiry sweep finds rows by expiry.
+    index('semantic_cache_expires_idx').on(t.expiresAt),
+    // HNSW provisionally; docs/semantic-cache/README.md has the index bench that decides.
+    index('semantic_cache_embedding_idx').using('hnsw', t.embedding.op('vector_cosine_ops')),
+  ],
 );

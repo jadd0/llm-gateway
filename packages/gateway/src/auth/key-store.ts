@@ -17,6 +17,8 @@ export interface Tenant {
   monthlyBudgetMicros: number | null;
   /** True when the tenant uses the shared response-cache pool instead of its own. */
   cacheShared: boolean;
+  /** False when the tenant wants exact-match caching only. */
+  semanticCache: boolean;
 }
 
 /** A limit that is left out is left as it is; null sets the key back to the gateway default. */
@@ -55,6 +57,8 @@ export interface KeyStore {
    * active keys. `updated` and `cached` mean what they do for `setBudget`.
    */
   setCacheShared(tenantId: string, shared: boolean): Promise<{ updated: boolean; cached: boolean }>;
+  /** Writes the tenant's semantic-cache switch the same way. */
+  setSemanticCache(tenantId: string, on: boolean): Promise<{ updated: boolean; cached: boolean }>;
 }
 
 export interface KeyStoreOptions {
@@ -111,6 +115,7 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
         tpmLimit: apiKeys.tpmLimit,
         monthlyBudgetMicros: tenants.monthlyBudgetMicros,
         cacheShared: tenants.cacheShared,
+        semanticCache: tenants.semanticCache,
       })
       .from(apiKeys)
       .innerJoin(tenants, eq(tenants.id, apiKeys.tenantId))
@@ -132,7 +137,9 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
       const monthlyBudgetMicros = limit(v.monthlyBudgetMicros);
       // Likewise an entry from before the response cache has no sharing flag: a miss, so the real one is read.
       if (rpmLimit === undefined || tpmLimit === undefined || monthlyBudgetMicros === undefined || typeof v.cacheShared !== 'boolean') return undefined;
-      return { tenantId: v.tenantId, tenantName: v.tenantName, keyId: v.keyId, rpmLimit, tpmLimit, monthlyBudgetMicros, cacheShared: v.cacheShared };
+      // And from before the semantic cache has no switch.
+      if (typeof v.semanticCache !== 'boolean') return undefined;
+      return { tenantId: v.tenantId, tenantName: v.tenantName, keyId: v.keyId, rpmLimit, tpmLimit, monthlyBudgetMicros, cacheShared: v.cacheShared, semanticCache: v.semanticCache };
     } catch {
       return undefined;
     }
@@ -278,6 +285,16 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
       const updated = await db
         .update(tenants)
         .set({ cacheShared: shared })
+        .where(eq(tenants.id, tenantId))
+        .returning({ id: tenants.id });
+      if (updated.length === 0) return { updated: false, cached: false };
+      return { updated: true, cached: await refreshTenantKeys(tenantId) };
+    },
+
+    async setSemanticCache(tenantId, on) {
+      const updated = await db
+        .update(tenants)
+        .set({ semanticCache: on })
         .where(eq(tenants.id, tenantId))
         .returning({ id: tenants.id });
       if (updated.length === 0) return { updated: false, cached: false };

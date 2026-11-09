@@ -28,6 +28,8 @@ export interface HitEntry {
   promptTokens: number;
   completionTokens: number;
   savedMicros: number;
+  /** Which cache served it. */
+  cacheKind: 'exact' | 'semantic';
 }
 
 export interface PgReserveArgs {

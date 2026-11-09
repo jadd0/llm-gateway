@@ -35,6 +35,9 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
     BUDGET_ENABLED: 'false',
     // Likewise the response cache: off unless a test asks, so repeated identical requests reach the upstream.
     CACHE_ENABLED: 'false',
+    // And the semantic step: off unless a test asks, and never reaching a real embedder or a developer's key.
+    SEMANTIC_ENABLED: 'false',
+    VOYAGE_API_KEY: '',
     // One attempt per model and a breaker that does not open, unless a test asks for retries and breaking, so
     // tests of other parts see one upstream call per request.
     RETRY_MAX_ATTEMPTS_PER_MODEL: '1',

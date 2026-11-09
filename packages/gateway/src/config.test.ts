@@ -133,3 +133,41 @@ describe('response cache settings', () => {
     expect(loadConfig(env({ CACHE_ENABLED: 'false', UPSTREAM_MAX_DURATION_MS: '300' })).upstreamMaxDurationMs).toBe(300);
   });
 });
+
+describe('semantic cache settings', () => {
+  const defaults = {
+    semanticEnabled: true,
+    semanticThreshold: 0.95,
+    semanticDimensions: 1024,
+    voyageApiKey: undefined,
+    voyageBaseUrl: 'https://api.voyageai.com/v1',
+    voyageModel: 'voyage-4-lite',
+    voyageTimeoutMs: 300,
+    ollamaUrl: 'http://127.0.0.1:11434',
+    semanticLocalModel: 'hf.co/MongoDB/voyage-4-nano-GGUF:Q8_0',
+    semanticLocalTimeoutMs: 200,
+    semanticCrossModel: false,
+    semanticInputType: 'none',
+    semanticMaxInputChars: 2000,
+    semanticPgTimeoutMs: 100,
+    semanticFillQueue: 1000,
+    semanticCleanupS: 300,
+  };
+
+  it('defaults, and .env.example alone (plus a pepper) loads to the same settings', () => {
+    expect(loadConfig(env({}))).toMatchObject(defaults);
+    const example = parseEnv(readFileSync(new URL('../../../.env.example', import.meta.url), 'utf8'));
+    for (const name of ['SEMANTIC_ENABLED', 'SEMANTIC_THRESHOLD', 'SEMANTIC_DIMENSIONS', 'VOYAGE_API_KEY', 'VOYAGE_BASE_URL', 'VOYAGE_MODEL', 'SEMANTIC_VOYAGE_TIMEOUT_MS', 'OLLAMA_URL', 'SEMANTIC_LOCAL_MODEL', 'SEMANTIC_LOCAL_TIMEOUT_MS', 'SEMANTIC_CROSS_MODEL', 'SEMANTIC_INPUT_TYPE', 'SEMANTIC_MAX_INPUT_CHARS', 'SEMANTIC_PG_TIMEOUT_MS', 'SEMANTIC_FILL_QUEUE', 'SEMANTIC_CLEANUP_S']) {
+      expect(example[name], name).toBeDefined();
+    }
+    expect(loadConfig({ ...example, API_KEY_PEPPER: 'x'.repeat(40) })).toMatchObject(defaults);
+  });
+
+  it('is on only with the response cache, and the vector column fixes the dimensions', () => {
+    expect(loadConfig(env({ CACHE_ENABLED: 'false' })).semanticEnabled).toBe(false);
+    expect(loadConfig(env({ SEMANTIC_ENABLED: 'false' })).semanticEnabled).toBe(false);
+    expect(() => loadConfig(env({ SEMANTIC_DIMENSIONS: '512' }))).toThrow(/SEMANTIC_DIMENSIONS must be 1024/);
+    expect(() => loadConfig(env({ SEMANTIC_THRESHOLD: '1.5' }))).toThrow();
+    expect(loadConfig(env({ VOYAGE_API_KEY: 'k', VOYAGE_BASE_URL: 'http://127.0.0.1:1/v1/' }))).toMatchObject({ voyageApiKey: 'k', voyageBaseUrl: 'http://127.0.0.1:1/v1' });
+  });
+});

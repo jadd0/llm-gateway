@@ -53,6 +53,8 @@ export interface CacheHitRecord {
   completionTokens: number;
   /** What the same usage would have cost at `model`, micro-USD. */
   savedMicros: number;
+  /** Which cache served it. */
+  cacheKind: 'exact' | 'semantic';
 }
 
 export interface Budget {
