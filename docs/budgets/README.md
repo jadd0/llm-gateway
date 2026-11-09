@@ -85,8 +85,14 @@ the gateway won't start), so a gateway that crashes mid-request can't hold money
   client that does not read what is left within 5 s has its connection destroyed.
 - **A client that leaves before the request is sent upstream gets everything back** (limiter tokens and budget);
   after it was sent the estimate stays, because the provider may bill.
-- **Lapsed holds** are deleted from Postgres by a bounded sweep (1000 rows every `BUDGET_SWEEP_INTERVAL_S`, 60 s, per
-  instance) as well as on the Postgres path; the holds table also goes with its tenant (`on delete cascade`).
+- **Settle goes through the request-log stream.** With Redis up, the settle script (`budget.lua`) appends the spend entry and
+  moves the live balance in one call; the log worker writes the ledger row, adds to `tenant_spend` (only for rows it really
+  inserted, so a redelivery changes nothing) and drops the hold row. Until it has, Postgres still holds the hold, so a balance
+  rebuilt from Postgres counts the estimate and the worker then releases it and adds the real charge. If the script cannot run,
+  or Redis is down, the settle is written to Postgres directly as before. See [../request-log/README.md](../request-log/README.md).
+- **Lapsed holds** are not deleted: the log worker charges each one its estimate (recorded as `estimated`, model `unknown`),
+  once the stream is drained, so a gateway that dies mid-request can never make money vanish. The holds table also goes with its
+  tenant (`on delete cascade`).
 
 - **Why a hold could be left in Redis.** A Redis reserve whose script ran but whose reply was lost leaves a hold that
   nothing else knows of. If the request is then admitted on Postgres its settle releases the hold by id; if it is

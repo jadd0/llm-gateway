@@ -9,9 +9,10 @@ Diagram: [chat-passthrough.html](chat-passthrough.html) (the OpenAI-format path)
 | `providers/` | Router and one adapter per provider format; see [../providers/README.md](../providers/README.md) |
 | `app.ts` | `buildApp(config)`: Fastify with request logging off, the auth hook, and the Postgres and Redis handles |
 | `routes/chat.ts` | `POST /v1/chat/completions`: validates, then runs the attempt loop (retries, breaker, fallback; see [../resilience/](../resilience/README.md)) |
+| `requestlog/` | The collector (first hook; one log entry per request, whatever its outcome) and the sinks that queue it; see [../request-log/README.md](../request-log/README.md) |
 | `cache/` | The exact-match response cache: a preHandler between rate limit and budget, and the fill after a served 2xx; see [../cache/README.md](../cache/README.md) |
 | `resilience/` | Timeouts, retry policy, circuit breaker and fallback chains |
-| `server.ts` | Entry point, graceful shutdown on SIGTERM and SIGINT |
+| `server.ts` | Entry point, start-up line naming every provider and its base URL, graceful shutdown on SIGTERM and SIGINT (in-flight requests finish, buffered log entries are sent) |
 
 ## Behaviour
 
