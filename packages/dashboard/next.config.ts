@@ -9,6 +9,8 @@ const config: NextConfig = {
   turbopack: { root },
   outputFileTracingRoot: root,
   poweredByHeader: false,
+  agentRules: false,
+  devIndicators: false,
 };
 
 export default config;

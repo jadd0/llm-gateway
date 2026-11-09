@@ -1,7 +1,8 @@
 import { fmtInt, fmtMs, fmtPct, fmtTick, fmtUsd } from '../lib/format.ts';
 import { RANGES, type ErrorRow, type Overview } from '../lib/queries.ts';
 import { ChartCard } from './ChartCard.tsx';
-import { CacheRateChart, ErrorRateChart, LatencyChart, SpendChart, spendBars } from './charts.tsx';
+import { spendBars } from '../lib/spend.ts';
+import { CacheRateChart, ErrorRateChart, LatencyChart, SpendChart } from './charts.tsx';
 import { ErrorsTable } from './ErrorsTable.tsx';
 import { RangePicker } from './RangePicker.tsx';
 import { Tile } from './Tile.tsx';

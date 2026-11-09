@@ -123,3 +123,6 @@ tbody tr:last-child td { border-bottom: 0; }
   .tile-value { font-size: 1.25rem; }
   .top-actions { width: 100%; justify-content: space-between; }
 }
+
+/* Wide tables scroll sideways rather than wrap their cells into columns of two characters. */
+.scroll td { white-space: nowrap; }
