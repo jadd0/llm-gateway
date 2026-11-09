@@ -27,6 +27,12 @@ Format — one entry per decision under its category, newest last, ids never reu
 ## Roles & permissions
 
 ## Money & payments
+- **D-017** 2026-11-09 · founder · active — Tenant budgets use reserve-then-settle; the live balance is in Redis, every settled charge is recorded in Postgres, and Redis is rebuilt from Postgres when it loses the balance. Why: fast atomic checks without losing spend history.
+  Src: .product/plans/pr-5.md; founder chose "Redis + Postgres record" · Code: packages/gateway/src/budget/
+- **D-018** 2026-11-09 · founder · active — When Redis is down, budget checks fall back to a Postgres row-lock path (not fail open, not fail closed). Why: the rate limiter fails open (D-016), so budgets must keep spend capped.
+  Src: founder chose "Fall back to Postgres" · Code: packages/gateway/src/budget/pg-ledger.ts
+- **D-019** 2026-11-09 · founder · active — Budgets are monthly caps that reset on the 1st of each UTC calendar month. Why: matches how API plans work.
+  Src: founder chose "Monthly, resets"
 
 ## Data, privacy & legal
 - **D-011** 2026-11-09 · founder · active — API keys are stored only as HMAC-SHA256(server pepper, key) via Node's built-in crypto, never plaintext and not bcrypt/argon2. Why: keys are 256-bit random, so slow hashing adds per-request latency for no security gain.
@@ -35,6 +41,12 @@ Format — one entry per decision under its category, newest last, ids never reu
 ## AI & models
 
 ## Integrations & providers
+- **D-020** 2026-11-09 · founder · active — The third provider is Google Gemini, alongside Anthropic and OpenAI. Why: a genuinely different API that proves the adapter design.
+  Src: .product/plans/pr-6.md; founder chose "Google Gemini"
+- **D-021** 2026-11-09 · founder · active — Providers are called with plain HTTP over the gateway's own undici pools; no provider SDKs. Why: one place for timeouts, streaming and measurement; no extra dependencies.
+  Src: founder chose "Plain HTTP" · Code: packages/gateway/src/providers/
+- **D-022** 2026-11-09 · founder · active — One live smoke call per provider, run by hand with the founder's API keys, never in the gate or CI. Why: proves the adapters against real APIs, not only fixtures.
+  Src: founder chose "Yes, I'll add keys" · Code: scripts/smoke-providers.ts
 
 ## UX & copy
 
@@ -45,6 +57,10 @@ Format — one entry per decision under its category, newest last, ids never reu
   Src: founder chose "Drizzle ORM" in chat · Code: packages/gateway/src/db/
 - **D-014** 2026-11-09 · founder · active — Auth.js is not used for gateway auth (machine API keys, not human login); it is a candidate for dashboard login in PR 11. Why: Auth.js has no per-request API-key check.
   Src: chat 2026-11-09, founder asked about Auth.js and accepted
+- **D-015** 2026-11-09 · founder · active — The rate limiter enforces both requests per minute and tokens per minute per key, in one atomic Lua script; tokens are charged an estimate before the call and corrected to actual usage after. Why: founder chose "Requests + tokens" over requests only.
+  Src: .product/plans/pr-4.md · Code: packages/gateway/src/ratelimit/
+- **D-016** 2026-11-09 · founder · active — If Redis is unavailable the rate limiter fails open (requests served, limits off, one warning per outage). Why: availability over strict limits; budgets still cap spend.
+  Src: founder chose "Fail open" in chat · Code: packages/gateway/src/ratelimit/limiter.ts
 - **D-002** 2026-11-08 · founder · active — Gateway HTTP framework is Fastify (not Express or Hono), to be backed by a raw node:http vs Express 5 vs Fastify k6 comparison in docs/decisions/0001-framework.md. Why: framework cost lands in the measured overhead and req/s ceiling.
   Src: founder in chat: "lets go with fastify then." · Code: packages/gateway/package.json
 

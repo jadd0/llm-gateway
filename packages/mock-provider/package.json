@@ -1,0 +1,6 @@
+{
+  "name": "@llm-gateway/mock-provider",
+  "private": true,
+  "type": "module",
+  "scripts": { "start": "node --env-file-if-exists=../../.env.local src/server.ts" }
+}
