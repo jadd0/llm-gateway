@@ -136,13 +136,14 @@ export function createWorker(o: WorkerOptions): Worker {
     // Trimmed and measured on an interval, not every batch: XINFO and XPENDING per batch are wasted work.
     if (Date.now() - lastTrim >= (o.trimEveryMs ?? 5000)) {
       lastTrim = Date.now();
-      await group.trim().catch((err: unknown) => o.log.warn(errInfo(err), 'stream trim failed'));
+      // Measured before trimming: what the backlog is, not what is left once the delivered part is gone.
       if (o.streamMax !== undefined) {
         const n = await group.lengths().catch(() => null);
         if (n !== null && n.log > o.streamMax * 0.8) {
           o.log.warn({ length: n.log, max: o.streamMax, spendLength: n.spend }, 'request log stream is over 80% of LOG_STREAM_MAX: the worker is behind, the oldest log entries will be dropped');
         }
       }
+      await group.trim().catch((err: unknown) => o.log.warn(errInfo(err), 'stream trim failed'));
     }
 
     // The safety net for settles that never arrived. On a timer of its own, whether or not the worker is busy:

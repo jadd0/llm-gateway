@@ -12,6 +12,7 @@ import { deadKey, streamKey, toLogFields, toSpendFields, type LogEntry, type Spe
 import { cleanup, testConfig } from '../../gateway/src/test-env.ts';
 import { periodOf } from '../../gateway/src/budget/period.ts';
 import { createPgLedger } from '../../gateway/src/budget/pg-ledger.ts';
+import { createRedisLedger, balanceKey } from '../../gateway/src/budget/redis-ledger.ts';
 import { createWorker, type Worker, type WorkerOptions } from './worker.ts';
 
 // A real Redis and a real Postgres. Each test uses its own consumer group, so tests never read each other's
@@ -210,6 +211,110 @@ describe('log worker', { timeout: 60_000 }, () => {
     await stopped;
     expect(await logRows(entries.map((e) => e.requestId))).toBe(6);
     expect(await pending(w.group)).toBe(0);
+  });
+
+  it('lapsed holds are charged on the sweep timer while a steady stream of entries keeps the worker busy', async () => {
+    const t = await newTenant();
+    const pgl = createPgLedger(handle.db);
+    const orphan = { id: randomUUID(), tenantId: t, period: P, estimate: 250, ttlMs: -60_000 };
+    await pgl.hold(orphan);
+    const w = workerFor({ sweepS: 0.4, sweepGraceS: 0, batchWaitMs: 20 });
+    // About 5 requests a second, so every pass has something to read and the stream is never empty.
+    let producing = true;
+    const producer = (async () => {
+      while (producing) {
+        await queue([toLogFields(logEntry(t))]);
+        await sleep(200);
+      }
+    })();
+    const startedAt = Date.now();
+    w.start();
+    let charged = false;
+    while (!charged && Date.now() - startedAt < 4000) {
+      charged = Number((await handle.db.execute(sql`select count(*) as n from spend_ledger where request_id = ${orphan.id}`)).rows[0]!.n) === 1;
+      await sleep(50);
+    }
+    producing = false;
+    await producer;
+    await w.stop();
+    expect(charged).toBe(true);
+    expect(Date.now() - startedAt).toBeLessThan(3000); // within about LOG_SWEEP_S, not "when the stream is quiet"
+    expect(await pgl.snapshot(t, P)).toMatchObject({ spent: 250, holds: [] });
+  });
+
+  it('a hold that lapsed less than the sweep grace ago is left for its queued settle', async () => {
+    const t = await newTenant();
+    const pgl = createPgLedger(handle.db);
+    const recent = { id: randomUUID(), tenantId: t, period: P, estimate: 90, ttlMs: -5000 };
+    await pgl.hold(recent);
+    const w = workerFor({ sweepS: 0, sweepGraceS: 60 });
+    expect((await w.runOnce()).swept).toBe(0);
+    expect((await pgl.snapshot(t, P)).holds).toHaveLength(1);
+    // Its settle arrives and is applied as the real cost, not the estimate.
+    await queue([toSpendFields(spendEntry(t, { id: recent.id, costMicros: 30 }))]);
+    await w.runOnce();
+    expect(await pgl.snapshot(t, P)).toMatchObject({ spent: 30, holds: [] });
+  });
+
+  describe('reconcile', () => {
+    const ledgerFor = (pgl: ReturnType<typeof createPgLedger>) =>
+      createRedisLedger({ redis, keyPrefix: kp, timeoutMs: 2000, loadSnapshot: (tn, pe) => pgl.snapshot(tn, pe) });
+    const bal = async (t: string, epoch: number) => {
+      const h = await redis.hgetall(balanceKey(kp, t, P, epoch));
+      return { spent: Number(h.spent), reserved: Number(h.reserved) };
+    };
+
+    it('drops Redis holds with no Postgres hold row, charges those Postgres already charged, and leaves the young and the held', async () => {
+      const t = await newTenant();
+      const pgl = createPgLedger(handle.db);
+      const epoch = await pgl.readEpoch();
+      const l = ledgerFor(pgl);
+      const reserve = (id: string, estimate: number, ttlMs: number) => l.reserve({ tenantId: t, period: P, epoch, id, estimate, cap: 1_000_000, ttlMs });
+      const phantom = randomUUID(); // a rebuild imported it, Postgres then refused the request: no row anywhere
+      const charged = randomUUID(); // Postgres took its charge; Redis never heard
+      const held = randomUUID(); // Postgres still holds it: its settle may be queued
+      const young = randomUUID(); // no Postgres row, but not yet past its expiry by the grace
+      await reserve(phantom, 100, 1);
+      await reserve(charged, 200, 1);
+      await pgl.hold({ id: held, tenantId: t, period: P, estimate: 400, ttlMs: 1 });
+      await reserve(held, 400, 1);
+      await reserve(young, 800, 3_600_000);
+      await pgl.hold({ id: charged, tenantId: t, period: P, estimate: 200, ttlMs: 1 });
+      await pgl.settle(charged, { requestId: charged, tenantId: t, period: P, model: 'm', promptTokens: 1, completionTokens: 1, costMicros: 150, estimated: false });
+      expect(await bal(t, epoch)).toEqual({ spent: 0, reserved: 1500 });
+      await sleep(20);
+      const w = workerFor({ sweepS: 0, sweepGraceS: 3600, orphanGraceS: 0 });
+      expect((await w.runOnce()).reconciled).toBe(2);
+      // phantom released (100), charged released and charged at what Postgres charged (200 -> 150); held and young stay.
+      expect(await bal(t, epoch)).toEqual({ spent: 150, reserved: 1200 });
+      expect((await w.runOnce()).reconciled).toBe(0);
+    });
+  });
+
+  it('warns once the request-log stream is over 80% of its cap, before trimming', async () => {
+    const t = await newTenant();
+    await queue(Array.from({ length: 90 }, () => toLogFields(logEntry(t))));
+    const warns: Array<{ obj: object; msg: string }> = [];
+    const w = workerFor({ batchSize: 10, streamMax: 100, trimEveryMs: 0, log: { ...quiet, warn: (obj, msg) => void warns.push({ obj, msg }) } });
+    await w.runOnce();
+    expect(warns.filter((x) => /80%/.test(x.msg))).toEqual([expect.objectContaining({ obj: expect.objectContaining({ length: 90, max: 100 }) })]);
+  });
+
+  it('the epoch is read once for many batches, and the stream is trimmed on an interval, not every batch', async () => {
+    const t = await newTenant();
+    await queue(Array.from({ length: 6 }, () => toSpendFields(spendEntry(t))));
+    const w = workerFor({ batchSize: 2, epochRefreshMs: 3_600_000, trimEveryMs: 3_600_000 });
+    const selects = vi.spyOn(handle.db, 'select');
+    const xinfo = vi.spyOn(redis, 'xinfo');
+    try {
+      for (let i = 0; i < 3; i++) await w.runOnce();
+      // 3 batches of spend: one epoch read, and XINFO only for the first pass's trim (two streams).
+      expect(selects.mock.calls.length).toBe(1);
+      expect(xinfo.mock.calls.length).toBe(2);
+    } finally {
+      selects.mockRestore();
+      xinfo.mockRestore();
+    }
   });
 
   it('the process stops on SIGTERM after writing what it read, and exits 0', async () => {
