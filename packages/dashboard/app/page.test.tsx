@@ -19,8 +19,15 @@ const tenants: Array<{ id: string; name: string }> = [];
 let unlock: () => Promise<void>;
 let originalMark = '';
 
+// The totals tables have no tenant to delete by: this file owns the year 2033 in them.
+const wipeTotals = async () => {
+  await owner.pool.query("DELETE FROM rollup_total_minute WHERE bucket >= '2033-01-01' AND bucket < '2034-01-01'");
+  await owner.pool.query("DELETE FROM rollup_total_hour WHERE bucket >= '2033-01-01' AND bucket < '2034-01-01'");
+};
+
 beforeAll(async () => {
   unlock = await lockRollupState(testConfig().databaseUrl);
+  await wipeTotals();
   originalMark = ((await owner.pool.query("SELECT folded_through::text AS m FROM rollup_state WHERE id = 1")).rows[0] as { m: string }).m;
   await owner.pool.query("UPDATE rollup_state SET folded_through = 'epoch' WHERE id = 1");
   for (const n of ['north', 'south']) {
@@ -42,6 +49,7 @@ afterAll(async () => {
   await owner.pool.query('DELETE FROM rollup_hour WHERE tenant_id = ANY($1)', [ids]);
   await owner.pool.query('DELETE FROM request_log WHERE tenant_id = ANY($1)', [ids]);
   await owner.pool.query('DELETE FROM tenants WHERE id = ANY($1)', [ids]);
+  await wipeTotals();
   await owner.pool.query('UPDATE rollup_state SET folded_through = $1::timestamptz WHERE id = 1', [originalMark]);
   await owner.close();
   await unlock();

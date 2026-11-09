@@ -16,14 +16,22 @@ const SEED = 1000 + Math.floor(Math.random() * 4_000_000_000);
 let unlock: () => Promise<void>;
 let originalMark = '';
 
+// The totals tables have no tenant to delete by: this file owns the year 2034 in them.
+const wipeTotals = async () => {
+  await db.pool.query("DELETE FROM rollup_total_minute WHERE bucket >= '2034-01-01' AND bucket < '2035-01-01'");
+  await db.pool.query("DELETE FROM rollup_total_hour WHERE bucket >= '2034-01-01' AND bucket < '2035-01-01'");
+};
+
 beforeAll(async () => {
   unlock = await lockRollupState(testConfig().databaseUrl);
+  await wipeTotals();
   originalMark = ((await db.pool.query("SELECT folded_through::text AS m FROM rollup_state WHERE id = 1")).rows[0] as { m: string }).m;
   await db.pool.query("UPDATE rollup_state SET folded_through = 'epoch' WHERE id = 1");
   ids = await ensureTenants(db.db, prefix);
 }, 30_000);
 afterAll(async () => {
   await forget(db.db, ids);
+  await wipeTotals();
   await db.pool.query('UPDATE rollup_state SET folded_through = $1::timestamptz WHERE id = 1', [originalMark]);
   await db.close();
   await unlock();
