@@ -15,20 +15,40 @@ without any other command in between: two gateways can never both read "1 token 
 
 1. `auth/plugin.ts` (onRequest) identifies the key, as before. The cached key entry now carries `keyId`, `rpmLimit`
    and `tpmLimit`, so the limiter costs no extra database read.
-2. `ratelimit/plugin.ts` (preHandler, after the body is read) estimates the token cost:
-   `ceil(prompt characters / 4) + max_tokens` (or `max_completion_tokens`, or `RATE_LIMIT_DEFAULT_MAX_TOKENS`).
-3. A request bigger than the key's whole tokens-per-minute can never pass: `400 request_too_large`, nothing charged.
+2. `ratelimit/plugin.ts` (preHandler, after the body is read) first asks whether the route would accept the body
+   (valid JSON, a string `model`, an array `messages`). A body the route is going to answer with a 400 is not
+   charged at all: no request token, no tokens. (Such 400s cost the gateway almost nothing and need a valid key.)
+   Then it estimates the token cost: `ceil(prompt characters / 4)` plus the output allowance, which is
+   `max_tokens` (or `max_completion_tokens`) when the caller set one, else `RATE_LIMIT_DEFAULT_MAX_TOKENS`
+   trimmed to whatever is left of the key's minute, so a small request with no `max_tokens` is not refused
+   because of a default the caller never chose.
+3. A request that can never fit in the key's whole tokens-per-minute is `400 request_too_large`, nothing charged:
+   the caller named a `max_tokens` that with the prompt exceeds it, or the prompt alone does.
 4. `limiter.take()` runs `token-bucket.lua`. Allowed: the response carries `x-ratelimit-*` headers (OpenAI's names).
    Denied: `429`, `retry-after` in whole seconds (rounded up), and the same headers.
 5. The route sends the request upstream. When the answer shows the real usage, `settle()` corrects the token bucket
    by (estimate - actual): a refund if the estimate was high, a debit (the bucket may go negative) if it was low.
    Non-streamed: the `usage` object in the body. Streamed: the gateway asks the provider for it
-   (`stream_options.include_usage`) and `sse-usage.ts` reads it from the last chunk as the bytes pass, without
-   holding any of them back.
-6. If no usage ever arrives (client left, upstream failed) the estimate stays charged. A denied request is never settled.
+   (`stream_options.include_usage`) and `sse-usage.ts` reads it from the last chunk as the bytes pass. If the
+   client did not ask for usage itself, the usage-only chunk (`choices: []` plus `usage`) is removed from what it
+   receives; only the event being read is held back, every other event goes out as soon as it is complete.
+6. What is charged when things go wrong:
+   - the provider answers non-2xx (500, 429, ...) or cannot be reached (502, 504): nothing was used, the whole
+     estimate is refunded (`settle(0)`);
+   - the client leaves, or a stream fails after bytes were sent: tokens were partly used, so the estimate stays;
+   - a streamed answer with no usage in it, or a request whose `stream_options` is not an object: the estimate stays;
+   - a denied request is never charged or settled.
+
+How the request body changes for a streamed request: if the client already sent `include_usage: true` the bytes are
+forwarded untouched. If it sent no `stream_options`, `"stream_options":{"include_usage":true},` is spliced in after
+the opening brace (no JSON round trip, so large integers such as a `seed` keep every digit). If it sent
+`stream_options` without `include_usage: true` the body is rewritten through JSON. If `stream_options` is not an
+object the body is forwarded untouched and the usage is not read.
 
 If Redis does not answer within `RATE_LIMIT_REDIS_TIMEOUT_MS` the request is served, unlimited, with no limit headers
-(**fail open**, D-016). The log gets one warning when the outage starts and one note when it ends.
+(**fail open**, D-016). The log gets one warning when the outage starts and one note when it ends. A reply that
+merely arrives late may still mean the script ran and charged; if it later reports the request admitted, the
+limiter hands the request token and the tokens back, so a request that was served unlimited is not also counted.
 
 ## The script, line by line
 
@@ -106,7 +126,8 @@ Redis stores each bucket as a hash with two fields: `tokens` (how many it holds,
 
 ### The correction script
 
-`token-bucket-adjust.lua` runs after the answer. It reads the clock the same way, refills the token bucket (lines
+`token-bucket-adjust.lua` moves one bucket by a delta. It runs after the answer on the token bucket, and also on both
+buckets to hand back the charge of a take that timed out. It reads the clock the same way, refills the token bucket (lines
 that mirror 17-25), adds `delta = estimate - actual` (a refund when positive, a debit when negative), caps the
 result at capacity, and writes it back with the same expiry rule. It does not check that the bucket stays above
 zero: a request that used more than estimated leaves the bucket negative, and later requests wait until refill
@@ -127,7 +148,8 @@ brings it back.
 - **A rejected request is never charged**, and a limited response replaces the upstream's own `x-ratelimit-*`
   headers (they describe the gateway's account, not the caller's key).
 - **Limits are per key**, set with `npm run keys -- create-key <tenant> --rpm 100 --tpm 50000` or
-  `npm run keys -- set-limits <prefix> --rpm 200`. A key with none uses `RATE_LIMIT_DEFAULT_RPM` (600) and
+  `npm run keys -- set-limits <prefix> --rpm 200` (only the limits named are written, so two changes to different
+  limits cannot undo each other; it needs no pepper and no Redis for the database write). A key with none uses `RATE_LIMIT_DEFAULT_RPM` (600) and
   `RATE_LIMIT_DEFAULT_TPM` (200 000). `set-limits` writes Postgres, then overwrites the cached key entry (never a
   revoke tombstone), so the next request on any instance sees it.
 
@@ -142,6 +164,10 @@ brings it back.
 | Refund is capped at capacity; a debit delays later requests by the computed time | `ratelimit/limiter.test.ts` |
 | Redis down: served, one warning per outage | `ratelimit/limiter.test.ts`, `ratelimit/plugin.test.ts` |
 | Actual usage corrects the charge, streamed and not | `routes/chat.test.ts` |
+| Provider 500 / 429 / unreachable refund the estimate; a mid-stream failure keeps it | `routes/chat.test.ts` |
+| A body the route rejects is not charged; a small request with no `max_tokens` is admitted by a small key | `ratelimit/plugin.test.ts`, `usage/estimate.test.ts` |
+| A take that timed out but ran in Redis is handed back in both buckets | `ratelimit/limiter.test.ts` |
+| The usage-only chunk is stripped only for a client that did not ask; the body keeps big integers byte for byte | `routes/chat.test.ts`, `usage/sse-usage.test.ts` |
 | Streamed bytes in equal bytes out, forwarded at once | `usage/sse-usage.test.ts` |
 
 The exactness tests pin the limiter's clock (the script's optional fourth argument), because at 100 per minute a

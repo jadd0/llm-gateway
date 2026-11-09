@@ -38,7 +38,7 @@ migration: next free number at generate time. Residuals owned by this PR: none.
 | `packages/gateway/src/routes/chat.test.ts` | usage reaches reconcile in both modes; stream still unbuffered with the tap |
 | `packages/gateway/src/cli/keys.ts` | `create-key --rpm --tpm`; `set-limits <prefix> --rpm --tpm` |
 | `packages/gateway/src/cli/keys.test.ts` | set-limits test |
-| `packages/gateway/src/config.ts` | new rows (Decisions) |
+| `packages/gateway/src/config.ts` | new rows (Decisions); `loadCacheConfig` for set-limits |
 | `packages/gateway/src/app.ts` | register ratelimit plugin after auth |
 | `.env.example` | new rows |
 | `bench/k6/burst.js` | **new**. 1,000 requests at once at a 100 rpm key; counts 200 vs 429 |
@@ -70,24 +70,42 @@ alter table api_keys add column tpm_limit integer;   -- null = RATE_LIMIT_DEFAUL
      otherwise deducts **neither** and returns denied + ms until the short bucket has enough;
   4. writes both back with `PEXPIRE` = time to refill from empty (idle keys vanish).
   Capacity = the per-minute limit (a full minute's burst); refill = limit/60 per second.
-- **Request too large:** `tokenCost > tpm` can never pass → 400
+- **Only bodies the route accepts are charged.** The limiter asks the route's own question first (valid
+  JSON, string `model`, array `messages`, boolean `stream` if present); a body that would get a 400 from the
+  route is charged nothing, request token included. 400s cost the gateway almost nothing and need a valid key.
+- **Request too large:** when the caller set `max_tokens`/`max_completion_tokens`, prompt + that value
+  `> tpm` can never pass; when it set none, only a prompt alone `> tpm` can never pass → 400
   `{error:{type:"invalid_request_error",code:"request_too_large"}}`, no bucket touched.
-- **Estimate:** `tokenCost = ceil(promptChars / 4) + (max_tokens ?? max_completion_tokens ?? RATE_LIMIT_DEFAULT_MAX_TOKENS)`.
-  The same function is reused by PR 5. (Same principle OpenAI uses: prompt + requested output.)
+- **Estimate:** `tokenCost = ceil(promptChars / 4) + output`, where `output` is the caller's `max_tokens`
+  (or `max_completion_tokens`) if set, else `min(RATE_LIMIT_DEFAULT_MAX_TOKENS, max(0, tpm − promptEstimate))`
+  so a small request with no `max_tokens` fits a small key. `estimateTokens` (no clamp) stays the function PR 5
+  shares; the limiter uses `estimateForLimit`.
 - **Reconcile:** after the response, `adjust(tok, estimate − actualTotal)` with a tiny second
   script that adds (refund) or subtracts (debit; may go negative, so later requests wait) and
   caps at capacity. Actual usage: non-streamed from the response body's `usage`; streamed from
-  the final chunk via `sse-usage` (the gateway sets `stream_options.include_usage=true`). No
-  usage seen (client aborted, upstream error) → keep the estimate charged. A denied request is
-  never reconciled.
+  the final chunk via `sse-usage` (the gateway asks for `stream_options.include_usage=true`). What is charged:
+  provider non-2xx, 502 and 504 → the whole estimate is refunded (`settle(0)`); client left, a stream that
+  fails after bytes were sent, or an answer with no usage → the estimate stays; a denied request is never
+  reconciled. The request token is never refunded.
+- **Body handling for streamed requests:** `include_usage: true` already sent → bytes untouched. No
+  `stream_options` → `"stream_options":{"include_usage":true},` spliced in after the opening brace (no JSON
+  round trip). `stream_options` an object without `include_usage: true` → JSON round trip. Any other
+  `stream_options` shape → untouched, no usage read, estimate stays. A client that did not ask for usage
+  never receives the usage-only chunk (`choices: []` plus `usage`); it is dropped by the tap.
+- **A take that times out but later runs in Redis is handed back:** if the late reply says admitted, one request
+  token and the cost are added back to the two buckets (capped at capacity) so a request served by fail open is
+  not also counted.
 - **Streaming stays unbuffered:** the tap forwards each chunk the moment it arrives and only
-  inspects lines starting `data: {` for a `usage` field; PR 1's unbuffered test must still pass.
+  inspects lines starting `data: {` for a `usage` field; PR 1's unbuffered test must still pass. Only when it
+  strips the usage-only chunk does it hold back the single event in progress.
 - **Fail open:** Redis error or no reply within `RATE_LIMIT_REDIS_TIMEOUT_MS` → allow, no
   ratelimit headers, one warn log per outage (not per request), resume on recovery.
 - **Headers** (OpenAI's names) on every limited response: `x-ratelimit-limit-requests`,
   `x-ratelimit-remaining-requests`, `x-ratelimit-reset-requests`, and the `-tokens` trio.
   429 adds `retry-after` (whole seconds, rounded up) and body
   `{error:{type:"rate_limit_exceeded",code:"rate_limit_exceeded",message:"…requests|tokens…"}}`.
+- **`set-limits` writes only the limits named** (no read-modify-write) and needs no pepper and no Redis for the
+  database write (`loadCacheConfig`); the gateway itself still requires `REDIS_URL` when `RATE_LIMIT_ENABLED=true`.
 - **Limit changes take effect on the next request:** `set-limits` writes Postgres, then
   overwrites the key's cache entry (no NX), the same race-proof order as PR 3's revoke.
 - Order in the request path: auth → rate limit → route.
@@ -120,8 +138,8 @@ alter table api_keys add column tpm_limit integer;   -- null = RATE_LIMIT_DEFAUL
 2. `bash scripts/gate.sh` → PASS (limiter tests are the exactness proof).
 3. `bash bench/run-ratelimit.sh` → burst run: `bench/results/pr-4/burst.json` shows 100 × 200
    and 900 × 429; overhead run vs `bench/results/pr-3/` recorded in BENCHMARKS.md.
-4. curl 101 requests quickly → 101st returns 429 with `retry-after` (hop: `ratelimit/plugin.ts`
-   → `limiter.ts` → `token-bucket.lua`).
+4. 101 concurrent requests (arriving within ~0.6 s; a sequential loop sees refill) at the key from step 1 →
+   exactly one returns 429 with `retry-after` (hop: `ratelimit/plugin.ts` → `limiter.ts` → `token-bucket.lua`).
 
 ## Adversarial
 

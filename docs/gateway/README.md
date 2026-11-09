@@ -37,7 +37,7 @@ Diagram: [chat-passthrough.html](chat-passthrough.html). Code: `packages/gateway
   See [../auth/README.md](../auth/README.md).
 - **Rate limit.** After auth and before the route, a `preHandler` (`ratelimit/plugin.ts`) charges the request to the
   key's buckets or answers 429 / 400. A streamed request is sent upstream with `stream_options.include_usage=true`
-  and its bytes pass through a tap that reads the final usage; see [../rate-limiter/README.md](../rate-limiter/README.md).
+  and its bytes pass through a tap that reads the final usage (and drops the usage-only chunk if the client did not ask for it); see [../rate-limiter/README.md](../rate-limiter/README.md).
 - **Binding.** The gateway listens on `GATEWAY_HOST`, default `127.0.0.1`.
 - **Logging.** Nothing logs per request. `LOG_LEVEL` defaults to `warn`; failures log error class and code only.
 
