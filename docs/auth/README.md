@@ -25,7 +25,7 @@ only; there is no user login and no admin UI.
    valid client is only ever charged for the moment of its lookup. A cached "unknown key" is charged to the address
    without a query; a missing or malformed key is charged too. Because the take is atomic, a flood of random keys
    at any concurrency reaches Postgres at most as often as the bucket has tokens. The cost: more cold-cache valid
-   keys at once from one address than the limit (right after a restart) can be refused until tokens return. An IPv6
+   keys at once from one address than the limit (right after a restart) can be refused until tokens return. A request with no known address is never charged to a shared bucket. With `AUTH_CACHE=none` the address is charged only after Postgres finds no such key. An IPv6
    client shares one bucket per /64. The address is the socket peer's, unless the peer is in `TRUSTED_PROXIES`
    (default `127.0.0.1`), in which case `X-Forwarded-For` is believed. If Redis is down the check is skipped (fails
    open).
@@ -73,7 +73,7 @@ One warn log per outage, not per request. The client reconnects on its own with 
 ## Settings
 
 `API_KEY_PEPPER` (required, 32+ characters; the gateway refuses to start without it), `DATABASE_URL`,
-`DB_POOL_SIZE` (20), `REDIS_URL`, `REDIS_KEY_PREFIX`, `AUTH_CACHE` (`redis` or `none`; `none` exists only so the
+`DB_POOL_SIZE` (20), `REDIS_URL`, `REDIS_KEY_PREFIX`, `AUTH_CACHE` (`redis` or `none`; with `none` the address is charged only after Postgres finds no such key; `none` exists only so the
 benchmark can show the cost of Postgres on every request), `AUTH_CACHE_TTL_S` (600), `AUTH_NEGATIVE_TTL_S` (60),
 `AUTH_TOMBSTONE_TTL_S` (1200), `AUTH_FAIL_LIMIT_PER_MIN` (30; 0 turns the address limit off), `TRUSTED_PROXIES` (`127.0.0.1`; `none` trusts nobody).
 

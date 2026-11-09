@@ -20,7 +20,10 @@ so the balance is exactly what it was. See [../cache/README.md](../cache/README.
 1. `budget/plugin.ts` runs right after the rate limiter. A body the chat route would reject reserves nothing.
    A model with no price is `400 model_not_priced` (a cap can't be enforced without a price).
 2. The worst case is `ceil(prompt chars / 4)` prompt tokens plus `max_tokens` (or the model's default output cap, else
-   `RATE_LIMIT_DEFAULT_MAX_TOKENS`, when the caller set none), at the model's long-context rates when the prompt is past its threshold, priced from the static table in `pricing/prices.ts`, rounded up in micro-USD.
+   `RATE_LIMIT_DEFAULT_MAX_TOKENS`, when the caller set none; for an OpenAI-format model, which is sent no limit of the
+   gateway's, the model's documented maximum output (`maxOutputTokens` in `pricing/prices.ts`: 128,000 for gpt-6-astra and
+   gpt-5-nano, read 2026-11-09 from https://developers.openai.com/api/docs/models/gpt-6-astra and `.../gpt-5-nano`; mock-* models
+   use `MOCK_MAX_OUTPUT_TOKENS`, 4096). A tenant who cannot cover that hold gets a 402 that suggests setting `max_tokens`), at the model's long-context rates when the prompt is past its threshold, priced from the static table in `pricing/prices.ts`, rounded up in micro-USD.
    Unlike the rate limiter, the output is never trimmed to a per-minute size: money is held for the most the call can cost.
    With a fallback chain (see [../resilience/](../resilience/README.md)) the hold is priced at the **dearest model in the chain**, so a
    fallback can never push a tenant past its cap; the final charge is at the price of the model that served, and the ledger row names it.
