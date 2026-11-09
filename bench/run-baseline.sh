@@ -83,7 +83,8 @@ run_k6() { # name url stream rate warmup duration
   node -e '
     if (process.argv[2].startsWith("step-")) process.exit(0); // the throughput sweep is expected to fail at its top steps
     const m = JSON.parse(require("fs").readFileSync(process.argv[1], "utf8")).metrics;
-    const n = m["http_reqs{phase:measure}"].count, f = (m["http_req_failed{phase:measure}"] || {}).passes || 0;
+    const n = (m["http_reqs{phase:measure}"] || {}).count || 0, f = (m["http_req_failed{phase:measure}"] || {}).passes || 0;
+    if (n === 0) { console.error(process.argv[2] + ": no measured requests; the run is not a measurement"); process.exit(1); }
     if (f / n > 0.01) { console.error(process.argv[2] + ": " + f + " of " + n + " measured requests failed; the run is not a measurement"); process.exit(1); }
   ' "$OUT/$1.json" "$1"
 }

@@ -108,13 +108,16 @@ export interface Ceiling {
  * (a dropped iteration is load k6 could not send, so a step that drops is bound by the load generator).
  * The scan stops at the first step that fails.
  */
+// A p95 that is NaN (no successful response in the step, or in the first step) is a breach, never a pass.
+const over = (p95: number, limit: number) => Number.isNaN(p95) || Number.isNaN(limit) || p95 > limit;
+
 export function ceiling(steps: RampStep[]): Ceiling {
   const base = steps[0]!.p95;
   let last: number | null = null;
   for (const s of steps) {
     if (errorRate(s) > ERROR_LIMIT) return { rate: last, limit: 'errors' };
     if (droppedShare(s) > ERROR_LIMIT) return { rate: last, limit: 'k6 dropped iterations' };
-    if (s.p95 > 2 * base) return { rate: last, limit: 'p95 over 2x the first step' };
+    if (over(s.p95, 2 * base)) return { rate: last, limit: 'p95 over 2x the first step' };
     last = s.rate;
   }
   return { rate: last, limit: 'end of ramp' };
@@ -133,7 +136,7 @@ export interface Breaking {
 export function breakingPoint(steps: RampStep[]): Breaking {
   const base = steps[0]!.p95;
   for (const s of steps) {
-    if (s.p95 > 10 * base) return { rate: s.rate, reason: 'p95 over 10x the first step' };
+    if (over(s.p95, 10 * base)) return { rate: s.rate, reason: 'p95 over 10x the first step' };
     if (errorRate(s) > ERROR_LIMIT) return { rate: s.rate, reason: 'errors over 1%' };
     if (droppedShare(s) > ERROR_LIMIT) return { rate: null, reason: 'k6-bound (dropped iterations)', k6BoundAt: s.rate };
   }

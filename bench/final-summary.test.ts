@@ -109,6 +109,10 @@ describe('final summary', () => {
     expect(ceiling(flat)).toEqual({ rate: 2000, limit: 'end of ramp' });
     expect(breakingPoint(flat)).toEqual({ rate: null, reason: 'not reached' });
     expect(() => rampSteps({ metrics: {} })).toThrow('no measured steps');
+    // A step with no successful response has no p95: a breach, never a pass.
+    const nan = [...flat.slice(0, 1), { ...flat[1]!, p95: Number.NaN }];
+    expect(ceiling(nan)).toEqual({ rate: 1000, limit: 'p95 over 2x the first step' });
+    expect(breakingPoint(nan)).toEqual({ rate: 2000, reason: 'p95 over 10x the first step' });
   });
 
   it('takes 60% of the lowest repeat ceiling for the steady runs', () => {
