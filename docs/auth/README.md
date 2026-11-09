@@ -37,7 +37,8 @@ revoke cannot write the key back as valid after the tombstone exists. A test hol
 Postgres read and its fill, revokes, releases it, and checks the tombstone survived. If Redis is unreachable at
 revoke time the CLI exits non-zero and says a cached copy can live for up to `AUTH_CACHE_TTL_S`; running the
 same `revoke-key` again once Redis is up rewrites the tombstone (it is safe to repeat, and says so when the
-key was already revoked).
+key was already revoked). A prefix shared with old revoked keys still revokes the one active key, and a revoke
+waits through a brief Redis reconnect (up to 2 s) before reporting the tombstone as failed.
 
 ## Removing a tenant
 
