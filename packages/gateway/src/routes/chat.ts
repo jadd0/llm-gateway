@@ -7,18 +7,12 @@ import { chatRequest } from '../request-body.ts';
 import { usageSettler, type UsageSettler } from '../usage/settle.ts';
 import { SseUsageTap, usageFromBody } from '../usage/sse-usage.ts';
 import { logAuthRejected, providerAuthMessage, tryJson } from '../providers/common.ts';
-import type { Breaker } from '../resilience/breaker.ts';
+import type { Breaker, CallResult } from '../resilience/breaker.ts';
 import { chainFor, type Chains } from '../resilience/fallback.ts';
-import { isRetryable, planRetry, type Outcome, type RetryPolicy } from '../resilience/retry.ts';
-import { phaseOf } from '../resilience/timeouts.ts';
+import { breakerSignal, fallsOver, planRetry, type Outcome, type RetryPolicy } from '../resilience/retry.ts';
+import { isTimeout, phaseOf } from '../resilience/timeouts.ts';
 import type { UpstreamRequest } from '../providers/types.ts';
 import type { Target, Upstream } from '../upstream.ts';
-
-const TIMEOUT_CODES = new Set([
-  'UND_ERR_HEADERS_TIMEOUT',
-  'UND_ERR_BODY_TIMEOUT',
-  'UND_ERR_CONNECT_TIMEOUT',
-]);
 
 const ms = (n: number) => n.toFixed(3);
 
@@ -44,7 +38,7 @@ function upstreamFailure(reply: FastifyReply, err: unknown, refund: UsageSettler
   const code = (err as { code?: string }).code ?? '';
   // Log the error class and code only; messages can carry request data.
   reply.log.warn({ errClass: (err as Error).name, code }, 'upstream request failed');
-  if (TIMEOUT_CODES.has(code)) {
+  if (isTimeout(err)) {
     return reply.code(504).send(errorBody('upstream timed out', 'gateway_error'));
   }
   return reply.code(502).send(errorBody('upstream unreachable', 'gateway_error'));
@@ -203,7 +197,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
       deadlineHit = true;
       // The provider may have worked and no usage will come: the estimate is charged now, not when the
       // (possibly stuck) response finishes.
-      settle.keep(state.model);
+      if (working) settle.keep(state.model);
       if (guard) {
         guard.cutWith(maxDurationEvent);
         abort.abort(); // the upstream goes at once; the relay below lets the response still finish cleanly
@@ -228,6 +222,9 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     let attempts = 0;
     let lastFailure: Failure | undefined;
     let soonestReopenMs: number | undefined;
+    // True while the provider may be working on a call the gateway made: from the moment it is sent until an
+    // error answer or a refused connection shows it is not. Only then does a missed deadline keep the estimate.
+    let working = false;
     let served: { model: string; target: Target; forward: UpstreamRequest; res: Awaited<ReturnType<Target['pool']['request']>> } | undefined;
 
     models: for (const [index, model] of chain.entries()) {
@@ -236,89 +233,99 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
       const prepared = index === 0 ? headPrepared! : prepare(model, target);
       if (!prepared.ok) continue; // this model cannot take the request as sent; the next may
       const { forward } = prepared;
+      if (abort.signal.aborted) break;
+      // The first attempt always runs; later ones only if there is time left to make them worth starting.
+      if (attempts > 0 && remainingMs() < retry.minRemainingMs) break;
+      const acquired = await breaker.acquire(target.provider);
+      if (!acquired.allowed) {
+        soonestReopenMs = Math.min(soonestReopenMs ?? Infinity, acquired.retryInMs);
+        continue;
+      }
+      const permit = acquired.permit;
+      // What this model's attempts taught the breaker. It is told once, when they are all over, so that
+      // retries do not count one bad moment several times.
+      const seen = { success: false, failure: false, answered: false };
       let triesOnModel = 0;
-      while (true) {
-        if (abort.signal.aborted) break models;
-        // The first attempt always runs; later ones only if there is time left to make them worth starting.
-        if (attempts > 0 && remainingMs() < retry.minRemainingMs) break models;
-        const acquired = await breaker.acquire(target.provider);
-        if (!acquired.allowed) {
-          soonestReopenMs = Math.min(soonestReopenMs ?? Infinity, acquired.retryInMs);
-          continue models;
-        }
-        const permit = acquired.permit;
-        attempts++;
-        triesOnModel++;
-        state.model = model;
-        const attemptStarted = performance.now();
+      try {
+        if (abort.signal.aborted) break; // the deadline or the client came while the breaker was asked
+        while (true) {
+          attempts++;
+          triesOnModel++;
+          state.model = model;
+          const attemptStarted = performance.now();
 
-        let outcome: Outcome;
-        try {
-          const res = await target.pool.request({
-            path: target.basePath + forward.path,
-            method: 'POST',
-            headers: forward.headers,
-            body: forward.body,
-            signal: abort.signal,
-          });
-          if (res.statusCode < 300) {
-            void breaker.record(permit, 'success');
-            reply.log.info({ model, target: target.provider, outcome: res.statusCode, ms: ms(performance.now() - attemptStarted) }, 'upstream attempt');
-            served = { model, target, forward, res };
-            break models;
-          }
-          // The provider's own error answer: kept (read in full, which also frees the socket) in case it is
-          // the one the client gets.
-          let body: Buffer;
+          let outcome: Outcome;
           try {
-            body = Buffer.from(await res.body.arrayBuffer());
-          } catch (err) {
-            if (abort.signal.aborted) {
-              void breaker.record(permit, 'abandoned');
+            working = true;
+            const res = await target.pool.request({
+              path: target.basePath + forward.path,
+              method: 'POST',
+              headers: forward.headers,
+              body: forward.body,
+              signal: abort.signal,
+            });
+            if (res.statusCode < 300) {
+              seen.success = true;
+              reply.log.info({ model, target: target.provider, outcome: res.statusCode, ms: ms(performance.now() - attemptStarted) }, 'upstream attempt');
+              served = { model, target, forward, res };
               break models;
             }
-            // The status alone decides what happens next; the client gets the answer without its body.
-            reply.log.warn({ errClass: (err as Error).name, code: (err as { code?: string }).code }, 'upstream error body unreadable');
-            body = Buffer.alloc(0);
+            // The provider answered with an error: it is not working on the request any more.
+            working = false;
+            // The provider's own error answer: kept (read in full, which also frees the socket) in case it is
+            // the one the client gets.
+            let body: Buffer;
+            try {
+              body = Buffer.from(await res.body.arrayBuffer());
+            } catch (err) {
+              if (abort.signal.aborted) break models;
+              // The status alone decides what happens next; the client gets the answer without its body.
+              reply.log.warn({ errClass: (err as Error).name, code: (err as { code?: string }).code }, 'upstream error body unreadable');
+              body = Buffer.alloc(0);
+            }
+            outcome = { kind: 'status', status: res.statusCode };
+            lastFailure = { kind: 'status', model, target, status: res.statusCode, headers: res.headers, body };
+          } catch (err) {
+            const phase = abort.signal.aborted ? 'deadline' : phaseOf(err);
+            if (phase === 'deadline') break models;
+            if (phase === 'connect') working = false; // nothing reached the provider
+            outcome = { kind: 'error', phase };
+            lastFailure = { kind: 'error', model, err };
           }
-          outcome = { kind: 'status', status: res.statusCode };
-          lastFailure = { kind: 'status', model, target, status: res.statusCode, headers: res.headers, body };
-          // A status the caller caused (400, 404...) says the provider is alive; it is not a failure of it.
-          await breaker.record(permit, isRetryable(outcome) ? 'failure' : 'answered');
-        } catch (err) {
-          const phase = abort.signal.aborted ? 'deadline' : phaseOf(err);
-          outcome = { kind: 'error', phase };
-          if (phase === 'deadline') {
-            void breaker.record(permit, 'abandoned');
-            break models;
-          }
-          lastFailure = { kind: 'error', model, err };
-          await breaker.record(permit, isRetryable(outcome) ? 'failure' : 'abandoned');
-        }
+          const signal = breakerSignal(outcome);
+          if (signal === 'failure') seen.failure = true;
+          else if (signal === 'answered') seen.answered = true;
 
-        // Class and code only: an error's message can carry request data.
-        const failureLog =
-          outcome.kind === 'status'
-            ? { outcome: outcome.status }
-            : { outcome: outcome.phase, code: (lastFailure?.kind === 'error' ? (lastFailure.err as { code?: string }).code : undefined) ?? '' };
-        reply.log.warn({ model, target: target.provider, ...failureLog, ms: ms(performance.now() - attemptStarted) }, 'upstream attempt failed');
-        if (!isRetryable(outcome)) break models; // no other attempt or model would change the answer
-        const step = planRetry(
-          {
-            outcome,
-            retryAfter: lastFailure?.kind === 'status' ? lastFailure.headers['retry-after'] : undefined,
-            attemptsMade: triesOnModel,
-            remainingMs: remainingMs(),
-            nowMs: Date.now(),
-          },
-          retry,
-        );
-        if (step.action === 'next-model') continue models;
-        try {
-          await sleep(step.waitMs, undefined, { signal: abort.signal });
-        } catch {
-          break models; // the deadline passed or the client left while waiting
+          // Class and code only: an error's message can carry request data.
+          const failureLog =
+            outcome.kind === 'status'
+              ? { outcome: outcome.status }
+              : { outcome: outcome.phase, code: (lastFailure?.kind === 'error' ? (lastFailure.err as { code?: string }).code : undefined) ?? '' };
+          reply.log.warn({ model, target: target.provider, ...failureLog, ms: ms(performance.now() - attemptStarted) }, 'upstream attempt failed');
+          if (!fallsOver(outcome)) break models; // no other attempt or model would change the answer
+          const step = planRetry(
+            {
+              outcome,
+              retryAfter: lastFailure?.kind === 'status' ? lastFailure.headers['retry-after'] : undefined,
+              attemptsMade: triesOnModel,
+              remainingMs: remainingMs(),
+              nowMs: Date.now(),
+            },
+            retry,
+          );
+          if (step.action === 'next-model') continue models;
+          try {
+            await sleep(step.waitMs, undefined, { signal: abort.signal });
+          } catch {
+            break models; // the deadline passed or the client left while waiting
+          }
         }
+      } finally {
+        const result: CallResult = seen.success ? 'success' : seen.failure ? 'failure' : seen.answered ? 'answered' : 'abandoned';
+        const recorded = breaker.record(permit, result);
+        // A failure is in place before the next request looks; the rest need not hold this one up.
+        if (result === 'failure' || result === 'answered') await recorded;
+        else void recorded;
       }
     }
 
@@ -326,7 +333,12 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     if (state.model !== undefined) reply.header('x-gateway-model', state.model);
 
     if (!served) {
-      if (deadlineHit) return tooLong(); // the estimate stays: the provider may have worked
+      if (deadlineHit) {
+        // The estimate stays only if a call was in flight (the deadline timer kept it); a deadline that fell
+        // in a backoff, a breaker check or an error body read cost the provider nothing.
+        if (!working) settle.refund();
+        return tooLong();
+      }
       if (abort.signal.aborted) return reply; // client already gone
       return answerFailure(reply, request, settle, lastFailure, soonestReopenMs, { started, dispatched });
     }
@@ -464,18 +476,25 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     timing: { started: number; dispatched: number },
   ) {
     settle.refund();
+    const reopenAfter = soonestReopenMs !== undefined ? String(Math.max(1, Math.ceil(soonestReopenMs / 1000))) : undefined;
     if (failure === undefined) {
-      if (soonestReopenMs !== undefined) reply.header('retry-after', String(Math.max(1, Math.ceil(soonestReopenMs / 1000))));
+      if (reopenAfter !== undefined) reply.header('retry-after', reopenAfter);
       return reply
         .code(503)
         .send(errorBody('No provider is available for this model right now. Try again shortly.', 'gateway_error', 'all_providers_unavailable'));
     }
-    if (failure.kind === 'error') return upstreamFailure(reply, failure.err, null);
+    // Models skipped by open breakers after an attempt failed: the client is told when one may answer, unless
+    // the provider already said how long to wait.
+    if (failure.kind === 'error') {
+      if (reopenAfter !== undefined) reply.header('retry-after', reopenAfter);
+      return upstreamFailure(reply, failure.err, null);
+    }
 
     const extra = passthroughHeaders(failure.headers, request.rateLimit != null);
     const gwTiming = `gw-pre;dur=${ms(timing.dispatched - timing.started)}, upstream;dur=${ms(performance.now() - timing.dispatched)}`;
     const providerTiming = asText(extra['server-timing']);
     reply.headers(extra).header('server-timing', providerTiming ? `${providerTiming}, ${gwTiming}` : gwTiming);
+    if (reopenAfter !== undefined && extra['retry-after'] === undefined) reply.header('retry-after', reopenAfter);
 
     // The provider rejected the gateway's own credential. That is not the caller's doing and the provider's
     // wording is not the caller's business: they get a generic 502. The log keeps the status and the provider's

@@ -10,7 +10,7 @@ import { createLimiter } from './ratelimit/limiter.ts';
 import { rateLimit } from './ratelimit/plugin.ts';
 import { chatRoutes } from './routes/chat.ts';
 import { createRedis } from './redis.ts';
-import { createBreaker } from './resilience/breaker.ts';
+import { createBreaker, probeLockTtlMs } from './resilience/breaker.ts';
 import { chainFor } from './resilience/fallback.ts';
 import { createUpstream } from './upstream.ts';
 
@@ -41,11 +41,11 @@ export function buildApp(
   const handle = createDb({ databaseUrl: config.databaseUrl, poolSize: config.dbPoolSize });
   // One client serves the key cache and the rate limiter. Its command timeout covers the limiter's
   // own timeout, so the limiter decides when to give up, not the socket.
-  const useRedis =
-    config.redisUrl !== undefined && (config.authCache === 'redis' || config.rateLimitEnabled || config.budgetEnabled);
+  // The circuit breaker is always on and shares its state through Redis, so a configured Redis is always used.
+  const useRedis = config.redisUrl !== undefined;
   const redis = useRedis
     ? createRedis(config.redisUrl!, {
-        commandTimeoutMs: Math.max(500, config.rateLimitRedisTimeoutMs, config.budgetRedisTimeoutMs),
+        commandTimeoutMs: Math.max(500, config.rateLimitRedisTimeoutMs, config.budgetRedisTimeoutMs, config.breakerRedisTimeoutMs),
       })
     : null;
   const keyStore = keyStoreFromConfig(config, handle.db, config.authCache === 'redis' ? redis : null, app.log);
@@ -123,8 +123,9 @@ export function buildApp(
       openMs: config.breakerOpenMs,
     },
     redisTimeoutMs: config.breakerRedisTimeoutMs,
-    // A probe that never reports back frees the breaker once the longest attempt it could be making has lapsed.
-    probeTtlMs: config.upstreamConnectTimeoutMs + config.upstreamHeadersTimeoutMs,
+    // A probe that never reports back frees the breaker once the longest attempt it could be making has
+    // lapsed, but never later than one cooldown.
+    probeTtlMs: probeLockTtlMs(config.upstreamConnectTimeoutMs + config.upstreamHeadersTimeoutMs, config.breakerOpenMs),
     log: app.log,
     ...(extra.breakerClock ? { clock: extra.breakerClock } : {}),
   });

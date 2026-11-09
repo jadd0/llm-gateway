@@ -415,6 +415,118 @@ describe('retries, fallback and breaker through the chat route', { timeout: 60_0
   });
 });
 
+describe('what counts as a failure, and where a failure leads', { timeout: 60_000 }, () => {
+  it('429 is retried and falls over but never opens a breaker', async () => {
+    A.settings.outage = 'error';
+    A.settings.errorStatus = 429;
+    const gw = await gateway({ BREAKER_MIN_FAILURES: '1', RETRY_MAX_ATTEMPTS_PER_MODEL: '1' });
+    const s = await tenant();
+    for (let i = 1; i <= 3; i++) {
+      const res = await send(gw, s.key);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('x-gateway-model')).toBe(MODELS.b);
+      expect(A.hits).toBe(i); // A is asked every time: a breaker that opens at one failure never opened
+    }
+  });
+
+  it.each([401, 403, 404])('%i from A skips the same-model retry and moves to B', async (status) => {
+    A.settings.outage = 'error';
+    A.settings.errorStatus = status;
+    const gw = await gateway({ BREAKER_MIN_FAILURES: '1', RETRY_MAX_ATTEMPTS_PER_MODEL: '3' });
+    const s = await tenant();
+    for (let i = 1; i <= 2; i++) {
+      const res = await send(gw, s.key);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('x-gateway-model')).toBe(MODELS.b);
+      expect(res.headers.get('x-gateway-attempts')).toBe('2');
+      expect(A.hits).toBe(i); // once per request, and never counted against A's breaker
+    }
+  });
+
+  it('401 from every model in the chain ends as the generic 502 provider_auth_failed', async () => {
+    for (const m of [A, B]) {
+      m.settings.outage = 'error';
+      m.settings.errorStatus = 401;
+    }
+    const gw = await gateway();
+    const s = await tenant();
+    const res = await send(gw, s.key);
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ error: { code: 'provider_auth_failed' } });
+    expect([A.hits, B.hits]).toEqual([1, 1]);
+    await until(() => heldMicros(s.tenantId), (h) => h === 0);
+  });
+
+  it('three attempts on A are one breaker outcome', async () => {
+    A.settings.outage = 'error';
+    A.settings.errorStatus = 503;
+    const gw = await gateway({ BREAKER_MIN_FAILURES: '3', RETRY_MAX_ATTEMPTS_PER_MODEL: '3' });
+    const s = await tenant();
+    expect((await send(gw, s.key)).headers.get('x-gateway-model')).toBe(MODELS.b);
+    expect(A.hits).toBe(3);
+    // One recorded failure of three needed: the breaker is still closed and the next request tries A again.
+    expect((await send(gw, s.key)).headers.get('x-gateway-model')).toBe(MODELS.b);
+    expect(A.hits).toBe(6);
+  });
+
+  it('a deadline that falls while a 503 body is being read refunds everything', async () => {
+    const stuck = await stubServer((req, res) => {
+      req.resume();
+      res.writeHead(503, { 'content-type': 'application/json' });
+      res.write('{"error":'); // the rest never comes
+    });
+    closers.push(() => new Promise((r) => (stuck.server.closeAllConnections(), stuck.server.close(r))));
+    const gw = await gateway({ MOCK_BASE_URL: stuck.url, MODEL_FALLBACKS: '', UPSTREAM_MAX_DURATION_MS: '500' });
+    const s = await tenant();
+    const res = await send(gw, s.key);
+    expect(res.status).toBe(504);
+    await until(() => heldMicros(s.tenantId), (h) => h === 0);
+    expect(await ledger(s.tenantId)).toEqual([]); // the provider had answered with an error: no spend
+  });
+
+  it('a deadline that falls with a call in flight keeps the estimate', async () => {
+    A.settings.outage = 'hang';
+    const gw = await gateway({ MODEL_FALLBACKS: '', UPSTREAM_MAX_DURATION_MS: '400' });
+    const s = await tenant();
+    const res = await send(gw, s.key);
+    expect(res.status).toBe(504);
+    const rows = await until(() => ledger(s.tenantId), (r) => r.length === 1);
+    expect(rows[0]).toMatchObject({ estimated: true });
+    await until(() => heldMicros(s.tenantId), (h) => h === 0);
+  });
+
+  it('an exhausted chain with a skipped open breaker carries retry-after for the soonest reopen', async () => {
+    for (const m of [A, B]) {
+      m.settings.outage = 'error';
+      m.settings.errorStatus = 503;
+    }
+    const clock = 1_700_000_000_000;
+    const gw = await gateway(
+      { BREAKER_MIN_FAILURES: '2', RETRY_MAX_ATTEMPTS_PER_MODEL: '1', BREAKER_OPEN_MS: '20000' },
+      { breakerClock: () => clock },
+    );
+    const s = await tenant();
+    // B alone (it has no chain) fails twice and opens.
+    for (let i = 0; i < 2; i++) expect((await send(gw, s.key, { model: MODELS.b })).status).toBe(503);
+    const bHits = B.hits;
+    const res = await send(gw, s.key); // A fails, B is skipped
+    expect(res.status).toBe(503);
+    expect(res.headers.get('retry-after')).toBe('20');
+    expect(B.hits).toBe(bHits);
+  });
+});
+
+describe('the breaker with nothing else using Redis', () => {
+  it('is shared through Redis when the auth cache, rate limit and budget are all off', async () => {
+    A.settings.outage = 'error';
+    A.settings.errorStatus = 503;
+    const gw = await gateway({ AUTH_CACHE: 'none', RATE_LIMIT_ENABLED: 'false', BUDGET_ENABLED: 'false', BREAKER_MIN_FAILURES: '1', RETRY_MAX_ATTEMPTS_PER_MODEL: '1' });
+    const s = await tenant();
+    expect((await send(gw, s.key)).status).toBe(200);
+    expect((await redis.keys(`${prefix}breaker:*`)).length).toBeGreaterThan(0);
+  });
+});
+
 describe('budget with a fallback chain', { timeout: 60_000 }, () => {
   // Real prices, served by the mocks: a cheap model first, a dear one as its fallback.
   const CHEAP = 'gpt-5-nano';

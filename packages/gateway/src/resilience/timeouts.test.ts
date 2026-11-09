@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { phaseOf } from './timeouts.ts';
+import { isTimeout, phaseOf } from './timeouts.ts';
 
 const coded = (code: string, name = 'Error') => Object.assign(new Error('x'), { code, name });
 
@@ -16,5 +16,14 @@ describe('phaseOf', () => {
     expect(phaseOf(Object.assign(new Error('fetch failed'), { cause: coded('ECONNREFUSED') }))).toBe('connect');
     expect(phaseOf(new TypeError('boom'))).toBe('other');
     expect(phaseOf(undefined)).toBe('other');
+  });
+});
+
+describe('isTimeout', () => {
+  it('is true for the three timeouts, wrapped or not, and for nothing else', () => {
+    expect(['UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT'].map((c) => isTimeout(coded(c)))).toEqual([true, true, true]);
+    expect(isTimeout(Object.assign(new Error('fetch failed'), { cause: coded('UND_ERR_CONNECT_TIMEOUT') }))).toBe(true);
+    expect(['ECONNREFUSED', 'UND_ERR_SOCKET', 'UND_ERR_ABORTED'].map((c) => isTimeout(coded(c)))).toEqual([false, false, false]);
+    expect(isTimeout(new TypeError('boom'))).toBe(false);
   });
 });

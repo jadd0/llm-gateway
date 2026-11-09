@@ -42,17 +42,27 @@ export interface Breaker {
 }
 
 /**
+ * The probe lock's TTL: the longest attempt the probe could be making, but never more than one cooldown, so a
+ * permit lost on its way back to the caller (the Redis reply timed out after the script took the lock) keeps
+ * the breaker half-open for at most as long as it was open.
+ */
+export const probeLockTtlMs = (attemptMs: number, openMs: number): number => Math.min(attemptMs, openMs);
+
+/**
  * The state machine in memory, one per process. It is the breaker while Redis is unreachable, and the same
  * rules as breaker.lua: closed, open for `openMs`, then half-open with exactly one probe.
  */
 export class LocalBreaker {
   readonly #settings: BreakerSettings;
   readonly #now: () => number;
-  readonly #targets = new Map<string, { openUntil: number | null; probing: boolean; seconds: Map<number, [total: number, failed: number]> }>();
+  readonly #probeTtlMs: number;
+  readonly #targets = new Map<string, { openUntil: number | null; probeUntil: number | null; seconds: Map<number, [total: number, failed: number]> }>();
 
-  constructor(settings: BreakerSettings, now: () => number = Date.now) {
+  /** `probeTtlMs`: how long a probe may hold the half-open breaker before another is let through. */
+  constructor(settings: BreakerSettings, now: () => number = Date.now, probeTtlMs: number = settings.openMs) {
     this.#settings = settings;
     this.#now = now;
+    this.#probeTtlMs = probeTtlMs;
   }
 
   clear(): void {
@@ -62,7 +72,7 @@ export class LocalBreaker {
   #state(target: string) {
     let s = this.#targets.get(target);
     if (!s) {
-      s = { openUntil: null, probing: false, seconds: new Map() };
+      s = { openUntil: null, probeUntil: null, seconds: new Map() };
       this.#targets.set(target, s);
     }
     return s;
@@ -73,8 +83,9 @@ export class LocalBreaker {
     const now = this.#now();
     if (s.openUntil === null) return { allowed: true, permit: { target, probe: false, source: 'local' } };
     if (now < s.openUntil) return { allowed: false, retryInMs: s.openUntil - now };
-    if (s.probing) return { allowed: false, retryInMs: this.#settings.openMs };
-    s.probing = true;
+    // A probe in flight: the breaker may be tried again when its lock lapses, as the Redis lock's PTTL says.
+    if (s.probeUntil !== null && now < s.probeUntil) return { allowed: false, retryInMs: Math.max(s.probeUntil - now, 1) };
+    s.probeUntil = now + this.#probeTtlMs;
     return { allowed: true, permit: { target, probe: true, source: 'local' } };
   }
 
@@ -83,7 +94,7 @@ export class LocalBreaker {
     const now = this.#now();
     const { windowMs, minFailures, failureRatio, openMs } = this.#settings;
     if (permit.probe) {
-      s.probing = false;
+      s.probeUntil = null;
       if (result === 'failure') s.openUntil = now + openMs;
       else if (result === 'success' || result === 'answered') this.#targets.delete(permit.target);
       return;
@@ -121,7 +132,12 @@ export interface BreakerOptions {
   redisTimeoutMs: number;
   /** How long to leave Redis alone after it failed, so a dead Redis costs one timeout per interval, not per call. */
   redisRetryMs?: number;
-  /** How long a half-open probe may hold the lock if it never reports back. */
+  /**
+   * How long a half-open probe may hold the lock if it never reports back. A permit whose holder never heard
+   * of it (the reply was lost) costs at most this long, so it should be about one cooldown: the shorter of the
+   * longest attempt and `openMs`. A probe that outlives it lets a second probe through, which only costs one
+   * more call to a provider that is probably still down.
+   */
   probeTtlMs: number;
   log?: { warn(obj: object, msg: string): void; info(obj: object, msg: string): void };
   /** Pins the clock (ms) used by both the script and the local breaker. Tests only: production reads Redis TIME. */
@@ -135,7 +151,7 @@ class RedisTimeout extends Error {
 export function createBreaker(opts: BreakerOptions): Breaker {
   const { redis, keyPrefix, settings, redisTimeoutMs, probeTtlMs, log, clock } = opts;
   const redisRetryMs = opts.redisRetryMs ?? 1000;
-  const local = new LocalBreaker(settings, clock);
+  const local = new LocalBreaker(settings, clock, probeTtlMs);
   const cmd = redis as Commands | null;
   if (cmd) cmd.defineCommand('brk', { numberOfKeys: 2, lua: BREAKER_LUA });
   // The hash tag puts both keys of a target in one Redis Cluster slot.
@@ -216,9 +232,12 @@ export function createBreaker(opts: BreakerOptions): Breaker {
         'record', code, permit.probe ? 1 : 0, settings.windowMs, settings.minFailures, settings.failureRatio, settings.openMs,
       ];
       if (clock) args.push(clock());
+      const wasDown = down;
       const r = await viaRedis((c) => c.brk(k1, k2, ...args));
-      // Redis went away between the permit and the report: the local breaker still learns what happened.
-      if (r === undefined) local.record({ ...permit, source: 'local' }, result);
+      // Redis was already declared down: the local breaker learns what happened. A report that has just
+      // timed out may still have landed in Redis, so it is not also counted here (a double count could open
+      // a local breaker that Redis would not).
+      if (r === undefined && wasDown) local.record({ ...permit, source: 'local' }, result);
     },
   };
 }

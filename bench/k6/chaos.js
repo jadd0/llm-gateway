@@ -85,7 +85,7 @@ function fire(stream) {
   const n = Number(res.headers['X-Gateway-Attempts'] || 0);
   attempts.add(n, tags);
   if (n === 1) singleAttempt.add(1, tags);
-  if (res.headers['X-Gateway-Model'] && res.headers['X-Gateway-Model'] !== MODEL) fallbackServed.add(1, tags);
+  if (res.status >= 200 && res.status < 300 && res.headers['X-Gateway-Model'] && res.headers['X-Gateway-Model'] !== MODEL) fallbackServed.add(1, tags);
 }
 
 export function json() {

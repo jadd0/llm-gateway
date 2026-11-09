@@ -2,7 +2,7 @@ import { randomBytes } from 'node:crypto';
 import { Redis } from 'ioredis';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { cleanup, testConfig } from '../test-env.ts';
-import { createBreaker, type Breaker, type BreakerSettings } from './breaker.ts';
+import { LocalBreaker, createBreaker, probeLockTtlMs, type Breaker, type BreakerSettings } from './breaker.ts';
 
 // The run's own Redis prefix, so parallel files and other worktrees never share a key. A pinned clock makes
 // every count exact: the window only moves when a test moves it.
@@ -13,14 +13,14 @@ const T0 = 1_700_000_000_000;
 let now = T0;
 let redis: Redis;
 
-const make = (over: { redis?: Redis | null; redisTimeoutMs?: number; redisRetryMs?: number; target?: string } = {}) =>
+const make = (over: { redis?: Redis | null; redisTimeoutMs?: number; redisRetryMs?: number; probeTtlMs?: number } = {}) =>
   createBreaker({
     redis: over.redis === undefined ? redis : over.redis,
     keyPrefix: prefix,
     settings,
     redisTimeoutMs: over.redisTimeoutMs ?? 5_000,
     redisRetryMs: over.redisRetryMs ?? 1000,
-    probeTtlMs: 125_000,
+    probeTtlMs: over.probeTtlMs ?? 125_000,
     clock: () => now,
   });
 let n = 0;
@@ -138,6 +138,25 @@ describe('breaker (real Redis)', () => {
     expect(await b.acquire(t)).toMatchObject({ allowed: true, permit: { probe: true } });
   });
 
+  it('a probe permit that never reached the caller frees the breaker after the probe lock lapses', async () => {
+    const b = make({ probeTtlMs: 150 });
+    const t = target();
+    await record(b, t, fails(5));
+    now += 15_000;
+    // The script took the lock; the caller never heard (modelled by never recording the permit).
+    expect(await b.acquire(t)).toMatchObject({ allowed: true, permit: { probe: true } });
+    const blocked = await b.acquire(t);
+    expect(blocked.allowed).toBe(false);
+    if (!blocked.allowed) expect(blocked.retryInMs).toBeLessThanOrEqual(150);
+    await new Promise((r) => setTimeout(r, 250));
+    expect(await b.acquire(t)).toMatchObject({ allowed: true, permit: { probe: true } });
+  });
+
+  it('the probe lock TTL is the shorter of the attempt timeout and one cooldown', () => {
+    expect(probeLockTtlMs(125_000, 15_000)).toBe(15_000);
+    expect(probeLockTtlMs(3_000, 15_000)).toBe(3_000);
+  });
+
   it('4xx outcomes never count', async () => {
     const b = make();
     const t = target();
@@ -175,6 +194,28 @@ describe('breaker with Redis down', () => {
     expect(performance.now() - t2).toBeLessThan(200);
   });
 
+  it('a record that times out is not also counted locally', async () => {
+    let calls = 0;
+    const slowRecord = {
+      defineCommand: (name: string, def: object) => (redis as any).defineCommand(name, def),
+      brk: (...a: unknown[]) => (a[2] === 'record' && ++calls === 1 ? new Promise<number[]>(() => {}) : (redis as any).brk(...a)),
+    } as unknown as Redis;
+    const b = make({ redis: slowRecord, redisTimeoutMs: 40, redisRetryMs: 600_000 });
+    const t = target();
+    const first = await b.acquire(t);
+    if (!first.allowed) throw new Error('closed breaker refused');
+    expect(first.permit.source).toBe('redis');
+    await b.record(first.permit, 'failure'); // times out: Redis may or may not have it, and is now declared down
+    // Four more failures on the local breaker (min failures is 5): had the timed-out one been counted too, it would open.
+    for (let i = 0; i < 4; i++) {
+      const a = await b.acquire(t);
+      if (!a.allowed) throw new Error('opened early');
+      expect(a.permit.source).toBe('local');
+      await b.record(a.permit, 'failure');
+    }
+    expect((await b.acquire(t)).allowed).toBe(true);
+  });
+
   it('local state dropped when Redis returns', async () => {
     let broken = true;
     const flaky = {
@@ -195,5 +236,23 @@ describe('breaker with Redis down', () => {
     expect(back).toMatchObject({ allowed: true, permit: { source: 'redis' } });
     broken = true;
     expect(await b.acquire(t)).toMatchObject({ allowed: true, permit: { source: 'local' } });
+  });
+});
+
+describe('local breaker probe', () => {
+  it('a probe in flight is retried when its lock lapses, not after a whole cooldown, and the lock lapses', () => {
+    let t = T0;
+    const b = new LocalBreaker(settings, () => t, 3_000);
+    for (let i = 0; i < 5; i++) {
+      const a = b.acquire('x');
+      if (!a.allowed) throw new Error('opened early');
+      b.record(a.permit, 'failure');
+    }
+    t += 15_000;
+    expect(b.acquire('x')).toMatchObject({ allowed: true, permit: { probe: true } });
+    t += 1_000;
+    expect(b.acquire('x')).toEqual({ allowed: false, retryInMs: 2_000 });
+    t += 2_000; // the probe never reported: another is let through
+    expect(b.acquire('x')).toMatchObject({ allowed: true, permit: { probe: true } });
   });
 });

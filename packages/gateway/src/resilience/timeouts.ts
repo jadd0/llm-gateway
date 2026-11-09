@@ -52,3 +52,12 @@ export function phaseOf(err: unknown): Phase {
   if (e?.cause !== undefined && e.cause !== err) return phaseOf(e.cause);
   return 'other';
 }
+
+/** Whether an error is a timeout of any of the three limits (a connect timeout is a connect-phase error). */
+export function isTimeout(err: unknown): boolean {
+  const phase = phaseOf(err);
+  if (phase === 'headers' || phase === 'body') return true;
+  const e = err as { code?: unknown; cause?: unknown } | null;
+  if (e?.code === 'UND_ERR_CONNECT_TIMEOUT') return true;
+  return e?.cause !== undefined && e.cause !== err && isTimeout(e.cause);
+}

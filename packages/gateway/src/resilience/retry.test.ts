@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { backoffMs, isRetryable, planRetry, retriesSameModel, retryAfterMs, type Outcome, type RetryPolicy } from './retry.ts';
+import { backoffMs, breakerSignal, fallsOver, isRetryable, planRetry, retriesSameModel, retryAfterMs, type Outcome, type RetryPolicy } from './retry.ts';
 import type { Phase } from './timeouts.ts';
 
 const status = (s: number): Outcome => ({ kind: 'status', status: s });
@@ -21,6 +21,25 @@ describe('retry classification', () => {
       expect(isRetryable(status(s))).toBe(false);
       expect(retriesSameModel(status(s))).toBe(false);
     }
+  });
+});
+
+describe('falling over to the next model and the breaker', () => {
+  it('401 403 404 move on to the next model; 400 413 422 do not', () => {
+    const statuses = Array.from({ length: 600 }, (_, i) => i).filter((s) => fallsOver(status(s)));
+    expect(statuses).toEqual([401, 403, 404, 429, 500, 502, 503, 504, 529]);
+    for (const s of [401, 403, 404]) expect(retriesSameModel(status(s))).toBe(false);
+    const phases: Phase[] = ['connect', 'headers', 'body', 'deadline', 'other'];
+    expect(phases.filter((p) => fallsOver(error(p)))).toEqual(['connect', 'headers']);
+  });
+
+  it('only the provider-blamed statuses and connection errors are breaker failures; 429 never is', () => {
+    const failures = Array.from({ length: 600 }, (_, i) => i).filter((s) => breakerSignal(status(s)) === 'failure');
+    expect(failures).toEqual([500, 502, 503, 504, 529]);
+    for (const s of [400, 401, 403, 404, 413, 422, 429]) expect(breakerSignal(status(s))).toBe('answered');
+    expect(breakerSignal(error('connect'))).toBe('failure');
+    expect(breakerSignal(error('headers'))).toBe('failure');
+    expect(['body', 'deadline', 'other'].map((p) => breakerSignal(error(p as Phase)))).toEqual(['abandoned', 'abandoned', 'abandoned']);
   });
 });
 
