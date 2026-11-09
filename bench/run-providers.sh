@@ -45,7 +45,7 @@ MOCK_PORT="$MOCK_PORT" MOCK_LATENCY_MS=200 MOCK_TOKEN_DELAY_MS=10 MOCK_COMPLETIO
   node "$ROOT/packages/mock-provider/src/server.ts" >/dev/null &
 MOCK_PID=$!; PIDS+=("$MOCK_PID")
 wait_up "http://127.0.0.1:$MOCK_PORT/__control" 200 "$MOCK_PID"
-GATEWAY_PORT="$GATEWAY_PORT" OPENAI_BASE_URL="http://127.0.0.1:$MOCK_PORT" MOCK_BASE_URL="http://127.0.0.1:$MOCK_PORT" \
+GATEWAY_PORT="$GATEWAY_PORT" OPENAI_BASE_URL="http://127.0.0.1:$MOCK_PORT/v1" MOCK_BASE_URL="http://127.0.0.1:$MOCK_PORT" \
   LOG_LEVEL=warn AUTH_CACHE=redis BUDGET_ENABLED="${BUDGET_ENABLED:-false}" \
   node --env-file-if-exists="$ROOT/.env.local" "$ROOT/packages/gateway/src/server.ts" >/dev/null &
 GW_PID=$!; PIDS+=("$GW_PID")

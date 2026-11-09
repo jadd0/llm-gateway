@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { ChatBody } from '../request-body.ts';
 import type { Usage } from '../usage/sse-usage.ts';
+import { sseData } from './sse.ts';
 import type { AdapterClock, MappedError } from './types.ts';
 
 export const defaultClock: AdapterClock = {
@@ -13,33 +14,39 @@ export interface Unsupported {
   message: string;
 }
 
-// Parameters with no equivalent in the translated formats. They are refused rather than dropped: a client
-// that asks for tools or log probabilities and silently gets neither would build on a wrong answer.
-const REFUSED = [
-  'tools',
-  'tool_choice',
-  'functions',
-  'function_call',
-  'parallel_tool_calls',
-  'logprobs',
-  'top_logprobs',
-  'response_format',
-  'audio',
-  'modalities',
-  'prediction',
-  'logit_bias',
-  'presence_penalty',
-  'frequency_penalty',
-  'seed',
-] as const;
+// Parameters with no equivalent in the translated formats. A value that asks for something is refused rather
+// than dropped: a client that asks for tools or log probabilities and silently gets neither would build on
+// a wrong answer. A neutral value (what an SDK sends for "no preference") asks for nothing and passes.
+const isNull = (v: unknown) => v === undefined || v === null;
+const isZero = (v: unknown) => isNull(v) || v === 0;
+const REFUSED: Record<string, (value: unknown) => boolean> = {
+  tools: isNull,
+  tool_choice: isNull,
+  functions: isNull,
+  function_call: isNull,
+  parallel_tool_calls: isNull,
+  logprobs: (v) => isNull(v) || v === false,
+  top_logprobs: isZero,
+  response_format: isNull,
+  audio: isNull,
+  modalities: isNull,
+  prediction: isNull,
+  logit_bias: isNull,
+  presence_penalty: isZero,
+  frequency_penalty: isZero,
+  seed: isNull,
+  reasoning_effort: isNull,
+};
+// Fields these formats have no use for, dropped without a word: they change nothing about the answer
+// (user, metadata, service_tier, store).
 
 export function unsupportedParameter(body: ChatBody): Unsupported | undefined {
-  for (const field of REFUSED) {
-    if (body[field] !== undefined && body[field] !== null) {
+  for (const [field, neutral] of Object.entries(REFUSED)) {
+    if (!neutral(body[field])) {
       return { param: field, message: `"${field}" is not supported for this model: the gateway handles text chat only.` };
     }
   }
-  if (body.n !== undefined && body.n !== 1) {
+  if (!isNull(body.n) && body.n !== 1) {
     return { param: 'n', message: '"n" above 1 is not supported for this model: the gateway returns one choice.' };
   }
   return undefined;
@@ -98,7 +105,38 @@ export function conversation(messages: unknown[]): Conversation | Unsupported {
   return { system, turns };
 }
 
-export const isUnsupported = (v: Conversation | Unsupported): v is Unsupported => 'param' in v;
+export const isUnsupported = (v: object): v is Unsupported => 'param' in v;
+
+export const count = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
+
+export interface Prepared {
+  convo: Conversation;
+  stop: string[] | undefined;
+  temperature: number | undefined;
+  topP: number | undefined;
+  /** The caller's output limit (max_tokens, else max_completion_tokens), if it gave one. */
+  maxTokens: number | undefined;
+}
+
+// The part of building a request that every translated provider shares: refuse what cannot be translated,
+// flatten the messages, read the sampling fields.
+export function prepare(body: ChatBody): Prepared | Unsupported {
+  const refused = unsupportedParameter(body);
+  if (refused) return refused;
+  const convo = conversation(body.messages);
+  if (isUnsupported(convo)) return convo;
+  const stop = body.stop === undefined || body.stop === null ? undefined : stopList(body.stop);
+  if (body.stop !== undefined && body.stop !== null && stop === undefined) {
+    return { param: 'stop', message: '"stop" must be a string or an array of strings.' };
+  }
+  return {
+    convo,
+    stop,
+    temperature: num(body.temperature),
+    topP: num(body.top_p),
+    maxTokens: positiveInt(body.max_tokens) ?? positiveInt(body.max_completion_tokens),
+  };
+}
 
 export function stopList(stop: unknown): string[] | undefined {
   if (typeof stop === 'string') return [stop];
@@ -155,6 +193,32 @@ export function usageChunk(base: { id: string; created: number; model: string },
 export function errorEvent(message: string, type: string, code: string) {
   return { error: { message, type, code } };
 }
+
+/** What a provider's mid-stream error means to an OpenAI client. */
+export type ProviderErrorKind = 'invalid_request' | 'rate_limit' | 'auth' | 'server';
+
+// The error event a client sees when the provider fails after the answer began (the 200 is already sent):
+// the same type and code its non-streamed twin would carry. Only a request the provider rejected as invalid
+// stays a client error; overload and provider faults are server errors; a rejected gateway credential is the
+// gateway's problem and says so without the provider's wording.
+export function providerStreamError(kind: ProviderErrorKind, message: string, providerCode: string, provider: string): string {
+  switch (kind) {
+    case 'invalid_request':
+      return sseData(errorEvent(message, 'invalid_request_error', providerCode));
+    case 'rate_limit':
+      return sseData(errorEvent(message, 'rate_limit_error', 'rate_limit_exceeded'));
+    case 'auth':
+      return sseData(errorEvent(providerAuthMessage(provider), 'gateway_error', 'provider_auth_failed'));
+    default:
+      return sseData(errorEvent(message, 'server_error', providerCode));
+  }
+}
+
+export const providerAuthMessage = (provider: string) => `the gateway's credentials for ${provider} were rejected`;
+
+/** The stream ended before the provider finished the answer. */
+export const incompleteStreamEvent = () =>
+  sseData(errorEvent('provider stream ended before the answer was complete', 'server_error', 'upstream_stream_incomplete'));
 
 export function openaiErrorType(status: number): string {
   if (status === 401) return 'authentication_error';

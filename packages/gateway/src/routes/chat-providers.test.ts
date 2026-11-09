@@ -6,6 +6,7 @@ import { Redis } from 'ioredis';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createMockServer, type Settings } from '../../../mock-provider/src/server.ts';
 import { buildApp } from '../app.ts';
+import { estimateWorstCase } from '../usage/estimate.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
 
@@ -64,6 +65,12 @@ async function stubHandler(req: http.IncomingMessage, res: http.ServerResponse) 
   };
   const sse = () => res.writeHead(200, { 'content-type': 'text/event-stream' });
 
+  // A model named *-401 or *-403 is one the provider refuses because the gateway's own key is bad.
+  const authFail = /-(401|403)(?![0-9])/.exec(`${body.model ?? ''} ${path}`);
+  if (authFail) {
+    const status = Number(authFail[1]);
+    return json(status, { error: { message: 'Incorrect API key provided: sk-live-REDACTED', type: 'invalid_request_error', code: 'invalid_api_key', status: 'UNAUTHENTICATED' } });
+  }
   if (path.endsWith('/chat/completions')) {
     return json(200, { id: 'x', object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
   }
@@ -108,7 +115,9 @@ let viaMock: FastifyInstance;
 let viaStub: FastifyInstance;
 let noKeys: FastifyInstance;
 let unmetered: FastifyInstance;
-const urls = { mock: '', stub: '', viaMock: '', viaStub: '', noKeys: '', unmetered: '' };
+let logged: FastifyInstance;
+const logLines: string[] = [];
+const urls = { mock: '', stub: '', viaMock: '', viaStub: '', noKeys: '', unmetered: '', logged: '' };
 const tenantIds: string[] = [];
 let key = '';
 let tenantId = '';
@@ -142,7 +151,11 @@ beforeAll(async () => {
   );
   noKeys = buildApp(cfg({ OPENAI_BASE_URL: urls.stub, MOCK_BASE_URL: urls.stub }));
   unmetered = buildApp(cfg({ OPENAI_BASE_URL: urls.stub, MOCK_BASE_URL: urls.stub, BUDGET_ENABLED: 'false' }));
-  for (const [name, app] of [['viaMock', viaMock], ['viaStub', viaStub], ['noKeys', noKeys], ['unmetered', unmetered]] as const) {
+  logged = buildApp(
+    cfg({ OPENAI_BASE_URL: `${urls.stub}/api/v1`, ANTHROPIC_BASE_URL: `${urls.stub}/anthropic`, GEMINI_BASE_URL: `${urls.stub}/v1beta`, MOCK_BASE_URL: urls.stub, LOG_LEVEL: 'error', ...KEYS }),
+    { logStream: { write: (line: string) => void logLines.push(line) } as unknown as NodeJS.WritableStream },
+  );
+  for (const [name, app] of [['viaMock', viaMock], ['viaStub', viaStub], ['noKeys', noKeys], ['unmetered', unmetered], ['logged', logged]] as const) {
     await app.listen({ port: 0, host: '127.0.0.1' });
     urls[name] = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
   }
@@ -150,7 +163,7 @@ beforeAll(async () => {
 
 afterAll(async () => {
   release();
-  for (const app of [viaMock, viaStub, noKeys, unmetered]) await app.close();
+  for (const app of [viaMock, viaStub, noKeys, unmetered, logged]) await app.close();
   mock.closeAllConnections();
   stub.closeAllConnections();
   await new Promise((resolve) => mock.close(resolve));
@@ -297,8 +310,12 @@ describe('providers through the gateway', { timeout: 60_000 }, () => {
     const notFound = await post(urls.unmetered, { model: 'llama-3-70b' }, s.key);
     expect(notFound.status).toBe(400);
     expect(((await notFound.json()) as any).error).toMatchObject({ type: 'invalid_request_error', code: 'model_not_found', param: 'model' });
-    // With budgets on, a name nobody priced is refused for that reason before it is routed.
-    const unpriced = await post(urls.viaMock, { model: 'llama-3-70b' }, s.key);
+    // Also with budgets on: a name no route serves is the router's to refuse, not the budget's.
+    const unrouted = await post(urls.viaMock, { model: 'llama-3-70b' }, s.key);
+    expect(unrouted.status).toBe(400);
+    expect(((await unrouted.json()) as any).error).toMatchObject({ type: 'invalid_request_error', code: 'model_not_found', param: 'model' });
+    // A name that is routed but has no price is still refused for the price.
+    const unpriced = await post(urls.viaMock, { model: 'gpt-unpriced-9' }, s.key);
     expect(((await unpriced.json()) as any).error.code).toBe('model_not_priced');
     expect(await settledTo(s.tenantId, 0)).toEqual({ spent: 0, reserved: 0 });
 
@@ -372,5 +389,53 @@ describe('translated streams and errors', { timeout: 60_000 }, () => {
     expect(((await overloaded.json()) as any).error).toMatchObject({ type: 'server_error', code: 'overloaded_error' });
     // Nothing was generated, so nothing is charged and nothing stays held (once, not twice).
     expect(await settledTo(s.tenantId, 0)).toEqual({ spent: 0, reserved: 0 });
+  });
+
+  it('a provider rejecting the gateway key is a generic 502 provider_auth_failed in every format; the real reply is only logged', async () => {
+    const s = await fresh();
+    logLines.length = 0;
+    for (const [model, provider] of [
+      ['mock-openai-401', 'mock-openai'],
+      ['mock-anthropic-403', 'mock-anthropic'],
+      ['mock-gemini-401', 'mock-gemini'],
+    ] as const) {
+      for (const stream of [false, true]) {
+        const res = await post(urls.logged, { model, stream }, s.key);
+        const text = await res.text();
+        expect(res.status, `${model} stream=${stream}`).toBe(502);
+        expect(JSON.parse(text).error, model).toEqual({
+          message: `the gateway's credentials for ${provider} were rejected`,
+          type: 'gateway_error',
+          code: 'provider_auth_failed',
+        });
+        expect(text).not.toContain('sk-live');
+      }
+    }
+    // The status and the provider's own words are in the server log, not in the reply.
+    const entries = logLines.map((l) => JSON.parse(l)).filter((e) => e.msg === 'provider rejected the gateway credentials');
+    expect(entries.map((e) => [e.provider, e.upstreamStatus])).toEqual([
+      ['mock-openai', 401], ['mock-openai', 401],
+      ['mock-anthropic', 403], ['mock-anthropic', 403],
+      ['mock-gemini', 401], ['mock-gemini', 401],
+    ]);
+    expect(entries.every((e) => e.providerMessage === 'Incorrect API key provided: sk-live-REDACTED')).toBe(true);
+    // The provider did no work: nothing is charged and nothing stays held.
+    expect(await settledTo(s.tenantId, 0)).toEqual({ spent: 0, reserved: 0 });
+  });
+
+  it('Gemini is sent the same output cap the budget hold was sized on when the client names none', async () => {
+    seen.length = 0;
+    const s = await fresh();
+    const body = { messages: [{ role: 'user', content: 'hi' }] };
+    const res = await fetch(`${urls.viaStub}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
+      body: JSON.stringify({ model: 'gemini-3.1-flash-lite', ...body }),
+    });
+    expect(res.status).toBe(200);
+    expect(seen).toHaveLength(1);
+    const sent = seen[0]!.body.generationConfig.maxOutputTokens;
+    expect(sent).toBe(estimateWorstCase({ model: 'gemini-3.1-flash-lite', ...body }, base.rateLimitDefaultMaxTokens).output);
+    expect(sent).toBe(base.rateLimitDefaultMaxTokens);
   });
 });

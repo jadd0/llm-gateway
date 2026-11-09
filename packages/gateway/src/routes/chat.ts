@@ -5,6 +5,7 @@ import { errorBody } from '../errors.ts';
 import { chatRequest } from '../request-body.ts';
 import { usageSettler, type UsageSettler } from '../usage/settle.ts';
 import { SseUsageTap, usageFromBody } from '../usage/sse-usage.ts';
+import { providerAuthMessage, tryJson } from '../providers/common.ts';
 import type { Upstream } from '../upstream.ts';
 
 const TIMEOUT_CODES = new Set([
@@ -201,6 +202,25 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
 
     const extraHeaders = passthroughHeaders(res.headers, request.rateLimit != null);
     const translated = adapter.translates ? adapter : undefined;
+
+    // The provider rejected the gateway's own credential. That is not the caller's doing and the provider's
+    // wording is not the caller's business: they get a generic 502; the real status and message are logged.
+    if (res.statusCode === 401 || res.statusCode === 403) {
+      let errBody: Buffer;
+      try {
+        errBody = Buffer.from(await res.body.arrayBuffer());
+      } catch (err) {
+        if (deadlineHit) return tooLong();
+        if (abort.signal.aborted) return reply;
+        return upstreamFailure(reply, err, null);
+      }
+      const detail = (tryJson(errBody) as { error?: { message?: unknown } } | undefined)?.error?.message;
+      reply.log.error(
+        { provider: target.provider, upstreamStatus: res.statusCode, providerMessage: typeof detail === 'string' ? detail.slice(0, 300) : undefined },
+        'provider rejected the gateway credentials',
+      );
+      return reply.code(502).send(errorBody(providerAuthMessage(target.provider), 'gateway_error', 'provider_auth_failed'));
+    }
 
     // A translated provider's error is rewritten into the OpenAI error shape, streamed request or not.
     if (translated && res.statusCode >= 300) {

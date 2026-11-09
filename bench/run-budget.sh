@@ -72,7 +72,7 @@ start_mock() { # latency token_delay completion_tokens
 }
 start_gateway() { # extra KEY=VALUE settings as arguments
   require_free_port "$GATEWAY_PORT"
-  env GATEWAY_PORT="$GATEWAY_PORT" OPENAI_BASE_URL="http://127.0.0.1:$MOCK_PORT" MOCK_BASE_URL="http://127.0.0.1:$MOCK_PORT" \
+  env GATEWAY_PORT="$GATEWAY_PORT" OPENAI_BASE_URL="http://127.0.0.1:$MOCK_PORT/v1" MOCK_BASE_URL="http://127.0.0.1:$MOCK_PORT" \
     UPSTREAM_CONNECTIONS="${UPSTREAM_CONNECTIONS:-256}" LOG_LEVEL=warn \
     RATE_LIMIT_REDIS_TIMEOUT_MS="${RATE_LIMIT_REDIS_TIMEOUT_MS:-1000}" \
     "$@" \

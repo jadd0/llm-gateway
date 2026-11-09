@@ -123,6 +123,11 @@ describe('anthropic adapter', () => {
       ['tools', { tools: [{ type: 'function', function: { name: 'f' } }] }],
       ['tool_choice', { tool_choice: 'auto' }],
       ['functions', { functions: [] }],
+      ['presence_penalty', { presence_penalty: 0.1 }],
+      ['frequency_penalty', { frequency_penalty: 2 }],
+      ['seed', { seed: 0 }],
+      ['reasoning_effort', { reasoning_effort: 'low' }],
+      ['temperature', { temperature: 1.5 }],
       ['logprobs', { logprobs: true }],
       ['n', { n: 2 }],
       ['response_format', { response_format: { type: 'json_object' } }],
@@ -137,6 +142,30 @@ describe('anthropic adapter', () => {
       if (!r.ok) expect(r.param, param).toBe(param);
     }
     expect(adapter.buildRequest(input(chatBody({ n: 1 }))).ok).toBe(true);
+  });
+
+  it('neutral values pass and the dropped fields are dropped; temperature 1 is the top of the range', () => {
+    const neutral = { presence_penalty: 0, frequency_penalty: 0, logprobs: false, n: null, seed: null, top_logprobs: 0, reasoning_effort: null, tools: null };
+    expect(adapter.buildRequest(input(chatBody(neutral))).ok).toBe(true);
+    const r = build({ user: 'u', metadata: { a: 'b' }, service_tier: 'auto', temperature: 1 });
+    expect(r.json).toEqual({ model: 'claude-haiku-5-5', max_tokens: 1024, messages: [{ role: 'user', content: 'hi' }], temperature: 1 });
+  });
+
+  it('a mid-stream error maps by meaning: rate limit, invalid request, auth, server', async () => {
+    const kinds = [
+      ['rate_limit_error', 'rate_limit_error', 'rate_limit_exceeded'],
+      ['invalid_request_error', 'invalid_request_error', 'invalid_request_error'],
+      ['overloaded_error', 'server_error', 'overloaded_error'],
+      ['api_error', 'server_error', 'api_error'],
+      ['timeout_error', 'server_error', 'timeout_error'],
+      ['authentication_error', 'gateway_error', 'provider_auth_failed'],
+    ] as const;
+    for (const [from, type, code] of kinds) {
+      const sse = `event: error\ndata: ${JSON.stringify({ type: 'error', error: { type: from, message: 'provider words' } })}\n\n`;
+      const events = openaiEvents(await run(adapter.translates ? adapter.streamTransform({ includeUsage: false, onUsage: () => {} }) : null!, Buffer.from(sse)));
+      expect(events.at(-1).error, from).toMatchObject({ type, code });
+      if (code === 'provider_auth_failed') expect(events.at(-1).error.message).not.toContain('provider words');
+    }
   });
 
   it('error statuses map (429 keeps retry-after; 529 → 503 for Anthropic)', () => {

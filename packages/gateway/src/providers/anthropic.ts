@@ -3,18 +3,17 @@ import type { Usage } from '../usage/sse-usage.ts';
 import {
   chunkObject,
   completionObject,
-  conversation,
+  count,
   defaultClock,
-  errorEvent,
+  incompleteStreamEvent,
   isUnsupported,
   mapped,
-  num,
-  positiveInt,
-  stopList,
+  prepare,
+  providerStreamError,
   toUsage,
   tryJson,
-  unsupportedParameter,
   usageChunk,
+  type ProviderErrorKind,
 } from './common.ts';
 import { SSE_DONE, SseTranslator, sseData, type SseEvent } from './sse.ts';
 import type { AdapterClock, BuildInput, BuildResult, StreamOptions, TranslatedResponse, TranslatingAdapter } from './types.ts';
@@ -36,7 +35,20 @@ interface AnthropicUsage {
   output_tokens?: unknown;
 }
 
-const count = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
+// Anthropic's streamed error types by what they mean to an OpenAI client.
+function errorKind(type: unknown): ProviderErrorKind {
+  switch (type) {
+    case 'invalid_request_error':
+      return 'invalid_request';
+    case 'rate_limit_error':
+      return 'rate_limit';
+    case 'authentication_error':
+    case 'permission_error':
+      return 'auth';
+    default:
+      return 'server'; // overloaded_error, api_error, timeout_error and anything new
+  }
+}
 
 class AnthropicStream extends SseTranslator {
   #base: { id: string; created: number; model: string };
@@ -93,12 +105,11 @@ class AnthropicStream extends SseTranslator {
       case 'error': {
         this.#failed = true;
         const e = data.error ?? {};
-        return sseData(
-          errorEvent(
-            typeof e.message === 'string' ? e.message : 'provider error',
-            e.type === 'overloaded_error' || e.type === 'api_error' ? 'server_error' : 'invalid_request_error',
-            typeof e.type === 'string' ? e.type : 'provider_error',
-          ),
+        return providerStreamError(
+          errorKind(e.type),
+          typeof e.message === 'string' ? e.message : 'provider error',
+          typeof e.type === 'string' ? e.type : 'provider_error',
+          'anthropic',
         );
       }
       default:
@@ -109,7 +120,7 @@ class AnthropicStream extends SseTranslator {
   protected override onEnd(): string {
     if (this.#failed || this.#finished) return '';
     // The provider closed the stream without finishing the message.
-    return sseData(errorEvent('provider stream ended before the answer was complete', 'server_error', 'upstream_stream_incomplete'));
+    return incompleteStreamEvent();
   }
 }
 
@@ -124,26 +135,21 @@ export function createAnthropicAdapter(options: AnthropicOptions): TranslatingAd
     translates: true,
 
     buildRequest({ body, apiKey, defaultMaxTokens }: BuildInput): BuildResult {
-      const refused = unsupportedParameter(body);
-      if (refused) return { ok: false, ...refused };
-      const convo = conversation(body.messages);
-      if (isUnsupported(convo)) return { ok: false, ...convo };
-
-      const stop = body.stop === undefined || body.stop === null ? undefined : stopList(body.stop);
-      if (body.stop !== undefined && body.stop !== null && stop === undefined) {
-        return { ok: false, param: 'stop', message: '"stop" must be a string or an array of strings.' };
+      const p = prepare(body);
+      if (isUnsupported(p)) return { ok: false, ...p };
+      // Anthropic's temperature runs 0 to 1; OpenAI's to 2. A value past 1 is refused, not clamped.
+      if (p.temperature !== undefined && p.temperature > 1) {
+        return { ok: false, param: 'temperature', message: '"temperature" above 1 is not supported for this model: Anthropic accepts 0 to 1.' };
       }
-      const temperature = num(body.temperature);
-      const topP = num(body.top_p);
       const request = {
         model: body.model,
         // Required by Anthropic: the caller's limit, else the gateway's default allowance.
-        max_tokens: positiveInt(body.max_tokens) ?? positiveInt(body.max_completion_tokens) ?? defaultMaxTokens,
-        messages: convo.turns.map((t) => ({ role: t.role, content: t.text })),
-        ...(convo.system.length ? { system: convo.system.join('\n\n') } : {}),
-        ...(stop ? { stop_sequences: stop } : {}),
-        ...(temperature !== undefined ? { temperature } : {}),
-        ...(topP !== undefined ? { top_p: topP } : {}),
+        max_tokens: p.maxTokens ?? defaultMaxTokens,
+        messages: p.convo.turns.map((t) => ({ role: t.role, content: t.text })),
+        ...(p.convo.system.length ? { system: p.convo.system.join('\n\n') } : {}),
+        ...(p.stop ? { stop_sequences: p.stop } : {}),
+        ...(p.temperature !== undefined ? { temperature: p.temperature } : {}),
+        ...(p.topP !== undefined ? { top_p: p.topP } : {}),
         ...(body.stream === true ? { stream: true } : {}),
       };
       const headers: Record<string, string> = {

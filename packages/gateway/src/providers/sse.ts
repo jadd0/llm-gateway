@@ -16,16 +16,31 @@ export interface SseEvent {
 export class SseParser {
   readonly #decoder = new StringDecoder('utf8');
   #pending = '';
+  // How much of #pending is known to hold no line ending, so a long line arriving in many pieces is
+  // scanned once rather than from its start on every push.
+  #scanned = 0;
+  // Pieces after #pending that hold no line ending. They are joined only when one arrives, so a long line
+  // delivered in tiny pieces is not copied whole on every push.
+  #tail: string[] = [];
   #event: string | undefined;
   #data: string[] = [];
 
   push(chunk: Buffer): SseEvent[] {
-    this.#pending += this.#decoder.write(chunk);
+    const text = this.#decoder.write(chunk);
+    // Nothing is held back (#scanned covers #pending) and the piece ends no line: park it.
+    if (this.#scanned === this.#pending.length && !/[\r\n]/.test(text)) {
+      if (text !== '') this.#tail.push(text);
+      return [];
+    }
+    this.#pending += this.#tail.join('') + text;
+    this.#tail = [];
     const out: SseEvent[] = [];
     let start = 0;
+    let from = this.#scanned;
+    let end = -1;
     for (;;) {
-      let end = -1;
-      for (let i = start; i < this.#pending.length; i++) {
+      end = -1;
+      for (let i = from; i < this.#pending.length; i++) {
         const c = this.#pending.charCodeAt(i);
         if (c === 10 || c === 13) {
           end = i;
@@ -38,17 +53,22 @@ export class SseParser {
       const crlf = this.#pending.charCodeAt(end) === 13 && this.#pending.charCodeAt(end + 1) === 10;
       this.#line(this.#pending.slice(start, end), out);
       start = end + (crlf ? 2 : 1);
+      from = start;
     }
+    // Everything before a held-back \r, or the whole remainder when no line ending was found, is scanned.
+    this.#scanned = (end < 0 ? this.#pending.length : end) - start;
     this.#pending = this.#pending.slice(start);
     return out;
   }
 
   /** The stream ended: a last line without a line ending, and an event without its blank line, still count. */
   end(): SseEvent[] {
-    this.#pending += this.#decoder.end();
+    this.#pending += this.#tail.join('') + this.#decoder.end();
+    this.#tail = [];
     const out: SseEvent[] = [];
     if (this.#pending !== '') this.#line(this.#pending.replace(/\r$/, ''), out);
     this.#pending = '';
+    this.#scanned = 0;
     this.#line('', out);
     return out;
   }

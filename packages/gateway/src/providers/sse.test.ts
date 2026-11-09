@@ -55,4 +55,16 @@ describe('SseParser', () => {
       { event: undefined, data: 'tail' },
     ]);
   });
+
+  it('a long event arriving a byte at a time is scanned once, not from its start on every push', () => {
+    const bytes = Buffer.from(`data: ${'a'.repeat(300_000)}\n\n`);
+    const p = new SseParser();
+    const got: SseEvent[] = [];
+    const started = performance.now();
+    for (let i = 0; i < bytes.length; i++) got.push(...p.push(bytes.subarray(i, i + 1)));
+    const ms = performance.now() - started;
+    expect(got).toEqual([{ event: undefined, data: 'a'.repeat(300_000) }]);
+    // A rescan per push is about 4.5e10 character reads (seconds); one scan is a few ms.
+    expect(ms).toBeLessThan(1000);
+  });
 });

@@ -3,18 +3,17 @@ import type { Usage } from '../usage/sse-usage.ts';
 import {
   chunkObject,
   completionObject,
-  conversation,
+  count,
   defaultClock,
-  errorEvent,
+  incompleteStreamEvent,
   isUnsupported,
   mapped,
-  num,
-  positiveInt,
-  stopList,
+  prepare,
+  providerStreamError,
   toUsage,
   tryJson,
-  unsupportedParameter,
   usageChunk,
+  type ProviderErrorKind,
 } from './common.ts';
 import { SSE_DONE, SseTranslator, sseData, type SseEvent } from './sse.ts';
 import type { AdapterClock, BuildInput, BuildResult, StreamOptions, TranslatedResponse, TranslatingAdapter } from './types.ts';
@@ -35,7 +34,23 @@ function finishReason(reason: unknown): string {
   }
 }
 
-const count = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >= 0 ? v : 0);
+// Gemini's error status by what it means to an OpenAI client.
+function errorKind(status: unknown): ProviderErrorKind {
+  switch (status) {
+    case 'INVALID_ARGUMENT':
+    case 'FAILED_PRECONDITION':
+    case 'OUT_OF_RANGE':
+    case 'NOT_FOUND':
+      return 'invalid_request';
+    case 'RESOURCE_EXHAUSTED':
+      return 'rate_limit';
+    case 'UNAUTHENTICATED':
+    case 'PERMISSION_DENIED':
+      return 'auth';
+    default:
+      return 'server'; // UNAVAILABLE, INTERNAL, DEADLINE_EXCEEDED and anything new
+  }
+}
 
 interface GeminiResponse {
   candidates?: Array<{ content?: { parts?: Array<{ text?: unknown; thought?: unknown }> }; finishReason?: unknown }>;
@@ -91,12 +106,11 @@ class GeminiStream extends SseTranslator {
     }
     if (data.error) {
       this.#failed = true;
-      return sseData(
-        errorEvent(
-          typeof data.error.message === 'string' ? data.error.message : 'provider error',
-          'server_error',
-          typeof data.error.status === 'string' ? data.error.status.toLowerCase() : 'provider_error',
-        ),
+      return providerStreamError(
+        errorKind(data.error.status),
+        typeof data.error.message === 'string' ? data.error.message : 'provider error',
+        typeof data.error.status === 'string' ? data.error.status.toLowerCase() : 'provider_error',
+        'gemini',
       );
     }
     let out = '';
@@ -120,7 +134,7 @@ class GeminiStream extends SseTranslator {
   protected override onEnd(): string {
     if (this.#failed) return '';
     if (!this.#started || this.#finish === undefined) {
-      return sseData(errorEvent('provider stream ended before the answer was complete', 'server_error', 'upstream_stream_incomplete'));
+      return incompleteStreamEvent();
     }
     let out = sseData(chunkObject(this.#base, {}, this.#finish));
     if (this.#usage) {
@@ -136,29 +150,21 @@ export function createGeminiAdapter(options: { clock?: AdapterClock } = {}): Tra
   return {
     translates: true,
 
-    buildRequest({ body, apiKey }: BuildInput): BuildResult {
-      const refused = unsupportedParameter(body);
-      if (refused) return { ok: false, ...refused };
-      const convo = conversation(body.messages);
-      if (isUnsupported(convo)) return { ok: false, ...convo };
-
-      const stop = body.stop === undefined || body.stop === null ? undefined : stopList(body.stop);
-      if (body.stop !== undefined && body.stop !== null && stop === undefined) {
-        return { ok: false, param: 'stop', message: '"stop" must be a string or an array of strings.' };
-      }
-      const maxOutputTokens = positiveInt(body.max_tokens) ?? positiveInt(body.max_completion_tokens);
-      const temperature = num(body.temperature);
-      const topP = num(body.top_p);
+    buildRequest({ body, apiKey, defaultMaxTokens }: BuildInput): BuildResult {
+      const p = prepare(body);
+      if (isUnsupported(p)) return { ok: false, ...p };
+      // Always sent, so the provider's cap is the one the budget hold was sized on.
+      const maxOutputTokens = p.maxTokens ?? defaultMaxTokens;
       const generationConfig = {
-        ...(maxOutputTokens !== undefined ? { maxOutputTokens } : {}),
-        ...(temperature !== undefined ? { temperature } : {}),
-        ...(topP !== undefined ? { topP } : {}),
-        ...(stop ? { stopSequences: stop } : {}),
+        maxOutputTokens,
+        ...(p.temperature !== undefined ? { temperature: p.temperature } : {}),
+        ...(p.topP !== undefined ? { topP: p.topP } : {}),
+        ...(p.stop ? { stopSequences: p.stop } : {}),
       };
       const request = {
-        contents: convo.turns.map((t) => ({ role: t.role === 'assistant' ? 'model' : 'user', parts: [{ text: t.text }] })),
-        ...(convo.system.length ? { systemInstruction: { parts: [{ text: convo.system.join('\n\n') }] } } : {}),
-        ...(Object.keys(generationConfig).length ? { generationConfig } : {}),
+        contents: p.convo.turns.map((t) => ({ role: t.role === 'assistant' ? 'model' : 'user', parts: [{ text: t.text }] })),
+        ...(p.convo.system.length ? { systemInstruction: { parts: [{ text: p.convo.system.join('\n\n') }] } } : {}),
+        generationConfig,
       };
       const model = encodeURIComponent(body.model);
       const path = body.stream === true ? `/models/${model}:streamGenerateContent?alt=sse` : `/models/${model}:generateContent`;

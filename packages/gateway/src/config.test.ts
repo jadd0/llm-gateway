@@ -52,3 +52,15 @@ describe('provider settings', () => {
     expect(() => loadConfig(env({ MODEL_ROUTES: 'nonsense' }))).toThrow(/model prefix/);
   });
 });
+
+describe('OPENAI_BASE_URL', () => {
+  it('without a path it stops the gateway starting, naming the fix; with one (a proxy prefix too) it loads', () => {
+    for (const bad of ['http://127.0.0.1:9000', 'http://127.0.0.1:9000/', 'https://proxy.example.com']) {
+      expect(() => loadConfig(env({ OPENAI_BASE_URL: bad })), bad).toThrow(/OPENAI_BASE_URL needs the API version path.*https:\/\/api\.openai\.com\/v1/s);
+    }
+    expect(loadConfig(env({ OPENAI_BASE_URL: 'http://127.0.0.1:9000/v1' })).upstreamBaseUrl).toBe('http://127.0.0.1:9000/v1');
+    expect(loadConfig(env({ OPENAI_BASE_URL: 'https://openrouter.ai/api/v1/' })).upstreamBaseUrl).toBe('https://openrouter.ai/api/v1/');
+    expect(loadConfig(env({})).upstreamBaseUrl).toBe('https://api.openai.com/v1');
+    expect(loadConfig(env({ OPENAI_BASE_URL: '' })).upstreamBaseUrl).toBe('https://api.openai.com/v1');
+  });
+});

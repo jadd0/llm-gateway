@@ -17,12 +17,9 @@ try {
 }
 
 export function testConfig(overrides: Record<string, string> = {}): Config {
-  const openaiUrl = overrides.OPENAI_BASE_URL ?? 'http://127.0.0.1:9';
+  const upstreamUrl = overrides.OPENAI_BASE_URL ?? 'http://127.0.0.1:9';
   return loadConfig({
     ...process.env,
-    OPENAI_BASE_URL: openaiUrl,
-    // Tests stand one stub in for "the upstream": the mock-* models reach it too unless a test says otherwise.
-    MOCK_BASE_URL: openaiUrl,
     // No test carries a real provider key, whatever the developer's .env.local holds.
     OPENAI_API_KEY: '',
     ANTHROPIC_API_KEY: '',
@@ -35,6 +32,11 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
     // Off unless a test asks for it, so tests of other parts are not subject to a spend cap.
     BUDGET_ENABLED: 'false',
     ...overrides,
+    // Tests give the upstream's origin; OPENAI_BASE_URL needs a path, so /v1 is added when none is given.
+    // The mock adds its own /v1 for the OpenAI format, so it gets the origin. Tests stand one stub in for
+    // "the upstream": the mock-* models reach it too unless a test says otherwise.
+    OPENAI_BASE_URL: new URL(upstreamUrl).pathname === '/' ? `${upstreamUrl.replace(/\/+$/, '')}/v1` : upstreamUrl,
+    MOCK_BASE_URL: overrides.MOCK_BASE_URL ?? upstreamUrl,
   });
 }
 

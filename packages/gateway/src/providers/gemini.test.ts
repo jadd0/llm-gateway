@@ -44,9 +44,11 @@ describe('gemini adapter', () => {
       systemInstruction: { parts: [{ text: 'Be brief.' }] },
       generationConfig: { maxOutputTokens: 50, temperature: 0.3, topP: 0.8, stopSequences: ['END'] },
     });
-    // Gemini needs no max_tokens: none is invented. Streaming picks the SSE method; the model is path-encoded.
+    // With no limit from the client the default allowance is sent as the cap, the same number the budget
+    // hold is sized on. Streaming picks the SSE method; the model is path-encoded.
     const plain = build({});
-    expect(plain.json).toEqual({ contents: [{ role: 'user', parts: [{ text: 'hi' }] }] });
+    expect(plain.json).toEqual({ contents: [{ role: 'user', parts: [{ text: 'hi' }] }], generationConfig: { maxOutputTokens: 1024 } });
+    expect(build({}, { defaultMaxTokens: 77 }).json.generationConfig.maxOutputTokens).toBe(77);
     expect(build({ max_completion_tokens: 9, stream: true }).path).toBe('/models/gemini-3.1-flash-lite:streamGenerateContent?alt=sse');
     expect(build({ max_completion_tokens: 9 }).json.generationConfig).toEqual({ maxOutputTokens: 9 });
     expect(build({ model: 'gemini-x/../y?z' }).path).toBe('/models/gemini-x%2F..%2Fy%3Fz:generateContent');
@@ -116,19 +118,46 @@ describe('gemini adapter', () => {
   it('unsupported parameters return 400 unsupported_parameter', () => {
     const cases: Array<[string, Record<string, unknown>]> = [
       ['tools', { tools: [{ type: 'function', function: { name: 'f' } }] }],
-      ['tool_choice', { tool_choice: 'none' }],
+      ['tool_choice', { tool_choice: 'auto' }],
       ['logprobs', { logprobs: true }],
       ['top_logprobs', { top_logprobs: 2 }],
       ['n', { n: 3 }],
       ['response_format', { response_format: { type: 'json_object' } }],
       ['modalities', { modalities: ['audio'] }],
       ['seed', { seed: 1 }],
+      ['presence_penalty', { presence_penalty: 0.5 }],
+      ['frequency_penalty', { frequency_penalty: -1 }],
+      ['reasoning_effort', { reasoning_effort: 'high' }],
       ['messages[1].content[0].type', { messages: [{ role: 'user', content: 'a' }, { role: 'user', content: [{ type: 'input_audio', input_audio: {} }] }] }],
     ];
     for (const [param, extra] of cases) {
       const r = a.buildRequest(input(chatBody(extra)));
       expect(r.ok, param).toBe(false);
       if (!r.ok) expect(r.param, param).toBe(param);
+    }
+  });
+
+  it('neutral values pass: a client that sends the defaults is not refused', () => {
+    const r = a.buildRequest(
+      input(chatBody({ presence_penalty: 0, frequency_penalty: 0, logprobs: false, n: null, seed: null, top_logprobs: 0, tools: null, reasoning_effort: null, user: 'u', metadata: { a: 'b' }, service_tier: 'auto' })),
+    );
+    expect(r.ok).toBe(true);
+    expect(a.buildRequest(input(chatBody({ n: 1, top_logprobs: null, logprobs: null }))).ok).toBe(true);
+  });
+
+  it('a mid-stream error maps by meaning: rate limit, invalid request, auth, server', async () => {
+    const kinds = [
+      ['RESOURCE_EXHAUSTED', 'rate_limit_error', 'rate_limit_exceeded'],
+      ['INVALID_ARGUMENT', 'invalid_request_error', 'invalid_argument'],
+      ['UNAVAILABLE', 'server_error', 'unavailable'],
+      ['INTERNAL', 'server_error', 'internal'],
+      ['PERMISSION_DENIED', 'gateway_error', 'provider_auth_failed'],
+    ] as const;
+    for (const [status, type, code] of kinds) {
+      const sse = `data: ${JSON.stringify({ error: { code: 1, message: 'provider words', status } })}\n\n`;
+      const events = openaiEvents(await run(a.streamTransform({ includeUsage: false, onUsage: () => {} }), Buffer.from(sse)));
+      expect(events.at(-1).error, status).toMatchObject({ type, code });
+      if (code === 'provider_auth_failed') expect(events.at(-1).error.message).not.toContain('provider words');
     }
   });
 
