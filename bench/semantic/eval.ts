@@ -1,12 +1,19 @@
 // The semantic cache's threshold, measured. For labelled pairs of prompts it asks: at each similarity threshold,
 // how many paraphrases would the cache serve (hit rate), and how many of the answers it serves belong to a
-// different question (wrong-answer rate)?
+// different question (wrong-answer rate)? Four ways, side by side, so the effect of each choice is visible:
+//
+//   pairwise       the pair (a, b) alone: the answer of `a` is cached, the request is `b`.
+//   nn             store-wide nearest neighbour, as production runs: the store holds the `a` of every pair, each
+//                  `b` is looked up in it, and what is served is whatever entry is nearest, not necessarily its own `a`.
+//   +guards        the same, but the nearest entry must also pass the guards (numbers, quotes, names, negation,
+//                  content words) before it is served, exactly as the gateway applies them.
 //
 //   node --env-file-if-exists=.env.local bench/semantic/eval.ts --qqp 6000 --paws 4000 --embedders local,voyage
 //
-// A pair is (a, b): `a` is the prompt whose answer is in the cache, `b` the new request. The pair is served when
-// cosine(b, a) is at or above the threshold; it is a right answer when the pair is a duplicate and a wrong answer
-// when it is not. The threshold is chosen on the dev half and every reported figure is from the test half.
+// A served answer is right only when the entry served is the pair's own `a` and the pair is a duplicate (or the entry
+// is the identical text of `b`); any other entry served counts as wrong, because the data does not label the
+// other entries against `b` (conservative). The threshold is chosen on the dev half, by nearest neighbour with
+// guards, and every reported figure is from the test half.
 // Cross-model: `b` embedded by one model and `a` by the other (an API query against a local entry, and back).
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, appendFileSync, writeFileSync } from 'node:fs';
@@ -15,25 +22,32 @@ import { pathToFileURL } from 'node:url';
 import { parseArgs } from 'node:util';
 import { loadConfig } from '../../packages/gateway/src/config.ts';
 import { localEmbedder, unit, voyageEmbedder, type Embedder } from '../../packages/gateway/src/semantic/embedder.ts';
+import { failedGuard, GUARD_RULES, guardSignature, type GuardOptions, type GuardRule, type GuardSignature } from '../../packages/gateway/src/semantic/guards.ts';
 import { DATASETS, loadPairs, type Pair, type Source } from './datasets.ts';
 
 /** 0.80, 0.81, ... 0.99 as whole percents, so no threshold is a float sum. */
 export const THRESHOLDS = Array.from({ length: 20 }, (_, i) => 80 + i);
 
 export interface Scored {
+  /** Cosine similarity of the request to the candidate entry. */
   sim: number;
+  /** The request's pair is a duplicate: what the hit rate is a share of. */
   duplicate: boolean;
   source: Source;
+  /** Serving the candidate gives a right answer. Absent: right exactly when the pair is a duplicate. */
+  right?: boolean;
+  /** The first guard that refuses the candidate; absent when they all pass. */
+  guard?: GuardRule | undefined;
 }
 
 export interface CurveRow {
   /** Whole percent: 95 is a threshold of 0.95. */
   threshold: number;
-  /** Pairs at or above the threshold. */
+  /** Requests served at or above the threshold (and past the guards, when they are on). */
   served: number;
-  /** Served pairs that are duplicates: right answers. */
+  /** Served requests whose answer is right. */
   hits: number;
-  /** Served pairs that are not duplicates: another question's answer. */
+  /** Served requests whose answer belongs to a different question. */
   wrong: number;
   /** Duplicate pairs in the set: what the hit rate is a share of. */
   duplicates: number;
@@ -43,12 +57,12 @@ export interface CurveRow {
   wrongRate: number | null;
 }
 
-export function curve(items: readonly Scored[], thresholds: readonly number[] = THRESHOLDS): CurveRow[] {
+export function curve(items: readonly Scored[], thresholds: readonly number[] = THRESHOLDS, o: { guards?: boolean } = {}): CurveRow[] {
   const duplicates = items.filter((i) => i.duplicate).length;
   return thresholds.map((threshold) => {
     const cut = threshold / 100;
-    const served = items.filter((i) => i.sim >= cut);
-    const hits = served.filter((i) => i.duplicate).length;
+    const served = items.filter((i) => i.sim >= cut && (!o.guards || i.guard === undefined));
+    const hits = served.filter((i) => i.right ?? i.duplicate).length;
     const wrong = served.length - hits;
     return {
       threshold,
@@ -76,6 +90,19 @@ export function pickThreshold(rows: readonly CurveRow[], maxWrongRate: number): 
   return best;
 }
 
+/**
+ * When no threshold meets the budget: the threshold with the lowest wrong rate among those that still serve at
+ * least `minHitRate` of the duplicates. A tie goes to the higher hit rate, then to the higher threshold. Undefined when none serves that many.
+ */
+export function recommendThreshold(rows: readonly CurveRow[], minHitRate: number): CurveRow | undefined {
+  let best: CurveRow | undefined;
+  for (const r of rows) {
+    if (r.wrongRate === null || r.hitRate < minHitRate) continue;
+    if (best === undefined || r.wrongRate < best.wrongRate! || (r.wrongRate === best.wrongRate && r.hitRate >= best.hitRate)) best = r;
+  }
+  return best;
+}
+
 const dot = (a: readonly number[], b: readonly number[]) => {
   let s = 0;
   for (let i = 0; i < a.length; i++) s += a[i]! * b[i]!;
@@ -84,13 +111,61 @@ const dot = (a: readonly number[], b: readonly number[]) => {
 
 export type Vectors = Map<string, number[]>;
 
-/** Cosine similarity of each pair, `b` from `queryVectors` and `a` from `entryVectors`. */
-export function score(pairs: readonly Pair[], queryVectors: Vectors, entryVectors: Vectors): Scored[] {
+/** The guards' view of a prompt, computed once per text. */
+export function signer(): (text: string) => GuardSignature {
+  const memo = new Map<string, GuardSignature>();
+  return (text) => {
+    let sig = memo.get(text);
+    if (!sig) memo.set(text, (sig = guardSignature(text)));
+    return sig;
+  };
+}
+
+/** Pairwise: cosine similarity of each pair, `b` from `queryVectors` and `a` from `entryVectors`, and the guards' verdict on the pair. */
+export function score(pairs: readonly Pair[], queryVectors: Vectors, entryVectors: Vectors, guard?: GuardOptions, sig: (t: string) => GuardSignature = signer()): Scored[] {
   return pairs.map((p) => {
     const q = queryVectors.get(p.b);
     const e = entryVectors.get(p.a);
     if (!q || !e) throw new Error(`no vector for pair ${p.id}`);
-    return { sim: dot(q, e), duplicate: p.duplicate, source: p.source };
+    const refused = guard ? failedGuard(sig(p.a), sig(p.b), guard) : undefined;
+    return { sim: dot(q, e), duplicate: p.duplicate, source: p.source, guard: refused };
+  });
+}
+
+/**
+ * Store-wide nearest neighbour, as the gateway looks up: the store holds the distinct `a` of `pairs`, each pair's
+ * `b` is asked of it, and the entry nearest to `b` is the candidate, whichever pair it came from. It is a right
+ * answer only when it is the pair's own `a` of a duplicate pair, or the identical text of `b`. Ties go to the
+ * earlier entry.
+ */
+export function scoreNearest(pairs: readonly Pair[], queryVectors: Vectors, entryVectors: Vectors, guard?: GuardOptions, sig: (t: string) => GuardSignature = signer()): Scored[] {
+  const texts = [...new Set(pairs.map((p) => p.a))];
+  const dims = entryVectors.get(texts[0] ?? '')?.length ?? 0;
+  const flat = new Float32Array(texts.length * dims);
+  texts.forEach((t, i) => {
+    const v = entryVectors.get(t);
+    if (!v) throw new Error('no vector for an entry');
+    flat.set(v, i * dims);
+  });
+  return pairs.map((p) => {
+    const q = queryVectors.get(p.b);
+    if (!q) throw new Error(`no vector for pair ${p.id}`);
+    const qf = Float32Array.from(q);
+    let best = -1;
+    let bestSim = -Infinity;
+    for (let i = 0; i < texts.length; i++) {
+      let d = 0;
+      const o = i * dims;
+      for (let k = 0; k < dims; k++) d += qf[k]! * flat[o + k]!;
+      if (d > bestSim) {
+        bestSim = d;
+        best = i;
+      }
+    }
+    const entry = texts[best];
+    if (entry === undefined) throw new Error('empty store');
+    const refused = guard ? failedGuard(sig(entry), sig(p.b), guard) : undefined;
+    return { sim: bestSim, duplicate: p.duplicate, source: p.source, right: entry === p.b || (entry === p.a && p.duplicate), guard: refused };
   });
 }
 
@@ -159,6 +234,10 @@ export function hashEmbedder(dimensions = 1024): Embedder {
 
 // ---- the evaluation ---------------------------------------------------------------------------------------
 
+export const MODES = ['pairwise', 'pairwise+guards', 'nn', 'nn+guards'] as const;
+export type Mode = (typeof MODES)[number];
+type Curves = Record<Mode, CurveRow[]>;
+
 export interface EvalInput {
   dev: readonly Pair[];
   test: readonly Pair[];
@@ -166,6 +245,19 @@ export interface EvalInput {
   vectors: Record<string, Record<string, Vectors>>;
   /** The most wrong answers among those served that is allowed (0.01). */
   maxWrongRate: number;
+  /** The guards the gateway would run. */
+  guard: GuardOptions;
+  /** When no threshold meets the budget: the least share of duplicates a recommended threshold must still serve. */
+  minHitRate: number;
+}
+
+export interface Picked {
+  threshold: number;
+  dev: CurveRow;
+  test: CurveRow;
+  testBySource: Record<string, CurveRow>;
+  /** Test requests whose nearest entry was at or above the threshold and refused by each guard. */
+  refusedBy: Record<GuardRule, number>;
 }
 
 export interface ComboResult {
@@ -173,42 +265,69 @@ export interface ComboResult {
   query: string;
   entry: string;
   kind: 'same-model' | 'cross-model';
-  devCurve: CurveRow[];
-  testCurve: CurveRow[];
-  /** Chosen on dev; undefined when nothing fits the budget. */
-  chosen: { threshold: number; dev: CurveRow; test: CurveRow; testBySource: Record<string, CurveRow> } | undefined;
-  /** The test row at the threshold chosen for the query model's same-model curve (cross-model only). */
+  dev: Curves;
+  test: Curves;
+  testBySource: Record<string, Curves>;
+  /** Chosen on dev by nearest neighbour with guards, within the budget; undefined when nothing fits. */
+  chosen: Picked | undefined;
+  /** When nothing fits the budget: the lowest wrong rate that still serves `minHitRate` of the duplicates. */
+  recommended: Picked | undefined;
+  /** The test row (nearest neighbour with guards) at the threshold chosen for the query model's same-model curve (cross-model only). */
   atSameModelThreshold?: CurveRow | undefined;
+}
+
+function curvesOf(sets: { pairwise: readonly Scored[]; nn: readonly Scored[] }): Curves {
+  return {
+    pairwise: curve(sets.pairwise),
+    'pairwise+guards': curve(sets.pairwise, THRESHOLDS, { guards: true }),
+    nn: curve(sets.nn),
+    'nn+guards': curve(sets.nn, THRESHOLDS, { guards: true }),
+  };
 }
 
 export function evaluate(input: EvalInput): ComboResult[] {
   const results: ComboResult[] = [];
+  const sig = signer();
   for (const [inputType, byEmbedder] of Object.entries(input.vectors)) {
     const names = Object.keys(byEmbedder);
     for (const query of names) {
       for (const entry of names) {
         const q = byEmbedder[query]!;
         const e = byEmbedder[entry]!;
-        const dev = score(input.dev, q, e);
-        const test = score(input.test, q, e);
-        const devCurve = curve(dev);
-        const testCurve = curve(test);
-        const pick = pickThreshold(devCurve, input.maxWrongRate);
-        const at = (t: number) => testCurve.find((r) => r.threshold === t)!;
-        const bySource: Record<string, CurveRow> = {};
-        if (pick) {
-          for (const source of new Set(test.map((s) => s.source))) {
-            bySource[source] = curve(test.filter((s) => s.source === source)).find((r) => r.threshold === pick.threshold)!;
-          }
+        const sets = (pairs: readonly Pair[]) => ({ pairwise: score(pairs, q, e, input.guard, sig), nn: scoreNearest(pairs, q, e, input.guard, sig) });
+        const devSets = sets(input.dev);
+        const testSets = sets(input.test);
+        const dev = curvesOf(devSets);
+        const test = curvesOf(testSets);
+        const sources = [...new Set(testSets.nn.map((s) => s.source))];
+        const testBySource: Record<string, Curves> = {};
+        for (const source of sources) {
+          testBySource[source] = curvesOf({ pairwise: testSets.pairwise.filter((i) => i.source === source), nn: testSets.nn.filter((i) => i.source === source) });
         }
+        const picked = (row: CurveRow | undefined): Picked | undefined => {
+          if (!row) return undefined;
+          const at = (rows: readonly CurveRow[]) => rows.find((r) => r.threshold === row.threshold)!;
+          const refusedBy = Object.fromEntries(GUARD_RULES.map((r) => [r, 0])) as Record<GuardRule, number>;
+          for (const i of testSets.nn) if (i.sim >= row.threshold / 100 && i.guard) refusedBy[i.guard] += 1;
+          return {
+            threshold: row.threshold,
+            dev: row,
+            test: at(test['nn+guards']),
+            testBySource: Object.fromEntries(sources.map((s) => [s, at(testBySource[s]!['nn+guards'])])),
+            refusedBy,
+          };
+        };
+        const chosenRow = pickThreshold(dev['nn+guards'], input.maxWrongRate);
         results.push({
           inputType,
           query,
           entry,
           kind: query === entry ? 'same-model' : 'cross-model',
-          devCurve,
-          testCurve,
-          chosen: pick ? { threshold: pick.threshold, dev: pick, test: at(pick.threshold), testBySource: bySource } : undefined,
+          dev,
+          test,
+          testBySource,
+          chosen: picked(chosenRow),
+          recommended: chosenRow ? undefined : picked(recommendThreshold(dev['nn+guards'], input.minHitRate)),
         });
       }
     }
@@ -217,7 +336,8 @@ export function evaluate(input: EvalInput): ComboResult[] {
   for (const r of results) {
     if (r.kind !== 'cross-model') continue;
     const own = results.find((x) => x.inputType === r.inputType && x.query === r.query && x.entry === r.query);
-    if (own?.chosen) r.atSameModelThreshold = r.testCurve.find((c) => c.threshold === own.chosen!.threshold);
+    const t = own?.chosen?.threshold ?? own?.recommended?.threshold;
+    if (t !== undefined) r.atSameModelThreshold = r.test['nn+guards'].find((c) => c.threshold === t);
   }
   return results;
 }
@@ -225,6 +345,7 @@ export function evaluate(input: EvalInput): ComboResult[] {
 // ---- report -----------------------------------------------------------------------------------------------
 
 const pct = (x: number | null, dp = 2) => (x === null ? 'n/a' : `${(x * 100).toFixed(dp)}%`);
+const th = (t: number) => (t / 100).toFixed(2);
 
 export interface RunInfo {
   qqp: number;
@@ -237,46 +358,73 @@ export interface RunInfo {
   embedders: string[];
   inputTypes: string[];
   maxWrongRate: number;
+  minHitRate: number;
+  guard: GuardOptions;
   conditions: string;
 }
+
+const MODE_LABEL: Record<Mode, string> = { pairwise: 'pairwise', 'pairwise+guards': 'pairwise + guards', nn: 'nearest neighbour', 'nn+guards': 'nearest neighbour + guards' };
 
 export function renderSummary(info: RunInfo, results: readonly ComboResult[]): string {
   const L: string[] = ['# Semantic cache evaluation', ''];
   L.push(
-    `Sampled ${info.qqp} QQP and ${info.paws} PAWS pairs (seed ${info.seed}); dev ${info.dev} pairs (${info.devDuplicates} duplicates), test ${info.test} pairs (${info.testDuplicates} duplicates). Threshold chosen on dev as the most right answers served with at most ${pct(info.maxWrongRate, 1)} of served answers wrong; every figure below is on test.`,
+    `Sampled ${info.qqp} QQP and ${info.paws} PAWS pairs (seed ${info.seed}); dev ${info.dev} pairs (${info.devDuplicates} duplicates), test ${info.test} pairs (${info.testDuplicates} duplicates). Every figure below is on test; the threshold was chosen on dev.`,
+    '',
+    `How it is measured. *Pairwise* looks at each pair alone. *Nearest neighbour* is how the gateway looks up: the store holds the first prompt of every pair, each second prompt is asked of it, and the nearest entry is the candidate. A served answer is right only when the entry is that pair's own first prompt of a duplicate pair (or the identical text); any other entry served counts as wrong. *Guards* refuse a candidate whose numbers, quoted strings, names or negation words differ from the request's${info.guard.tokenSet ? `, or whose content words differ by more than ${info.guard.maxDiff} (symmetric difference)` : ' (the content-word guard is off)'}. Hit rate is the share of duplicate pairs served right; wrong rate is the share of served answers that are wrong.`,
+    '',
+    `Threshold selection: nearest neighbour with guards, on dev: the most right answers served with at most ${pct(info.maxWrongRate, 1)} of served answers wrong. When no threshold fits that budget the table says so and recommends the threshold with the lowest wrong rate among those that still serve at least ${pct(info.minHitRate, 0)} of the duplicates.`,
     '',
     `Embedders: ${info.embedders.join(', ')}. Input types: ${info.inputTypes.join(', ')}. Conditions: ${info.conditions}.`,
     '',
     `Data: QQP sha256 ${DATASETS.qqp.sha256} (${DATASETS.qqp.licence}); PAWS-Wiki labeled_final test sha256 ${DATASETS.paws.sha256} (${DATASETS.paws.licence}).`,
     '',
   );
-  L.push('## Chosen threshold per combination', '');
-  L.push('| input type | query model | entry model | kind | threshold | hit rate | wrong rate | served | wrong | PAWS wrong rate | QQP wrong rate |');
-  L.push('|---|---|---|---|---|---|---|---|---|---|---|');
+  L.push('## Chosen threshold per combination (nearest neighbour with guards)', '');
+  L.push('| input type | query model | entry model | kind | outcome | threshold | hit rate | wrong rate | served | wrong | PAWS wrong rate | QQP wrong rate |');
+  L.push('|---|---|---|---|---|---|---|---|---|---|---|---|');
   for (const r of results) {
-    const c = r.chosen;
+    const c = r.chosen ?? r.recommended;
+    const head = `| ${r.inputType} | ${r.query} | ${r.entry} | ${r.kind} |`;
     if (!c) {
-      L.push(`| ${r.inputType} | ${r.query} | ${r.entry} | ${r.kind} | none within budget | | | | | | |`);
+      L.push(`${head} no threshold fits the budget, and none serves ${pct(info.minHitRate, 0)} of duplicates | | | | | | | |`);
       continue;
     }
     L.push(
-      `| ${r.inputType} | ${r.query} | ${r.entry} | ${r.kind} | ${(c.threshold / 100).toFixed(2)} | ${pct(c.test.hitRate)} | ${pct(c.test.wrongRate)} | ${c.test.served} | ${c.test.wrong} | ${pct(c.testBySource.paws?.wrongRate ?? null)} | ${pct(c.testBySource.qqp?.wrongRate ?? null)} |`,
+      `${head} ${r.chosen ? `meets ${pct(info.maxWrongRate, 1)}` : `**none meets ${pct(info.maxWrongRate, 1)}**; recommended: lowest wrong rate with hit rate at least ${pct(info.minHitRate, 0)}`} | ${th(c.threshold)} | ${pct(c.test.hitRate)} | ${pct(c.test.wrongRate)} | ${c.test.served} | ${c.test.wrong} | ${pct(c.testBySource.paws?.wrongRate ?? null)} | ${pct(c.testBySource.qqp?.wrongRate ?? null)} |`,
     );
+  }
+  L.push('', '## What the guards refuse at that threshold (test, nearest entry at or above it)', '');
+  L.push(`| input type | query model | entry model | threshold | ${GUARD_RULES.join(' | ')} |`, `|---|---|---|---|${GUARD_RULES.map(() => '---').join('|')}|`);
+  for (const r of results) {
+    const c = r.chosen ?? r.recommended;
+    if (c) L.push(`| ${r.inputType} | ${r.query} | ${r.entry} | ${th(c.threshold)} | ${GUARD_RULES.map((g) => c.refusedBy[g]).join(' | ')} |`);
+  }
+  L.push('', '## At 0.95 with and without the guards (test)', '');
+  L.push(`| input type | query model | entry model | source | ${MODES.map((m) => `${MODE_LABEL[m]}: hit / wrong`).join(' | ')} |`, `|---|---|---|---|${MODES.map(() => '---').join('|')}|`);
+  const at95 = (rows: readonly CurveRow[]) => rows.find((c) => c.threshold === 95);
+  for (const r of results) {
+    for (const [source, curves] of [['all', r.test], ...Object.entries(r.testBySource)] as Array<[string, Curves]>) {
+      L.push(`| ${r.inputType} | ${r.query} | ${r.entry} | ${source} | ${MODES.map((m) => { const row = at95(curves[m]); return row ? `${pct(row.hitRate)} / ${pct(row.wrongRate)}` : 'n/a'; }).join(' | ')} |`);
+    }
   }
   const cross = results.filter((r) => r.kind === 'cross-model' && r.atSameModelThreshold);
   if (cross.length > 0) {
-    L.push('', '## Cross-model at the query model\'s own threshold', '');
+    L.push('', "## Cross-model at the query model's own threshold (nearest neighbour with guards)", '');
     L.push('| input type | query model | entry model | threshold | hit rate | wrong rate | served | wrong |');
     L.push('|---|---|---|---|---|---|---|---|');
     for (const r of cross) {
       const row = r.atSameModelThreshold!;
-      L.push(`| ${r.inputType} | ${r.query} | ${r.entry} | ${(row.threshold / 100).toFixed(2)} | ${pct(row.hitRate)} | ${pct(row.wrongRate)} | ${row.served} | ${row.wrong} |`);
+      L.push(`| ${r.inputType} | ${r.query} | ${r.entry} | ${th(row.threshold)} | ${pct(row.hitRate)} | ${pct(row.wrongRate)} | ${row.served} | ${row.wrong} |`);
     }
   }
   for (const r of results) {
-    L.push('', `## Curve (test): ${r.inputType}, ${r.query} query vs ${r.entry} entry`, '');
-    L.push('| threshold | served | hits | wrong | hit rate | wrong rate |', '|---|---|---|---|---|---|');
-    for (const c of r.testCurve) L.push(`| ${(c.threshold / 100).toFixed(2)} | ${c.served} | ${c.hits} | ${c.wrong} | ${pct(c.hitRate)} | ${pct(c.wrongRate)} |`);
+    for (const [source, curves] of [['all', r.test], ...Object.entries(r.testBySource)] as Array<[string, Curves]>) {
+      L.push('', `## Curve (test, ${source}): ${r.inputType}, ${r.query} query vs ${r.entry} entry`, '');
+      L.push(`| threshold | ${MODES.map((m) => `${MODE_LABEL[m]}: served / hit / wrong`).join(' | ')} |`, `|---|${MODES.map(() => '---').join('|')}|`);
+      THRESHOLDS.forEach((t, i) => {
+        L.push(`| ${th(t)} | ${MODES.map((m) => { const c = curves[m][i]!; return `${c.served} / ${pct(c.hitRate)} / ${pct(c.wrongRate)}`; }).join(' | ')} |`);
+      });
+    }
   }
   return `${L.join('\n')}\n`;
 }
@@ -292,6 +440,7 @@ async function main() {
       embedders: { type: 'string', default: 'local' },
       'input-types': { type: 'string', default: 'none' },
       budget: { type: 'string', default: '0.01' },
+      'min-hit-rate': { type: 'string', default: '0.05' },
       concurrency: { type: 'string', default: '4' },
       dir: { type: 'string', default: resolve(import.meta.dirname, '../../.datasets') },
       out: { type: 'string', default: resolve(import.meta.dirname, '../results/pr-9') },
@@ -328,7 +477,9 @@ async function main() {
     }
   }
   const maxWrongRate = Number(values.budget);
-  const results = evaluate({ dev, test, vectors, maxWrongRate });
+  const guard: GuardOptions = { tokenSet: config.semanticGuardTokenSet, maxDiff: config.semanticGuardMaxDiff };
+  const minHitRate = Number(values['min-hit-rate']);
+  const results = evaluate({ dev, test, vectors, maxWrongRate, guard, minHitRate });
   const info: RunInfo = {
     qqp: Number(values.qqp),
     paws: Number(values.paws),
@@ -340,6 +491,8 @@ async function main() {
     embedders: names,
     inputTypes,
     maxWrongRate,
+    minHitRate,
+    guard,
     conditions: values.conditions!,
   };
   mkdirSync(values.out!, { recursive: true });

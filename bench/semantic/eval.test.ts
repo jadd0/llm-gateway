@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ensureDataset, parsePaws, parseQqp, pawsToTsv, sample, sha256, splitDevTest, type Pair } from './datasets.ts';
-import { curve, embedAll, evaluate, hashEmbedder, pickThreshold, renderSummary, THRESHOLDS, type CurveRow, type Scored } from './eval.ts';
+import { curve, embedAll, evaluate, hashEmbedder, pickThreshold, recommendThreshold, renderSummary, THRESHOLDS, type CurveRow, type Scored } from './eval.ts';
 
 const item = (sim: number, duplicate: boolean, source: 'qqp' | 'paws' = 'qqp'): Scored => ({ sim, duplicate, source });
 
@@ -115,15 +115,37 @@ describe('semantic evaluation', () => {
     }
   });
 
+  // Vectors in a space with one axis per name, so a test says exactly how similar two texts are.
+  const axisVec = (parts: Record<number, number>) => {
+    const v = new Array<number>(8).fill(0);
+    let rest = 1;
+    for (const [axis, x] of Object.entries(parts)) {
+      v[Number(axis)] = x;
+      rest -= x * x;
+    }
+    const spare = [...v.keys()].find((i) => v[i] === 0)!;
+    v[spare] = Math.sqrt(Math.max(0, rest));
+    return v;
+  };
+  const GUARD = { tokenSet: true, maxDiff: 2 };
+
   it('evaluates every query/entry combination, with cross-model judged at the query model\'s threshold', async () => {
-    const mk = (id: string, source: 'qqp' | 'paws', duplicate: boolean): Pair => ({ id, source, a: `${id}-a`, b: `${id}-b`, duplicate });
-    const pairs = [mk('p1', 'qqp', true), mk('p2', 'qqp', true), mk('p3', 'paws', false), mk('p4', 'paws', false)];
-    // Two toy models in one space. X puts the wrong pair p3 (0.970) above the duplicate p2 (0.940); Y keeps p3 far (0.6) below p2 (0.866).
-    const unitAt = (deg: number) => [Math.cos((deg * Math.PI) / 180), Math.sin((deg * Math.PI) / 180)];
-    const vec = (angles: Record<string, number>) => new Map(Object.entries(angles).map(([k, d]) => [k, unitAt(d)]));
-    const X = vec({ 'p1-a': 0, 'p1-b': 5, 'p2-a': 0, 'p2-b': 20, 'p3-a': 0, 'p3-b': 14, 'p4-a': 0, 'p4-b': 90 });
-    const Y = vec({ 'p1-a': 0, 'p1-b': 5, 'p2-a': 0, 'p2-b': 30, 'p3-a': 0, 'p3-b': 53, 'p4-a': 0, 'p4-b': 90 });
-    const results = evaluate({ dev: pairs, test: pairs, vectors: { none: { X, Y } }, maxWrongRate: 0.01 });
+    const mk = (id: string, word: string, source: 'qqp' | 'paws', duplicate: boolean): Pair => ({ id, source, a: `fruit ${word}`, b: `fruits ${word}`, duplicate });
+    const pairs = [mk('p1', 'kiwi', 'qqp', true), mk('p2', 'plum', 'qqp', true), mk('p3', 'pear', 'paws', false), mk('p4', 'lime', 'paws', false)];
+    // Two toy models in one space; each entry has an axis of its own, so the nearest entry of a request is its own.
+    // X puts the wrong pair p3 (0.970) above the duplicate p2 (0.940); Y keeps p3 far (0.6) below p2 (0.866).
+    const cos = (deg: number) => Math.cos((deg * Math.PI) / 180);
+    const vec = (deltas: number[]) => {
+      const m = new Map<string, number[]>();
+      pairs.forEach((p, i) => {
+        m.set(p.a, axisVec({ [i]: 1 }));
+        m.set(p.b, axisVec({ [i]: cos(deltas[i]!) }));
+      });
+      return m;
+    };
+    const X = vec([5, 20, 14, 90]);
+    const Y = vec([5, 30, 53, 90]);
+    const results = evaluate({ dev: pairs, test: pairs, vectors: { none: { X, Y } }, maxWrongRate: 0.01, guard: GUARD, minHitRate: 0.05 });
     expect(results.map((r) => `${r.query}>${r.entry}`).sort()).toEqual(['X>X', 'X>Y', 'Y>X', 'Y>Y']);
     const xx = results.find((r) => r.query === 'X' && r.entry === 'X')!;
     const yy = results.find((r) => r.query === 'Y' && r.entry === 'Y')!;
@@ -134,16 +156,79 @@ describe('semantic evaluation', () => {
     expect(yy.chosen?.threshold).toBe(86);
     expect(yy.chosen?.test).toMatchObject({ served: 2, hits: 2, wrong: 0 });
     expect(yy.chosen?.testBySource.qqp?.hits).toBe(2);
+    expect(yy.recommended).toBeUndefined();
     // X queries against Y entries: judged at Y's own choice.
     const xy = results.find((r) => r.query === 'Y' && r.entry === 'X')!;
     expect(xy.kind).toBe('cross-model');
     expect(xy.atSameModelThreshold).toMatchObject({ threshold: 86, served: 2, hits: 2 });
     const text = renderSummary(
-      { qqp: 2, paws: 2, seed: 1, dev: 4, test: 4, devDuplicates: 2, testDuplicates: 2, embedders: ['X', 'Y'], inputTypes: ['none'], maxWrongRate: 0.01, conditions: 'test' },
+      { qqp: 2, paws: 2, seed: 1, dev: 4, test: 4, devDuplicates: 2, testDuplicates: 2, embedders: ['X', 'Y'], inputTypes: ['none'], maxWrongRate: 0.01, minHitRate: 0.05, guard: GUARD, conditions: 'test' },
       results,
     );
-    expect(text).toContain('| none | X | X | same-model | 0.99 |');
+    expect(text).toContain('| none | X | X | same-model | meets 1.0% | 0.99 |');
     expect(text).not.toMatch(/NaN|undefined/);
+  });
+
+  // r1: a close prompt with another order number (not a duplicate). r2: a true paraphrase. r3: a paraphrase whose own
+  // entry is far but whose nearest entry in the store is r2's.
+  const store = () => {
+    const pairs: Pair[] = [
+      { id: 'r1', source: 'qqp', a: 'refund order 1234', b: 'refund order 1235', duplicate: false },
+      { id: 'r2', source: 'qqp', a: 'reset password', b: 'change password', duplicate: true },
+      { id: 'r3', source: 'qqp', a: 'update card', b: 'change card', duplicate: true },
+    ];
+    const vectors = new Map<string, number[]>([
+      ['refund order 1234', axisVec({ 0: 1 })],
+      ['refund order 1235', axisVec({ 0: 0.982 })],
+      ['reset password', axisVec({ 1: 1 })],
+      ['change password', axisVec({ 1: 0.93 })],
+      ['update card', axisVec({ 2: 1 })],
+      ['change card', axisVec({ 2: 0.2, 1: 0.96 })],
+    ]);
+    return { pairs, vectors };
+  };
+
+  it('nearest neighbour serves another pair\'s entry as wrong, and the guards refuse what the vectors cannot tell apart', () => {
+    const { pairs, vectors } = store();
+    const [r] = evaluate({ dev: pairs, test: pairs, vectors: { none: { M: vectors } }, maxWrongRate: 0.01, guard: GUARD, minHitRate: 0.05 });
+    const at = (rows: CurveRow[], t: number) => rows.find((c) => c.threshold === t)!;
+    // Pairwise at 0.90 serves r1 (wrong) and r2; the guards drop r1 for its number.
+    expect(at(r!.test.pairwise, 90)).toMatchObject({ served: 2, hits: 1, wrong: 1 });
+    expect(at(r!.test['pairwise+guards'], 90)).toMatchObject({ served: 1, hits: 1, wrong: 0 });
+    // Nearest neighbour also serves r3's request with r2's entry, which pairwise never sees.
+    expect(at(r!.test.nn, 90)).toMatchObject({ served: 3, hits: 1, wrong: 2, duplicates: 2 });
+    expect(at(r!.test['nn+guards'], 90)).toMatchObject({ served: 1, hits: 1, wrong: 0 });
+    // Chosen by nearest neighbour with guards: the highest threshold that still serves r2's 0.93.
+    expect(r!.chosen?.threshold).toBe(93);
+    expect(r!.chosen?.refusedBy).toEqual({ signature: 0, numbers: 1, quotes: 0, names: 0, negation: 0, tokens: 1 });
+  });
+
+  it('with no threshold inside the budget it says so and recommends the lowest wrong rate above the minimum hit rate', () => {
+    const { pairs, vectors } = store();
+    // The content-word guard is off, so r3's request is served r2's entry.
+    const off = { tokenSet: false, maxDiff: 2 };
+    const input = { dev: pairs, test: pairs, vectors: { none: { M: vectors } }, maxWrongRate: 0.01, guard: off, minHitRate: 0.4 };
+    const [r] = evaluate(input);
+    expect(r!.chosen).toBeUndefined();
+    expect(r!.recommended).toMatchObject({ threshold: 93 });
+    expect(r!.recommended?.test).toMatchObject({ served: 2, hits: 1, wrong: 1 });
+    const info = { qqp: 3, paws: 0, seed: 1, dev: 3, test: 3, devDuplicates: 2, testDuplicates: 2, embedders: ['M'], inputTypes: ['none'], maxWrongRate: 0.01, minHitRate: 0.4, guard: off, conditions: 'test' };
+    const text = renderSummary(info, [r!]);
+    expect(text).toContain('**none meets 1.0%**');
+    expect(text).toContain('at least 40%');
+    // A minimum hit rate nothing reaches: no recommendation at all, said plainly.
+    const [none] = evaluate({ ...input, minHitRate: 0.9 });
+    expect(none!.recommended).toBeUndefined();
+    expect(renderSummary({ ...info, minHitRate: 0.9 }, [none!])).toContain('no threshold fits the budget, and none serves 90% of duplicates');
+  });
+
+  it('recommendThreshold prefers the lowest wrong rate, then more hits, then the higher threshold', () => {
+    const row = (threshold: number, hits: number, wrong: number): CurveRow => ({ threshold, served: hits + wrong, hits, wrong, duplicates: 10, hitRate: hits / 10, wrongRate: hits + wrong === 0 ? null : wrong / (hits + wrong) });
+    expect(recommendThreshold([row(80, 9, 9), row(85, 8, 4), row(90, 1, 0), row(95, 0, 0)], 0.5)?.threshold).toBe(85);
+    expect(recommendThreshold([row(80, 9, 9), row(85, 8, 4), row(90, 1, 0)], 0.1)?.threshold).toBe(90);
+    expect(recommendThreshold([row(80, 5, 5), row(81, 5, 5), row(82, 6, 6)], 0.5)?.threshold).toBe(82);
+    expect(recommendThreshold([row(80, 1, 0)], 0.5)).toBeUndefined();
+    expect(recommendThreshold([], 0.1)).toBeUndefined();
   });
 
   it('the stub embedder is deterministic, unit length, and blind to word order', async () => {
