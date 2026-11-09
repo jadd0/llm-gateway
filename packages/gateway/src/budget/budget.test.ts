@@ -378,8 +378,11 @@ describe('budget', { timeout: 120_000 }, () => {
     const e0 = budget.epoch();
     const keyAt = (e: number) => `${prefix}bud:{${t}}:${P}:${e}`;
     faults.down = true;
-    expect(allowed(await budget.reserve(req(t, 100, 100_000))).path).toBe('postgres'); // outage declared, the bump fails
+    const first = allowed(await budget.reserve(req(t, 100, 100_000)));
+    expect(first.path).toBe('postgres'); // outage declared, the bump fails
     faults.down = false; // Redis is back, but the new epoch is not in place
+    await budget.settle(first, { kind: 'refund' }); // a Redis call that succeeds does not bring the instance back either
+    expect(budget.mode()).toBe('postgres');
     for (let i = 0; i < 3; i++) {
       expect(allowed(await budget.reserve(req(t, 100, 100_000))).path).toBe('postgres');
       expect(budget.mode()).toBe('postgres');
@@ -400,8 +403,8 @@ describe('budget', { timeout: 120_000 }, () => {
     expect(back.path).toBe('redis');
     expect(budget.mode()).toBe('redis');
     expect(budget.epoch()).toBe(e0 + 1);
-    // The new key was rebuilt from Postgres: the five live holds, counted once each.
-    expect(await redisBal(t, e0 + 1)).toMatchObject({ spent: 0, reserved: 500 });
+    // The new key was rebuilt from Postgres: the four live holds, counted once each.
+    expect(await redisBal(t, e0 + 1)).toMatchObject({ spent: 0, reserved: 400 });
     expect(await redis.exists(keyAt(e0))).toBe(0);
   });
 
