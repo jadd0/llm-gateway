@@ -40,6 +40,9 @@ export const tenantSpend = pgTable(
       .references(() => tenants.id, { onDelete: 'cascade' }),
     period: char('period', { length: 7 }).notNull(),
     spentMicros: bigint('spent_micros', { mode: 'number' }).notNull().default(0),
+    // How many charges have been added to spent_micros. Each charge is applied under this row's lock, so
+    // the count orders the charges; the Redis balance uses it to tell which charges it already holds.
+    charges: bigint('charges', { mode: 'number' }).notNull().default(0),
   },
   (t) => [primaryKey({ columns: [t.tenantId, t.period] })],
 );
@@ -60,15 +63,19 @@ export const spendLedger = pgTable('spend_ledger', {
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
 
-// Money held for in-flight requests. Used only on the Postgres path (Redis down); an expiry lets a
-// crashed gateway's hold lapse.
-export const budgetReservations = pgTable('budget_reservations', {
-  id: uuid('id').primaryKey(),
-  tenantId: uuid('tenant_id').notNull(),
-  period: char('period', { length: 7 }).notNull(),
-  amountMicros: bigint('amount_micros', { mode: 'number' }).notNull(),
-  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
-});
+// Money held for in-flight requests: every hold, whichever store decided it. The Postgres path counts
+// these, and a rebuilt Redis balance starts from them. An expiry lets a crashed gateway's hold lapse.
+export const budgetReservations = pgTable(
+  'budget_reservations',
+  {
+    id: uuid('id').primaryKey(),
+    tenantId: uuid('tenant_id').notNull(),
+    period: char('period', { length: 7 }).notNull(),
+    amountMicros: bigint('amount_micros', { mode: 'number' }).notNull(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  },
+  (t) => [index('budget_reservations_tenant_period_idx').on(t.tenantId, t.period)],
+);
 
 // A single row. Redis balance keys include the epoch; it moves when an instance falls back to
 // Postgres, so the Redis balance is rebuilt from Postgres instead of trusting one that missed spend.

@@ -64,6 +64,7 @@ const schema = z
     BUDGET_RESERVATION_TTL_S: int(300, 1),
     BUDGET_REDIS_TIMEOUT_MS: int(50, 1),
     BUDGET_EPOCH_REFRESH_S: int(5, 1),
+    BUDGET_OUTAGE_FAILURES: int(3, 1),
   })
   .refine((e) => e.AUTH_CACHE === 'none' || e.REDIS_URL !== undefined, {
     message: 'REDIS_URL is required when AUTH_CACHE=redis',
@@ -76,6 +77,11 @@ const schema = z
   .refine((e) => e.BUDGET_ENABLED === 'false' || e.REDIS_URL !== undefined, {
     message: 'REDIS_URL is required when BUDGET_ENABLED=true',
     path: ['REDIS_URL'],
+  })
+  .refine((e) => e.BUDGET_ENABLED === 'false' || e.BUDGET_RESERVATION_TTL_S * 1000 > e.UPSTREAM_TIMEOUT_MS, {
+    message:
+      'BUDGET_RESERVATION_TTL_S must be longer than UPSTREAM_TIMEOUT_MS (in seconds): a hold must outlive the longest call it covers',
+    path: ['BUDGET_RESERVATION_TTL_S'],
   })
   .refine((e) => e.AUTH_TOMBSTONE_TTL_S > e.AUTH_CACHE_TTL_S, {
     message: 'AUTH_TOMBSTONE_TTL_S must be longer than AUTH_CACHE_TTL_S',
@@ -111,6 +117,7 @@ export interface Config {
   budgetReservationTtlS: number;
   budgetRedisTimeoutMs: number;
   budgetEpochRefreshS: number;
+  budgetOutageFailures: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -142,6 +149,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     budgetReservationTtlS: e.BUDGET_RESERVATION_TTL_S,
     budgetRedisTimeoutMs: e.BUDGET_REDIS_TIMEOUT_MS,
     budgetEpochRefreshS: e.BUDGET_EPOCH_REFRESH_S,
+    budgetOutageFailures: e.BUDGET_OUTAGE_FAILURES,
   };
 }
 

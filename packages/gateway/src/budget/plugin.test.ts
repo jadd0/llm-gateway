@@ -9,6 +9,7 @@ import { createDb, type Db } from '../db/client.ts';
 import { tenants } from '../db/schema.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
 import { periodOf } from './period.ts';
+import { createPgLedger } from './pg-ledger.ts';
 
 // The upstream picks its behaviour from the model name (every mock-* model is priced):
 //   mock-ok       answers with usage: 1 prompt + 10 completion tokens (31 micro-USD)
@@ -118,13 +119,14 @@ const chat = (key: string, model = 'mock-ok', extra: object = {}) =>
   });
 
 const period = periodOf(Date.now());
-const balanceKey = async (tenantId: string) =>
-  (await redis.keys(`${prefix}bud:{${tenantId}}:${period}:*`)).find((k) => /:\d+$/.test(k));
+// Any Redis balance key of the tenant (none means nothing was ever reserved for it).
+const balanceKey = async (tenantId: string) => (await redis.keys(`${prefix}bud:{${tenantId}}:${period}:*`))[0];
+// What the tenant has spent and holds, from Postgres: the record. Another test file can move the shared
+// epoch while this one runs, which sends the gateway to a new Redis key, so the record is what is read.
 const balance = async (tenantId: string) => {
-  const k = await balanceKey(tenantId);
-  if (!k) return null;
-  const h = await redis.hgetall(k);
-  return { spent: Number(h.spent), reserved: Number(h.reserved) };
+  const spent = await handle.db.execute(sql`select coalesce(sum(spent_micros), 0) as s from tenant_spend where tenant_id = ${tenantId}`);
+  const held = await handle.db.execute(sql`select coalesce(sum(amount_micros), 0) as s from budget_reservations where tenant_id = ${tenantId}`);
+  return { spent: Number(spent.rows[0]!.s), reserved: Number(held.rows[0]!.s) };
 };
 // A full bucket has no key (it expires the moment it is full).
 const tokensLeft = async (keyId: string) => {
@@ -220,6 +222,42 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     expect(res.statusCode).toBe(200);
     expect(res.headers['x-ratelimit-remaining-tokens']).toBe('0');
     expect(res.headers['x-budget-remaining-usd']).toBe('0.996927'); // 1,000,000 - (1 + 1024 * 3)
+  });
+
+  it('503 budget_unavailable when the Postgres copy of a hold cannot be written, and nothing stays held', async () => {
+    const failing = buildApp(
+      testConfig({
+        API_KEY_PEPPER: base.apiKeyPepper,
+        REDIS_KEY_PREFIX: prefix,
+        OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
+        BUDGET_ENABLED: 'true',
+        BUDGET_REDIS_TIMEOUT_MS: '5000',
+        BUDGET_EPOCH_REFRESH_S: '3600',
+        RATE_LIMIT_REDIS_TIMEOUT_MS: '5000',
+      }),
+      {
+        rateLimitClock: () => T0,
+        budgetPgLedger: { ...createPgLedger(handle.db), hold: () => Promise.reject(new Error('connection reset')) },
+      },
+    );
+    try {
+      const s = await fresh(1_000_000);
+      const before = hits;
+      const res = await failing.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
+        payload: JSON.stringify({ model: 'mock-ok', messages: [{ role: 'user', content: 'hi' }], max_tokens: 20 }),
+      });
+      expect(res.statusCode).toBe(503);
+      expect(res.json().error).toMatchObject({ type: 'gateway_error', code: 'budget_unavailable' });
+      expect(hits).toBe(before);
+      expect(await tokensLeft(s.keyId)).toBe(TPM); // the limiter's tokens went back
+      await failing.close(); // waits for the Redis hold to be released
+      expect(await balance(s.tenantId)).toEqual({ spent: 0, reserved: 0 });
+    } finally {
+      await failing.close();
+    }
   });
 
   it('a tenant with no cap of its own gets the gateway default', async () => {

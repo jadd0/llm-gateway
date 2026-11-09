@@ -68,23 +68,65 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
     expect((await ledger.reserve(reserveArgs(t, 4000, 5000))).allowed).toBe(true);
   });
 
-  it('settle drops the hold and charges actual in one transaction', async () => {
+  it('settle drops the hold and charges actual in one transaction, numbering the charge', async () => {
     const t = await newTenant();
     const a = reserveArgs(t, 3000, 3000);
     expect((await ledger.reserve(a)).allowed).toBe(true);
     expect((await ledger.reserve(reserveArgs(t, 1, 3000))).allowed).toBe(false);
-    expect(await ledger.settle(a.id, entry(t, 1200))).toBe(true);
+    expect(await ledger.settle(a.id, entry(t, 1200))).toMatchObject({ recorded: true, spent: 1200, charges: 1 });
     expect(await heldRows(t)).toBe(0);
     expect(await ledger.spent(t, P)).toBe(1200);
     const next = await ledger.reserve(reserveArgs(t, 1800, 3000));
     expect(next).toEqual({ allowed: true, remaining: 0 });
   });
 
+  it('a hold written for Redis counts against the Postgres path and settles like any other', async () => {
+    const t = await newTenant();
+    const redisHold = reserveArgs(t, 4000, 5000);
+    await ledger.hold(redisHold);
+    expect(await heldRows(t)).toBe(1);
+    // Redis admitted 4000; the Postgres path must see it.
+    expect((await ledger.reserve(reserveArgs(t, 1001, 5000))).allowed).toBe(false);
+    expect((await ledger.reserve(reserveArgs(t, 1000, 5000))).allowed).toBe(true);
+    await ledger.hold(redisHold); // writing it again changes nothing
+    expect(await heldRows(t)).toBe(2);
+    expect(await ledger.settle(redisHold.id, entry(t, 3500))).toMatchObject({ recorded: true, spent: 3500, charges: 1 });
+    expect(await heldRows(t)).toBe(1);
+  });
+
+  it('the snapshot has spend, charge count and only the live holds, with their time left', async () => {
+    const t = await newTenant();
+    expect(await ledger.snapshot(t, P)).toEqual({ spent: 0, charges: 0, holds: [] });
+    const live = reserveArgs(t, 700, 10_000, { ttlMs: 120_000 });
+    await ledger.hold(live);
+    await ledger.hold(reserveArgs(t, 900, 10_000, { ttlMs: -5000 })); // already lapsed
+    await ledger.settle(randomUUID(), entry(t, 100));
+    await ledger.settle(randomUUID(), entry(t, 250));
+    const snap = await ledger.snapshot(t, P);
+    expect(snap).toMatchObject({ spent: 350, charges: 2 });
+    expect(snap.holds).toHaveLength(1);
+    expect(snap.holds[0]).toMatchObject({ id: live.id, amount: 700 });
+    expect(snap.holds[0]!.ttlMs).toBeGreaterThan(100_000);
+    expect(snap.holds[0]!.ttlMs).toBeLessThanOrEqual(120_000);
+  });
+
+  it('charges are numbered in order under concurrency, each carrying the running total', async () => {
+    const t = await newTenant();
+    const costs = Array.from({ length: 30 }, (_, i) => 10 + i);
+    const recs = await Promise.all(costs.map((c) => ledger.settle(randomUUID(), entry(t, c))));
+    const byCharge = [...recs].sort((x, y) => x.charges - y.charges);
+    expect(byCharge.map((r) => r.charges)).toEqual(Array.from({ length: 30 }, (_, i) => i + 1));
+    // Each running total is the previous one plus one charge, so the totals strictly increase and end at the sum.
+    expect(byCharge.every((r, i) => i === 0 || r.spent > byCharge[i - 1]!.spent)).toBe(true);
+    expect(byCharge.at(-1)!.spent).toBe(costs.reduce((a, b) => a + b, 0));
+    expect(await ledger.spent(t, P)).toBe(byCharge.at(-1)!.spent);
+  });
+
   it('a refund drops the hold and records nothing', async () => {
     const t = await newTenant();
     const a = reserveArgs(t, 1000, 1000);
     await ledger.reserve(a);
-    expect(await ledger.settle(a.id, null)).toBe(false);
+    expect(await ledger.settle(a.id, null)).toMatchObject({ recorded: false });
     expect(await heldRows(t)).toBe(0);
     expect(await ledger.spent(t, P)).toBe(0);
   });
@@ -92,9 +134,9 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
   it('recording the same request twice charges once', async () => {
     const t = await newTenant();
     const e = entry(t, 500);
-    expect(await ledger.record(e)).toBe(true);
-    expect(await ledger.record(e)).toBe(false);
-    expect(await ledger.record({ ...e, costMicros: 9999 })).toBe(false);
+    expect(await ledger.settle(e.requestId, e)).toMatchObject({ recorded: true, charges: 1 });
+    expect(await ledger.settle(e.requestId, e)).toMatchObject({ recorded: false });
+    expect(await ledger.settle(e.requestId, { ...e, costMicros: 9999 })).toMatchObject({ recorded: false });
     expect(await ledger.spent(t, P)).toBe(500);
     const rows = await handle.db.execute(sql`select count(*) as n from spend_ledger where tenant_id = ${t}`);
     expect(Number(rows.rows[0]!.n)).toBe(1);
@@ -108,12 +150,15 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
     expect(await heldRows(t)).toBe(1);
   });
 
-  it('the epoch starts at 1 and only moves forward', async () => {
-    const e0 = await ledger.readEpoch();
-    expect(e0).toBeGreaterThanOrEqual(1);
-    const [a, b] = await Promise.all([ledger.bumpEpoch(), ledger.bumpEpoch()]);
-    expect(new Set([a, b]).size).toBe(2);
-    expect(Math.min(a, b)).toBeGreaterThan(e0);
-    expect(await ledger.readEpoch()).toBe(Math.max(a, b));
+  it('a bump from an epoch that is not the current one changes nothing and reports the current epoch', async () => {
+    // Bumps that succeed are tested in budget.test.ts, the only file that moves the shared epoch.
+    const current = await ledger.readEpoch();
+    expect(current).toBeGreaterThanOrEqual(1);
+    // (budget.test.ts may move the epoch meanwhile, so the reported epoch is at least the one read.)
+    for (const stale of [0, current + 1000]) {
+      const r = await ledger.bumpEpoch(stale);
+      expect(r.bumped).toBe(false);
+      expect(r.epoch).toBeGreaterThanOrEqual(current);
+    }
   });
 });

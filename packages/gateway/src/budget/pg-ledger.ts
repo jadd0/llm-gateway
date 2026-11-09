@@ -2,6 +2,7 @@ import { eq, and, sql } from 'drizzle-orm';
 import type { Db } from '../db/client.ts';
 import { budgetEpoch, budgetReservations, spendLedger, tenantSpend } from '../db/schema.ts';
 import type { Period } from './period.ts';
+import type { Snapshot } from './redis-ledger.ts';
 
 type Tx = Parameters<Parameters<Db['db']['transaction']>[0]>[0];
 
@@ -27,37 +28,62 @@ export interface PgReserveArgs {
   ttlMs: number;
 }
 
+/** What recording a settle changed. */
+export interface SettleRecord {
+  /** True if this request's charge was new; false for a refund or a repeat. */
+  recorded: boolean;
+  /** tenant_spend.spent_micros and .charges right after this charge (only when `recorded`). */
+  spent: number;
+  charges: number;
+  /** The budget epoch when the transaction ran: the one the live balance should be corrected on. */
+  epoch: number;
+}
+
 export interface PgLedger {
   /** Settled spend for the period; 0 when nothing was recorded. */
   spent(tenantId: string, period: Period): Promise<number>;
+  /** Settled spend, charge count and every unexpired hold, read in one consistent snapshot. */
+  snapshot(tenantId: string, period: Period): Promise<Snapshot>;
   /**
-   * Checks the cap and holds the money in one short transaction. The tenant's spend row is locked for
-   * the check only: the lock is released when this returns, long before the provider answers.
+   * Checks the cap and holds the money in one short transaction, counting every unexpired hold (those
+   * placed by Redis-path requests too). The tenant's spend row is locked for the check only: the lock
+   * is released when this returns, long before the provider answers.
    */
   reserve(args: PgReserveArgs): Promise<{ allowed: boolean; remaining: number }>;
-  /** Records a settled request (once per request id) and adds it to the period's spend. True if it was new. */
-  record(entry: SpendEntry): Promise<boolean>;
-  /** Drops a hold and records the charge in one transaction. `entry` is null for a refund. True if a charge was new. */
-  settle(id: string, entry: SpendEntry | null): Promise<boolean>;
+  /** Writes the Postgres copy of a hold that Redis already admitted. No check: Redis decided. */
+  hold(args: Omit<PgReserveArgs, 'cap'>): Promise<void>;
+  /**
+   * Drops a hold and records the charge (once per request id) in one transaction. `entry` is null for a
+   * refund.
+   */
+  settle(id: string, entry: SpendEntry | null): Promise<SettleRecord>;
   /** Reads the budget epoch, creating it at 1 on first use. */
   readEpoch(): Promise<number>;
-  /** Moves the epoch on and returns the new value. */
-  bumpEpoch(): Promise<number>;
+  /**
+   * Moves the epoch on from `observed`, only if it is still `observed`. Of several instances that saw
+   * the same outage, one bumps; the others get the new value. `bumped` says which this was.
+   */
+  bumpEpoch(observed: number): Promise<{ epoch: number; bumped: boolean }>;
 }
 
 // Inserts the ledger row and adds to the period's spend in the caller's transaction. The ledger's
-// primary key makes a repeat a no-op, so a retried settle never charges twice.
-async function recordIn(tx: Tx, e: SpendEntry): Promise<boolean> {
+// primary key makes a repeat a no-op, so a retried settle never charges twice. The spend row is updated
+// under its lock, so the charge count it returns orders charges in commit order.
+async function recordIn(tx: Tx, e: SpendEntry): Promise<Omit<SettleRecord, 'epoch'>> {
   const inserted = await tx.insert(spendLedger).values(e).onConflictDoNothing().returning({ id: spendLedger.requestId });
-  if (inserted.length === 0) return false;
-  await tx
+  if (inserted.length === 0) return { recorded: false, spent: 0, charges: 0 };
+  const [row] = await tx
     .insert(tenantSpend)
-    .values({ tenantId: e.tenantId, period: e.period, spentMicros: e.costMicros })
+    .values({ tenantId: e.tenantId, period: e.period, spentMicros: e.costMicros, charges: 1 })
     .onConflictDoUpdate({
       target: [tenantSpend.tenantId, tenantSpend.period],
-      set: { spentMicros: sql`${tenantSpend.spentMicros} + ${e.costMicros}` },
-    });
-  return true;
+      set: {
+        spentMicros: sql`${tenantSpend.spentMicros} + ${e.costMicros}`,
+        charges: sql`${tenantSpend.charges} + 1`,
+      },
+    })
+    .returning({ spent: tenantSpend.spentMicros, charges: tenantSpend.charges });
+  return { recorded: true, spent: row!.spent, charges: row!.charges };
 }
 
 export function createPgLedger(db: Db['db']): PgLedger {
@@ -111,12 +137,57 @@ export function createPgLedger(db: Db['db']): PgLedger {
       });
     },
 
-    record: (entry) => db.transaction((tx) => recordIn(tx, entry)),
+    async snapshot(tenantId, period) {
+      // One snapshot: a settle commits its hold removal and its charge together, so this sees both or neither.
+      return db.transaction(
+        async (tx) => {
+          const [row] = await tx
+            .select({ spent: tenantSpend.spentMicros, charges: tenantSpend.charges })
+            .from(tenantSpend)
+            .where(and(eq(tenantSpend.tenantId, tenantId), eq(tenantSpend.period, period)));
+          const holds = await tx
+            .select({
+              id: budgetReservations.id,
+              amount: budgetReservations.amountMicros,
+              ttlMs: sql<string>`floor(extract(epoch from (${budgetReservations.expiresAt} - now())) * 1000)`,
+            })
+            .from(budgetReservations)
+            .where(
+              and(
+                eq(budgetReservations.tenantId, tenantId),
+                eq(budgetReservations.period, period),
+                sql`${budgetReservations.expiresAt} > now()`,
+              ),
+            );
+          return {
+            spent: row?.spent ?? 0,
+            charges: row?.charges ?? 0,
+            holds: holds.map((h) => ({ id: h.id, amount: h.amount, ttlMs: Math.max(1, Number(h.ttlMs)) })),
+          };
+        },
+        { isolationLevel: 'repeatable read' },
+      );
+    },
+
+    async hold(a) {
+      await db
+        .insert(budgetReservations)
+        .values({
+          id: a.id,
+          tenantId: a.tenantId,
+          period: a.period,
+          amountMicros: a.estimate,
+          expiresAt: sql`now() + ${a.ttlMs} * interval '1 millisecond'`,
+        })
+        .onConflictDoNothing();
+    },
 
     settle: (id, entry) =>
       db.transaction(async (tx) => {
         await tx.delete(budgetReservations).where(eq(budgetReservations.id, id));
-        return entry === null ? false : recordIn(tx, entry);
+        const rec = entry === null ? { recorded: false, spent: 0, charges: 0 } : await recordIn(tx, entry);
+        const [e] = await tx.select({ epoch: budgetEpoch.epoch }).from(budgetEpoch).where(eq(budgetEpoch.id, 1));
+        return { ...rec, epoch: e?.epoch ?? 1 };
       }),
 
     async readEpoch() {
@@ -125,14 +196,16 @@ export function createPgLedger(db: Db['db']): PgLedger {
       return row!.epoch;
     },
 
-    async bumpEpoch() {
+    async bumpEpoch(observed) {
       await db.insert(budgetEpoch).values({ id: 1, epoch: 1 }).onConflictDoNothing();
       const [row] = await db
         .update(budgetEpoch)
         .set({ epoch: sql`${budgetEpoch.epoch} + 1` })
-        .where(eq(budgetEpoch.id, 1))
+        .where(and(eq(budgetEpoch.id, 1), eq(budgetEpoch.epoch, observed)))
         .returning({ epoch: budgetEpoch.epoch });
-      return row!.epoch;
+      if (row) return { epoch: row.epoch, bumped: true };
+      const [now] = await db.select({ epoch: budgetEpoch.epoch }).from(budgetEpoch).where(eq(budgetEpoch.id, 1));
+      return { epoch: now!.epoch, bumped: false };
     },
   };
 }

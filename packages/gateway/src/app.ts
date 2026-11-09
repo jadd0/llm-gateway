@@ -3,6 +3,7 @@ import { auth } from './auth/plugin.ts';
 import { keyStoreFromConfig } from './auth/key-store.ts';
 import type { Config } from './config.ts';
 import { createDb } from './db/client.ts';
+import type { PgLedger } from './budget/pg-ledger.ts';
 import { budgetGuard } from './budget/plugin.ts';
 import { errorBody } from './errors.ts';
 import { createLimiter } from './ratelimit/limiter.ts';
@@ -19,6 +20,8 @@ export function buildApp(
     rateLimitClock?: () => number;
     /** Pins the budget's clock (ms): the month it charges and the Redis scripts' expiry clock. Tests only. */
     budgetClock?: () => number;
+    /** Replaces the budget's Postgres ledger. Tests only. */
+    budgetPgLedger?: PgLedger;
   } = {},
 ): FastifyInstance {
   const app = Fastify({
@@ -91,7 +94,9 @@ export function buildApp(
         reservationTtlS: config.budgetReservationTtlS,
         redisTimeoutMs: config.budgetRedisTimeoutMs,
         epochRefreshS: config.budgetEpochRefreshS,
+        outageFailures: config.budgetOutageFailures,
         ...(extra.budgetClock ? { clock: extra.budgetClock } : {}),
+        ...(extra.budgetPgLedger ? { pgLedger: extra.budgetPgLedger } : {}),
       },
       defaultCapMicros: config.budgetDefaultMonthlyMicros,
       defaultMaxTokens: config.rateLimitDefaultMaxTokens,

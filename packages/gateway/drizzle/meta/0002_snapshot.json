@@ -1,5 +1,5 @@
 {
-  "id": "48690716-3f2b-46a3-a038-3b7ce7cd48f3",
+  "id": "1eb29e14-1a8e-42c9-9431-cee415d1b4a1",
   "prevId": "b1449a1b-989c-4f54-83c3-bb5dda92546b",
   "version": "7",
   "dialect": "postgresql",
@@ -176,7 +176,29 @@
           "notNull": true
         }
       },
-      "indexes": {},
+      "indexes": {
+        "budget_reservations_tenant_period_idx": {
+          "name": "budget_reservations_tenant_period_idx",
+          "columns": [
+            {
+              "expression": "tenant_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "period",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
@@ -284,6 +306,13 @@
         },
         "spent_micros": {
           "name": "spent_micros",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "charges": {
+          "name": "charges",
           "type": "bigint",
           "primaryKey": false,
           "notNull": true,

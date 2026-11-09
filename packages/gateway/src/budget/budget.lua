@@ -2,10 +2,12 @@
 -- separately (redis-ledger.ts). Money is integer micro-USD held in Lua doubles, exact below 2^53.
 --
 -- A tenant's month lives under three keys that share the hash tag {tenantId}:
---   bal   hash  spent, reserved          settled money, and money held for in-flight requests
+--   bal   hash  spent, reserved, ver     settled money, money held for in-flight requests, and how many
+--                                        charges `spent` includes (tenant_spend.charges in Postgres)
 --   res   zset  request id -> expiry     when each hold lapses (ms)
 --   amt   hash  request id -> amount     what each hold is worth
--- plus one tiny `done` key per settled request, which is what makes settle idempotent.
+-- Postgres is the record: `spent` is only ever set to a value Postgres has had, so a repeated or
+-- reordered settle cannot count a charge twice.
 
 -- @script reserve
 -- KEYS: bal, res, amt
@@ -46,31 +48,59 @@ redis.call('EXPIREAT', KEYS[3], ARGV[6])
 return {1, room - estimate}
 
 -- @script settle
--- KEYS: bal, res, amt, done
--- ARGV: id, actual (micro-USD to charge, 0 for a refund), doneTtlS
--- Returns {1, held} when applied (held = 1 if the reservation was still there), {0, 0} when this id
--- was settled already, {-1, 0} when the balance is missing (the next reserve rebuilds it from
--- Postgres, which has this charge).
-if redis.call('EXISTS', KEYS[1]) == 0 then return {-1, 0} end
-if redis.call('EXISTS', KEYS[4]) == 1 then return {0, 0} end
+-- KEYS: bal, res, amt
+-- ARGV: id, charges, spentAfter
+-- Releases the request's hold if it is still there. If `charges` > 0 it is the value of
+-- tenant_spend.charges right after this request's charge was recorded in Postgres, and `spentAfter` the
+-- value of spent_micros then: the balance takes them only if it is behind (ver < charges). Postgres
+-- numbers its charges in commit order and each spentAfter includes every earlier charge, so the balance
+-- ends at the same value in whatever order, and however many times, settles arrive, and a balance that
+-- was rebuilt after the charge (ver >= charges) leaves it alone.
+-- Returns {1} if anything changed, {0} if nothing did, {-1} when the balance is missing (the next reserve
+-- rebuilds it from Postgres, which already has this settle).
+if redis.call('EXISTS', KEYS[1]) == 0 then return {-1} end
+local changed = 0
 local held = redis.call('HGET', KEYS[3], ARGV[1])
 if held then
   redis.call('HDEL', KEYS[3], ARGV[1])
   redis.call('ZREM', KEYS[2], ARGV[1])
   redis.call('HINCRBY', KEYS[1], 'reserved', -tonumber(held))
+  changed = 1
 end
-local actual = tonumber(ARGV[2])
-if actual > 0 then redis.call('HINCRBY', KEYS[1], 'spent', actual) end
-redis.call('SET', KEYS[4], '1', 'EX', ARGV[3])
-if held then return {1, 1} end
-return {1, 0}
+local n = tonumber(ARGV[2])
+if n > 0 then
+  local ver = tonumber(redis.call('HGET', KEYS[1], 'ver')) or 0
+  if n > ver then
+    redis.call('HSET', KEYS[1], 'spent', ARGV[3], 'ver', ARGV[2])
+    changed = 1
+  end
+end
+return {changed}
 
 -- @script init
--- KEYS: bal
--- ARGV: spent (from Postgres), expireAt (unix s)
--- Creates the balance only if it is still missing, so two instances rebuilding at once cannot add
--- the same spend twice. Returns 1 if this call created it.
+-- KEYS: bal, res, amt
+-- ARGV: spent, ver, expireAt (unix s), nowMs (empty = Redis TIME), then (id, amount, ttlMs) per live hold
+-- Builds the balance from a Postgres snapshot: settled spend and charge count, and every unexpired hold
+-- (so their settles release them and they count against the cap now). Creates it only if it is still
+-- missing, so two instances rebuilding at once cannot add anything twice. Returns 1 if this call
+-- created it.
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
-redis.call('HSET', KEYS[1], 'spent', ARGV[1], 'reserved', 0)
-redis.call('EXPIREAT', KEYS[1], ARGV[2])
+local now = tonumber(ARGV[4])
+if now == nil then
+  local t = redis.call('TIME')
+  now = t[1] * 1000 + math.floor(t[2] / 1000)
+end
+local reserved = 0
+for i = 5, #ARGV, 3 do
+  local amount = tonumber(ARGV[i + 1])
+  redis.call('ZADD', KEYS[2], now + tonumber(ARGV[i + 2]), ARGV[i])
+  redis.call('HSET', KEYS[3], ARGV[i], amount)
+  reserved = reserved + amount
+end
+redis.call('HSET', KEYS[1], 'spent', ARGV[1], 'ver', ARGV[2], 'reserved', reserved)
+redis.call('EXPIREAT', KEYS[1], ARGV[3])
+if reserved > 0 or #ARGV > 4 then
+  redis.call('EXPIREAT', KEYS[2], ARGV[3])
+  redis.call('EXPIREAT', KEYS[3], ARGV[3])
+end
 return 1

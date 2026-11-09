@@ -33,20 +33,35 @@ export interface ReserveResult {
 export interface SettleArgs {
   tenantId: string;
   period: Period;
+  /** The epoch in force now, whatever epoch the request reserved under. */
   epoch: number;
   id: string;
-  /** Micro-USD to add to spend; 0 releases the hold without a charge. */
-  actual: number;
+  /**
+   * 0 releases the hold and charges nothing. Otherwise the tenant_spend.charges value right after this
+   * request's charge was recorded in Postgres, with `spentAfter` the spent_micros then.
+   */
+  charges: number;
+  spentAfter: number;
 }
 
-/** `applied`: the hold was released and the charge added. `duplicate`: this id was settled before. `rebuild`: the balance is gone. */
-export type SettleResult = 'applied' | 'duplicate' | 'rebuild';
+/** What Postgres knows about a tenant's month: the record a lost balance is rebuilt from. */
+export interface Snapshot {
+  spent: number;
+  charges: number;
+  /** Every unexpired hold, with the time it has left. */
+  holds: Array<{ id: string; amount: number; ttlMs: number }>;
+}
+
+/** `changed`: the hold was released or the spend moved. `unchanged`: nothing to do. `rebuild`: the balance is gone. */
+export type SettleResult = 'changed' | 'unchanged' | 'rebuild';
 
 export interface RedisLedger {
   /** Throws when Redis does not answer in time or fails. */
   reserve(args: ReserveArgs): Promise<ReserveResult>;
-  /** Throws when Redis does not answer in time or fails. */
+  /** Throws when Redis does not answer in time or fails. Safe to repeat and to reorder. */
   settle(args: SettleArgs): Promise<SettleResult>;
+  /** Resolves if Redis answers a PING in time. */
+  ping(): Promise<void>;
 }
 
 export interface RedisLedgerOptions {
@@ -54,10 +69,8 @@ export interface RedisLedgerOptions {
   keyPrefix: string;
   /** A Redis answer slower than this is an outage for that call. */
   timeoutMs: number;
-  /** Settled spend for the period as Postgres has it: what a lost balance is rebuilt from. */
-  loadSpent(tenantId: string, period: Period): Promise<number>;
-  /** How long a settled id is remembered so a repeat settle is a no-op. */
-  doneTtlS: number;
+  /** Postgres's view of the tenant's period, read in one consistent snapshot. */
+  loadSnapshot(tenantId: string, period: Period): Promise<Snapshot>;
   /** Pins the clock the scripts use, in ms. Production leaves it unset so they read Redis TIME. */
   clock?: () => number;
 }
@@ -73,14 +86,17 @@ export class RedisTimeout extends Error {
 }
 
 export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
-  const { redis, keyPrefix, timeoutMs, loadSpent, clock } = opts;
+  const { redis, keyPrefix, timeoutMs, loadSnapshot, clock } = opts;
   redis.defineCommand('budReserve', { numberOfKeys: 3, lua: SCRIPTS.reserve });
-  redis.defineCommand('budSettle', { numberOfKeys: 4, lua: SCRIPTS.settle });
-  redis.defineCommand('budInit', { numberOfKeys: 1, lua: SCRIPTS.init });
+  redis.defineCommand('budSettle', { numberOfKeys: 3, lua: SCRIPTS.settle });
+  redis.defineCommand('budInit', { numberOfKeys: 3, lua: SCRIPTS.init });
   const cmd = redis as Commands;
 
   // The hash tag {tenantId} puts every key of a tenant's month in one Redis Cluster slot.
-  const base = (tenantId: string, period: Period, epoch: number) => `${keyPrefix}bud:{${tenantId}}:${period}:${epoch}`;
+  const keys = (tenantId: string, period: Period, epoch: number) => {
+    const b = `${keyPrefix}bud:{${tenantId}}:${period}:${epoch}`;
+    return [b, `${b}:res`, `${b}:amt`] as const;
+  };
 
   const withTimeout = <T>(p: Promise<T>): Promise<T> =>
     new Promise((resolve, reject) => {
@@ -98,9 +114,8 @@ export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
     });
 
   const reserveOnce = async (a: ReserveArgs): Promise<[number, number]> => {
-    const b = base(a.tenantId, a.period, a.epoch);
     const r = await withTimeout(
-      cmd.budReserve(`${b}`, `${b}:res`, `${b}:amt`, a.id, a.estimate, a.cap, a.ttlMs, clock ? clock() : '', periodExpiryS(a.period)),
+      cmd.budReserve(...keys(a.tenantId, a.period, a.epoch), a.id, a.estimate, a.cap, a.ttlMs, clock ? clock() : '', periodExpiryS(a.period)),
     );
     return [r[0]!, r[1]!];
   };
@@ -110,10 +125,13 @@ export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
       let [status, remaining] = await reserveOnce(a);
       if (status === -1) {
         // The balance is missing (first request of the month, an epoch change, a flush or an
-        // eviction). Rebuild it from Postgres. init creates it only if it is still missing, so two
-        // instances rebuilding at once cannot add the spend twice.
-        const spent = await loadSpent(a.tenantId, a.period);
-        await withTimeout(cmd.budInit(base(a.tenantId, a.period, a.epoch), spent, periodExpiryS(a.period)));
+        // eviction). Rebuild it from Postgres, holds included. init creates it only if it is still
+        // missing, so two instances rebuilding at once cannot add anything twice.
+        const snap = await loadSnapshot(a.tenantId, a.period);
+        const holds = snap.holds.flatMap((h) => [h.id, h.amount, h.ttlMs]);
+        await withTimeout(
+          cmd.budInit(...keys(a.tenantId, a.period, a.epoch), snap.spent, snap.charges, periodExpiryS(a.period), clock ? clock() : '', ...holds),
+        );
         [status, remaining] = await reserveOnce(a);
         if (status === -1) throw new Error('budget balance missing after rebuild');
       }
@@ -121,12 +139,13 @@ export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
     },
 
     async settle(a) {
-      const b = base(a.tenantId, a.period, a.epoch);
-      const r = await withTimeout(
-        cmd.budSettle(`${b}`, `${b}:res`, `${b}:amt`, `${b}:done:${a.id}`, a.id, a.actual, opts.doneTtlS),
-      );
+      const r = await withTimeout(cmd.budSettle(...keys(a.tenantId, a.period, a.epoch), a.id, a.charges, a.spentAfter));
       if (r[0] === -1) return 'rebuild';
-      return r[0] === 1 ? 'applied' : 'duplicate';
+      return r[0] === 1 ? 'changed' : 'unchanged';
+    },
+
+    async ping() {
+      await withTimeout(redis.ping());
     },
   };
 }
