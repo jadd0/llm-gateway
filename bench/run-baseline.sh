@@ -44,7 +44,7 @@ start_mock() { # latency token_delay
 start_gateway() { # AUTH_CACHE comes from the caller's environment (default redis)
   require_free_port "$GATEWAY_PORT"
   GATEWAY_PORT="$GATEWAY_PORT" OPENAI_BASE_URL="http://127.0.0.1:$MOCK_PORT" \
-    UPSTREAM_CONNECTIONS="${UPSTREAM_CONNECTIONS:-256}" LOG_LEVEL=warn AUTH_CACHE="${AUTH_CACHE:-redis}" \
+    UPSTREAM_CONNECTIONS="${UPSTREAM_CONNECTIONS:-256}" LOG_LEVEL=warn AUTH_CACHE="${AUTH_CACHE:-redis}" BUDGET_ENABLED="${BUDGET_ENABLED:-false}" \
     node --env-file-if-exists="$ROOT/.env.local" "$ROOT/packages/gateway/src/server.ts" >/dev/null &
   GW_PID=$!; PIDS+=("$GW_PID")
   # No key sent, so a live gateway answers 401.

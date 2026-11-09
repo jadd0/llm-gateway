@@ -60,7 +60,7 @@ start_mock() { # latency token_delay
 start_gateway() { # RATE_LIMIT_ENABLED comes from the caller's environment (default true)
   require_free_port "$GATEWAY_PORT"
   GATEWAY_PORT="$GATEWAY_PORT" OPENAI_BASE_URL="http://127.0.0.1:$MOCK_PORT" \
-    UPSTREAM_CONNECTIONS="${UPSTREAM_CONNECTIONS:-256}" LOG_LEVEL=warn RATE_LIMIT_ENABLED="${RATE_LIMIT_ENABLED:-true}" \
+    UPSTREAM_CONNECTIONS="${UPSTREAM_CONNECTIONS:-256}" LOG_LEVEL=warn RATE_LIMIT_ENABLED="${RATE_LIMIT_ENABLED:-true}" BUDGET_ENABLED="${BUDGET_ENABLED:-false}" \
     RATE_LIMIT_REDIS_TIMEOUT_MS="${RATE_LIMIT_REDIS_TIMEOUT_MS:-1000}" \
     node --env-file-if-exists="$ROOT/.env.local" "$ROOT/packages/gateway/src/server.ts" >/dev/null &
   GW_PID=$!; PIDS+=("$GW_PID")
