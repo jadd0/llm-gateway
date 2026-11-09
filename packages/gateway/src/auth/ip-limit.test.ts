@@ -1,7 +1,7 @@
-import type { AddressInfo } from 'node:net';
+import { connect, type AddressInfo } from 'node:net';
 import type { FastifyInstance } from 'fastify';
 import { Redis } from 'ioredis';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../app.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
@@ -69,7 +69,9 @@ afterAll(async () => {
 
 describe('failed-auth limit per address', () => {
   it('an exhausted address: cached valid key 200, unknown keys 429, Postgres untouched', async () => {
-    const gw = await start();
+    // A late Redis answer fails open by design; on a loaded machine 500 takes in flight can exceed the
+    // 50 ms default, so this test (about atomicity, not latency) gives Redis room.
+    const gw = await start({ RATE_LIMIT_REDIS_TIMEOUT_MS: '5000' });
     // Control: before the limit a bad key is a plain 401 that reached Postgres.
     const first = bad();
     expect((await get(gw, first)).status).toBe(401);
@@ -115,19 +117,21 @@ describe('failed-auth limit per address', () => {
 
   it('a cached valid key makes no call on the address bucket', async () => {
     const gw = await start();
-    const monitor = await redis.monitor();
-    const seen: string[] = [];
-    monitor.on('monitor', (_t: string, args: string[]) => {
-      if (args.some((a) => typeof a === 'string' && a.includes(`${gw.prefix}ipfail`))) seen.push(args.join(' '));
-    });
+    // MONITOR on a raw socket: ioredis's own monitor() races other files' traffic on the shared Redis.
+    const { hostname, port } = new URL(gw.config.redisUrl!);
+    const sock = connect(Number(port || 6379), hostname);
+    let feed = '';
+    sock.on('data', (d) => (feed += d.toString('utf8')));
+    sock.write('MONITOR\r\n');
+    await vi.waitFor(() => expect(feed).toContain('+OK'));
+    const seen = () => feed.split('\r\n').filter((l) => l.includes(`${gw.prefix}ipfail`));
     for (let i = 0; i < 20; i++) expect((await get(gw, { authorization: `Bearer ${gw.key}` })).status).toBe(200);
     await new Promise((r) => setTimeout(r, 100));
-    expect(seen).toEqual([]);
+    expect(seen()).toEqual([]);
     // Control: a failed authentication does reach it, so the monitor sees what it should.
     expect((await get(gw, bad())).status).toBe(401);
-    await new Promise((r) => setTimeout(r, 100));
-    monitor.disconnect();
-    expect(seen.length).toBeGreaterThan(0);
+    await vi.waitFor(() => expect(seen().length).toBeGreaterThan(0));
+    sock.destroy();
   }, 30_000);
 
   it('successful auths never count', async () => {
