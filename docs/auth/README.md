@@ -75,17 +75,3 @@ Provisional: measured on a busy shared laptop; PR 12 re-runs it on a quiet machi
 With auth and the Redis cache: 0.617 ms p50 / 0.372 ms p95 over a direct run at 1000 req/s non-streamed, and
 1.054 ms p50 / 1.447 ms p95 to first streamed byte at 200 req/s. Without the cache: 0.774 ms / 0.482 ms and
 1.358 ms / 1.766 ms. These come from one run each in a session whose direct baseline was noisier than in PR 1.
-
-## Questions you should be able to answer
-
-1. **Why not bcrypt for keys?** Slow hashes defend low-entropy passwords. A key is 256 random bits, so guessing
-   is infeasible and a slow hash would only add latency to every request. HMAC with a server-side pepper means a
-   stolen database alone cannot be used to test guesses.
-2. **Why not Auth.js?** It logs humans into websites. This checks machines on every API request, with no
-   sessions or cookies.
-3. **How is revocation instant without a race?** Postgres first, then an overwriting tombstone in Redis, while
-   every cache fill uses `NX` so none can overwrite it (a corrupt cached value is removed by a compare-and-delete, then refilled with `NX`). The cost is one Redis round trip per request.
-4. **What if Redis dies?** Requests fall back to Postgres; revoked keys stay rejected. Revoking while Redis is
-   down still works in Postgres, and the CLI warns that a cached copy may linger.
-5. **How do you avoid a key-existence oracle?** One 401 body for every failure, and unknown routes also answer
-   401 before routing. Response timing was not measured separately for unknown, revoked and malformed keys.

@@ -94,21 +94,3 @@ the placeholder key.
 Translation overhead figures are pending: the full benchmark (`bash bench/run-providers.sh`, the realistic
 streamed scenario through each mock format) is run behind `bench/quiet.sh` by the orchestrator after the build.
 Until then no figure is committed; a short smoke run only proved the script works.
-
-## Questions you should be able to answer
-
-1. **Why adapters and not the providers' SDKs?** One HTTP stack means one place for timeouts, connection pools,
-   streaming and measurement, no extra dependencies, and the cost of translation is measurable as its own number.
-   The price is that each provider's quirks are ours to track.
-2. **How do you translate a stream without buffering it?** An incremental SSE parser feeds a per-provider
-   transform that turns each complete provider event into OpenAI chunks immediately. It holds only a partial
-   line, so memory stays constant and the first token reaches the client when the provider sends it. A test holds the
-   provider's stream open and checks the first chunk arrives before it finishes.
-3. **What breaks if an SSE event is split across TCP packets?** A naive `split('\n\n')` per packet drops or
-   corrupts it, and a multi-byte character cut in half becomes garbage. The parser keeps the unfinished line
-   and decodes with a streaming UTF-8 decoder; a test cuts every fixture at every byte offset and feeds Arabic and emoji one byte at a time.
-4. **What don't you support yet and why?** Tools, images, audio, several choices, log probabilities and JSON mode for
-   Anthropic and Gemini: each has no clean one-to-one mapping, and refusing with a 400 is safer than silently dropping.
-5. **How does usage reach the budget for a provider with its own format?** The adapter extracts input and output
-   tokens (Gemini's thinking tokens count as output) and the route hands them to the shared settle step, which
-   corrects the up-front rate-limit and budget charges exactly as for OpenAI.

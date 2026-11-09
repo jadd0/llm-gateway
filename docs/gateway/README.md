@@ -71,18 +71,3 @@ deliberately the least clever code in the file: hijack and pipe, so there is not
 
 0.233 ms p50 / 0.982 ms p95 added, non-streamed at 1000 req/s; 0.238 ms p50 / 0.254 ms p95 added to first
 streamed byte at 200 req/s. The gateway's own `server-timing` figure, effectively its pre-dispatch time, was 0.008 ms p50 in the instant run; the rest of the 0.233 ms is the extra HTTP hop and reply write, which only the k6 difference captures.
-
-## Questions you should be able to answer
-
-1. **How does the gateway avoid buffering SSE?** For `stream: true` it waits for the upstream status line,
-   hijacks the raw response, writes headers once and pipes upstream bytes to the client. It never parses or
-   collects chunks. A test asserts the first chunk reaches the client well before the mock sends its last.
-2. **What happens when the client aborts mid-stream?** The response `close` aborts the upstream request, so
-   the pooled socket is released. In the adversarial run, 500 simultaneous aborts left no live upstream
-   responses within 5 s.
-3. **What happens when the upstream fails?** Connection errors give 502 and timeouts 504, in an OpenAI-shaped
-   body; an OpenAI-format upstream's 4xx and 5xx pass through unchanged and the other providers' are mapped to the OpenAI error shape. Retries and fallback are later PRs.
-4. **Why forward the original bytes instead of re-serialising?** It is cheaper, and the gateway only needs
-   to know three fields, so everything else stays untouched.
-5. **What does `server-timing` tell you?** Only the gateway's own in-process time. The real overhead is the
-   k6 difference against a direct run, which includes the extra HTTP hop.
