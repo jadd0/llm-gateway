@@ -7,7 +7,7 @@ import { chatRequest } from '../request-body.ts';
 import { usageSettler, type UsageSettler } from '../usage/settle.ts';
 import { SseUsageTap, usageFromBody } from '../usage/sse-usage.ts';
 import { logAuthRejected, providerAuthMessage, tryJson } from '../providers/common.ts';
-import type { Breaker, CallResult } from '../resilience/breaker.ts';
+import type { Breaker, CallResult, Permit } from '../resilience/breaker.ts';
 import { chainFor, type Chains } from '../resilience/fallback.ts';
 import { breakerSignal, fallsOver, planRetry, type Outcome, type RetryPolicy } from '../resilience/retry.ts';
 import { isTimeout, phaseOf } from '../resilience/timeouts.ts';
@@ -197,7 +197,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
       deadlineHit = true;
       // The provider may have worked and no usage will come: the estimate is charged now, not when the
       // (possibly stuck) response finishes.
-      if (working) settle.keep(state.model);
+      if (billing) settle.keep(state.model);
       if (guard) {
         guard.cutWith(maxDurationEvent);
         abort.abort(); // the upstream goes at once; the relay below lets the response still finish cleanly
@@ -222,10 +222,19 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     let attempts = 0;
     let lastFailure: Failure | undefined;
     let soonestReopenMs: number | undefined;
-    // True while the provider may be working on a call the gateway made: from the moment it is sent until an
-    // error answer or a refused connection shows it is not. Only then does a missed deadline keep the estimate.
-    let working = false;
+    // True when some call of this request may still be billing: set when a call is sent, and sticky. It is
+    // undone only for that call itself, when its own outcome shows it never reached the provider or was
+    // answered with an error; a later model's refusal says nothing about an earlier call. A deadline that
+    // falls with this set keeps the estimate, and otherwise everything held goes back.
+    let billing: boolean = false;
     let served: { model: string; target: Target; forward: UpstreamRequest; res: Awaited<ReturnType<Target['pool']['request']>> } | undefined;
+
+    // Told to the breaker without waiting: the request never holds on Redis for it.
+    const report = (permit: Permit, result: CallResult) => {
+      breaker.record(permit, result).catch((err: unknown) => {
+        reply.log.debug({ errClass: (err as Error).name, code: (err as { code?: string }).code }, 'breaker record failed');
+      });
+    };
 
     models: for (const [index, model] of chain.entries()) {
       const target = index === 0 ? headTarget : upstream.resolve(model);
@@ -255,8 +264,9 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
           const attemptStarted = performance.now();
 
           let outcome: Outcome;
+          const billingBefore: boolean = billing;
           try {
-            working = true;
+            billing = true;
             const res = await target.pool.request({
               path: target.basePath + forward.path,
               method: 'POST',
@@ -270,8 +280,8 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
               served = { model, target, forward, res };
               break models;
             }
-            // The provider answered with an error: it is not working on the request any more.
-            working = false;
+            // The provider answered with an error: this call bills nothing.
+            billing = billingBefore;
             // The provider's own error answer: kept (read in full, which also frees the socket) in case it is
             // the one the client gets.
             let body: Buffer;
@@ -288,7 +298,9 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
           } catch (err) {
             const phase = abort.signal.aborted ? 'deadline' : phaseOf(err);
             if (phase === 'deadline') break models;
-            if (phase === 'connect') working = false; // nothing reached the provider
+            // A call that never reached the provider (a refused connection, or an error thrown on the gateway's
+            // side) bills nothing; a headers timeout, a broken body and the like may.
+            if (phase === 'connect' || phase === 'other') billing = billingBefore;
             outcome = { kind: 'error', phase };
             lastFailure = { kind: 'error', model, err };
           }
@@ -303,6 +315,12 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
               : { outcome: outcome.phase, code: (lastFailure?.kind === 'error' ? (lastFailure.err as { code?: string }).code : undefined) ?? '' };
           reply.log.warn({ model, target: target.provider, ...failureLog, ms: ms(performance.now() - attemptStarted) }, 'upstream attempt failed');
           if (!fallsOver(outcome)) break models; // no other attempt or model would change the answer
+          if (outcome.kind === 'status' && (outcome.status === 401 || outcome.status === 403 || outcome.status === 404)) {
+            // Likely a wrong key or base path for this provider: worth seeing even though another model may answer.
+            reply.log.warn({ model, target: target.provider, status: outcome.status }, 'provider rejected the request, trying the next model');
+          }
+          // A half-open probe is one attempt: its single outcome is what reopens or closes the breaker.
+          if (permit.probe) continue models;
           const step = planRetry(
             {
               outcome,
@@ -319,13 +337,22 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
           } catch {
             break models; // the deadline passed or the client left while waiting
           }
+          // Other requests may have opened the breaker while this one waited: then this model is done.
+          const again = await breaker.acquire(target.provider);
+          if (!again.allowed) {
+            soonestReopenMs = Math.min(soonestReopenMs ?? Infinity, again.retryInMs);
+            continue models;
+          }
+          if (again.permit.probe) {
+            // The cooldown ran out meanwhile: the probe is not this request's to take. Hand it back.
+            report(again.permit, 'abandoned');
+            continue models;
+          }
+          if (abort.signal.aborted) break models;
         }
       } finally {
         const result: CallResult = seen.success ? 'success' : seen.failure ? 'failure' : seen.answered ? 'answered' : 'abandoned';
-        const recorded = breaker.record(permit, result);
-        // A failure is in place before the next request looks; the rest need not hold this one up.
-        if (result === 'failure' || result === 'answered') await recorded;
-        else void recorded;
+        report(permit, result);
       }
     }
 
@@ -336,11 +363,11 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
       if (deadlineHit) {
         // The estimate stays only if a call was in flight (the deadline timer kept it); a deadline that fell
         // in a backoff, a breaker check or an error body read cost the provider nothing.
-        if (!working) settle.refund();
+        if (!billing) settle.refund();
         return tooLong();
       }
       if (abort.signal.aborted) return reply; // client already gone
-      return answerFailure(reply, request, settle, lastFailure, soonestReopenMs, { started, dispatched });
+      return answerFailure(reply, request, settle, lastFailure, soonestReopenMs, billing ? { model: state.model } : null, { started, dispatched });
     }
 
     const { res, target, forward } = served;
@@ -464,7 +491,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
       .send(payload);
   }
 
-  // No attempt produced an answer to serve. The provider did no work we saw, so everything held goes back, and
+  // No attempt produced an answer to serve. Unless a call may still be billing, the provider did no work we saw, so everything held goes back, and
   // the client gets the last attempt's answer in the OpenAI shape (with the provider's own back-off and
   // correlation headers), or, if no attempt was made at all, 503 with the soonest a breaker will let a call through.
   function answerFailure(
@@ -473,9 +500,12 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     settle: UsageSettler,
     failure: Failure | undefined,
     soonestReopenMs: number | undefined,
+    billing: { model: string | undefined } | null,
     timing: { started: number; dispatched: number },
   ) {
-    settle.refund();
+    // A call that may still be billing (a headers timeout, say) keeps the estimate; otherwise all of it goes back.
+    if (billing) settle.keep(billing.model);
+    else settle.refund();
     const reopenAfter = soonestReopenMs !== undefined ? String(Math.max(1, Math.ceil(soonestReopenMs / 1000))) : undefined;
     if (failure === undefined) {
       if (reopenAfter !== undefined) reply.header('retry-after', reopenAfter);
@@ -494,7 +524,8 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     const gwTiming = `gw-pre;dur=${ms(timing.dispatched - timing.started)}, upstream;dur=${ms(performance.now() - timing.dispatched)}`;
     const providerTiming = asText(extra['server-timing']);
     reply.headers(extra).header('server-timing', providerTiming ? `${providerTiming}, ${gwTiming}` : gwTiming);
-    if (reopenAfter !== undefined && extra['retry-after'] === undefined) reply.header('retry-after', reopenAfter);
+    // The breaker's wait is for a client that may try again after a server-side failure, not for a 4xx.
+    if (reopenAfter !== undefined && failure.status >= 500 && extra['retry-after'] === undefined) reply.header('retry-after', reopenAfter);
 
     // The provider rejected the gateway's own credential. That is not the caller's doing and the provider's
     // wording is not the caller's business: they get a generic 502. The log keeps the status and the provider's

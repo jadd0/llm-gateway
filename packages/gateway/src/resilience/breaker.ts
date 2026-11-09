@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Redis } from 'ioredis';
 
@@ -18,8 +19,8 @@ export interface BreakerSettings {
  * How a call ended, for the breaker.
  * - success: the provider answered 2xx.
  * - failure: a retryable failure (a status the provider is to blame for, a refused or timed-out connection).
- * - answered: the provider answered with a status that is the caller's doing (a 400, the gateway's own 401).
- *   It is alive, so it closes a half-open breaker, but it is not counted in the window.
+ * - answered: the provider answered with a status that is not a health signal (a 400, a 429, the gateway's own
+ *   401). It is not counted in the window, and it does not close a half-open breaker: only a 2xx does.
  * - abandoned: nothing was learned (the client left, the deadline cut the call).
  */
 export type CallResult = 'success' | 'failure' | 'answered' | 'abandoned';
@@ -29,6 +30,8 @@ export interface Permit {
   target: string;
   /** This call is the one half-open probe. */
   probe: boolean;
+  /** Identifies the probe lock this permit took, so releasing it can never free another caller's lock. */
+  token?: string;
   source: 'redis' | 'local';
 }
 
@@ -37,7 +40,7 @@ export type Acquired = { allowed: true; permit: Permit } | { allowed: false; ret
 export interface Breaker {
   /** May a call to this target be made now? Never throws and never waits on Redis longer than its timeout. */
   acquire(target: string): Promise<Acquired>;
-  /** Reports how a permitted call ended. Never throws. */
+  /** Reports how a permitted call ended. Never throws; callers do not wait for it. */
   record(permit: Permit, result: CallResult): Promise<void>;
 }
 
@@ -56,7 +59,7 @@ export class LocalBreaker {
   readonly #settings: BreakerSettings;
   readonly #now: () => number;
   readonly #probeTtlMs: number;
-  readonly #targets = new Map<string, { openUntil: number | null; probeUntil: number | null; seconds: Map<number, [total: number, failed: number]> }>();
+  readonly #targets = new Map<string, { openUntil: number | null; probeUntil: number | null; probeToken: string | null; seconds: Map<number, [total: number, failed: number]> }>();
 
   /** `probeTtlMs`: how long a probe may hold the half-open breaker before another is let through. */
   constructor(settings: BreakerSettings, now: () => number = Date.now, probeTtlMs: number = settings.openMs) {
@@ -72,7 +75,7 @@ export class LocalBreaker {
   #state(target: string) {
     let s = this.#targets.get(target);
     if (!s) {
-      s = { openUntil: null, probeUntil: null, seconds: new Map() };
+      s = { openUntil: null, probeUntil: null, probeToken: null, seconds: new Map() };
       this.#targets.set(target, s);
     }
     return s;
@@ -86,7 +89,8 @@ export class LocalBreaker {
     // A probe in flight: the breaker may be tried again when its lock lapses, as the Redis lock's PTTL says.
     if (s.probeUntil !== null && now < s.probeUntil) return { allowed: false, retryInMs: Math.max(s.probeUntil - now, 1) };
     s.probeUntil = now + this.#probeTtlMs;
-    return { allowed: true, permit: { target, probe: true, source: 'local' } };
+    s.probeToken = randomUUID();
+    return { allowed: true, permit: { target, probe: true, token: s.probeToken, source: 'local' } };
   }
 
   record(permit: Permit, result: CallResult): void {
@@ -94,9 +98,13 @@ export class LocalBreaker {
     const now = this.#now();
     const { windowMs, minFailures, failureRatio, openMs } = this.#settings;
     if (permit.probe) {
-      s.probeUntil = null;
-      if (result === 'failure') s.openUntil = now + openMs;
-      else if (result === 'success' || result === 'answered') this.#targets.delete(permit.target);
+      // Only the probe's own lock is released; a lapsed one may already belong to another probe.
+      if (s.probeToken === (permit.token ?? null)) {
+        s.probeUntil = null;
+        s.probeToken = null;
+      }
+      if (result === 'success') this.#targets.delete(permit.target);
+      else if (result !== 'abandoned') s.openUntil = now + openMs;
       return;
     }
     if (s.openUntil !== null) return; // a call that started before the breaker opened
@@ -178,11 +186,13 @@ export function createBreaker(opts: BreakerOptions): Breaker {
       );
     });
 
-  async function viaRedis(run: (c: Commands) => Promise<number[]>): Promise<number[] | undefined> {
-    if (!cmd) return undefined;
+  // `reply` is undefined when Redis was not used or did not answer; `ambiguous` is true only for a client-side
+  // timeout, where the script may still have run. Any other error is a definite "Redis did not do it".
+  async function viaRedis(run: (c: Commands) => Promise<number[]>): Promise<{ reply?: number[]; ambiguous: boolean }> {
+    if (!cmd) return { ambiguous: false };
     const wasDown = down;
     if (wasDown) {
-      if (Date.now() < skipUntil || trial) return undefined;
+      if (Date.now() < skipUntil || trial) return { ambiguous: false };
       trial = true;
     }
     try {
@@ -193,7 +203,7 @@ export function createBreaker(opts: BreakerOptions): Breaker {
         local.clear();
         log?.info({}, 'redis available again, circuit breakers are shared again');
       }
-      return reply;
+      return { reply, ambiguous: false };
     } catch (err) {
       skipUntil = Date.now() + redisRetryMs;
       if (!down) {
@@ -203,7 +213,8 @@ export function createBreaker(opts: BreakerOptions): Breaker {
           'redis unavailable, circuit breakers are per process until it answers again',
         );
       }
-      return undefined;
+      // A trial call on a Redis already declared down timing out says nothing new: it is not ambiguous.
+      return { ambiguous: err instanceof RedisTimeout && !wasDown };
     } finally {
       if (wasDown) trial = false;
     }
@@ -212,13 +223,14 @@ export function createBreaker(opts: BreakerOptions): Breaker {
   return {
     async acquire(target) {
       const [k1, k2] = keys(target);
-      const args: Array<string | number> = ['acquire', probeTtlMs];
+      const token = randomUUID();
+      const args: Array<string | number> = ['acquire', probeTtlMs, token];
       if (clock) args.push(clock());
-      const r = await viaRedis((c) => c.brk(k1, k2, ...args));
-      if (r === undefined) return local.acquire(target);
-      const [code, ms] = r as [number, number];
+      const { reply } = await viaRedis((c) => c.brk(k1, k2, ...args));
+      if (reply === undefined) return local.acquire(target);
+      const [code, ms] = reply as [number, number];
       if (code === 0) return { allowed: false, retryInMs: ms };
-      return { allowed: true, permit: { target, probe: code === 2, source: 'redis' } };
+      return { allowed: true, permit: { target, probe: code === 2, ...(code === 2 ? { token } : {}), source: 'redis' } };
     },
 
     async record(permit, result) {
@@ -229,15 +241,14 @@ export function createBreaker(opts: BreakerOptions): Breaker {
       const [k1, k2] = keys(permit.target);
       const code = { success: 's', failure: 'f', answered: 'n', abandoned: 'a' }[result];
       const args: Array<string | number> = [
-        'record', code, permit.probe ? 1 : 0, settings.windowMs, settings.minFailures, settings.failureRatio, settings.openMs,
+        'record', code, permit.probe ? 1 : 0, settings.windowMs, settings.minFailures, settings.failureRatio, settings.openMs, permit.token ?? '',
       ];
       if (clock) args.push(clock());
-      const wasDown = down;
-      const r = await viaRedis((c) => c.brk(k1, k2, ...args));
-      // Redis was already declared down: the local breaker learns what happened. A report that has just
-      // timed out may still have landed in Redis, so it is not also counted here (a double count could open
-      // a local breaker that Redis would not).
-      if (r === undefined && wasDown) local.record({ ...permit, source: 'local' }, result);
+      const { reply, ambiguous } = await viaRedis((c) => c.brk(k1, k2, ...args));
+      // Redis did not store the report (it was already declared down, or it refused or dropped the call): the
+      // local breaker learns what happened. Only a report that timed out may still have landed in Redis, so
+      // only that one is not also counted here (a double count could open a local breaker Redis would not).
+      if (reply === undefined && !ambiguous) local.record({ ...permit, source: 'local' }, result);
     },
   };
 }

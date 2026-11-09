@@ -6,17 +6,19 @@
 --           (failures).
 -- KEYS[2] = the probe lock, a plain key that exists while a half-open probe is in flight.
 -- ARGV[1] = 'acquire' or 'record'.
---   acquire: ARGV[2] = probe lock TTL in ms, ARGV[3] = clock override in ms (tests only).
+--   acquire: ARGV[2] = probe lock TTL in ms, ARGV[3] = the caller's probe token (stored in the lock),
+--            ARGV[4] = clock override in ms (tests only).
 --   record:  ARGV[2] = outcome: 's' success, 'f' failure, 'n' answered with a non-retryable status,
 --                      'a' abandoned (no information),
 --            ARGV[3] = 1 if the caller holds the probe, else 0,
 --            ARGV[4] = window in ms, ARGV[5] = min failures, ARGV[6] = failure ratio,
---            ARGV[7] = open time in ms, ARGV[8] = clock override in ms (tests only).
+--            ARGV[7] = open time in ms, ARGV[8] = the probe token the caller was given,
+--            ARGV[9] = clock override in ms (tests only).
 -- acquire returns {1, 0} call it, {2, 0} call it as the one probe, {0, ms} do not call; ms is how long
 -- until the breaker may be tried again. record returns {0} nothing changed, {1} it opened, {2} it closed.
 
 local op = ARGV[1]
-local clock = ARGV[op == 'acquire' and 3 or 8]
+local clock = ARGV[op == 'acquire' and 4 or 9]
 local now
 if clock then
   now = tonumber(clock)
@@ -35,7 +37,7 @@ if op == 'acquire' then
     return {0, open_until - now}
   end
   -- Cooldown over: half-open. Exactly one caller wins the probe lock; the rest see an open breaker.
-  if redis.call('SET', KEYS[2], '1', 'NX', 'PX', tonumber(ARGV[2])) then
+  if redis.call('SET', KEYS[2], ARGV[3], 'NX', 'PX', tonumber(ARGV[2])) then
     return {2, 0}
   end
   return {0, math.max(redis.call('PTTL', KEYS[2]), 1)}
@@ -49,19 +51,22 @@ local ratio = tonumber(ARGV[6])
 local open_ms = tonumber(ARGV[7])
 
 if is_probe then
-  redis.call('DEL', KEYS[2])
-  if outcome == 'f' then
-    -- The probe failed: open again for another cooldown.
-    redis.call('HSET', KEYS[1], 'open_until', now + open_ms)
-    redis.call('PEXPIRE', KEYS[1], window_ms * 2 + open_ms)
-    return {1}
-  elseif outcome == 's' or outcome == 'n' then
-    -- The provider answered: closed, with a fresh window.
+  -- Only the probe's own lock is released: if it lapsed and another caller took it, that one is not ours to free.
+  if redis.call('GET', KEYS[2]) == ARGV[8] then
+    redis.call('DEL', KEYS[2])
+  end
+  if outcome == 'a' then
+    -- Abandoned: the next caller may probe.
+    return {0}
+  elseif outcome == 's' then
+    -- The provider answered 2xx: closed, with a fresh window.
     redis.call('DEL', KEYS[1])
     return {2}
   end
-  -- Abandoned: the lock is released and the next caller may probe.
-  return {0}
+  -- Anything but a 2xx (a failure, or an answer that is not success) keeps the breaker open for another cooldown.
+  redis.call('HSET', KEYS[1], 'open_until', now + open_ms)
+  redis.call('PEXPIRE', KEYS[1], window_ms * 2 + open_ms)
+  return {1}
 end
 
 -- A call that started before the breaker opened and finished after it: it changes nothing.

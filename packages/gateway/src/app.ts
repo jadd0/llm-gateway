@@ -10,7 +10,7 @@ import { createLimiter } from './ratelimit/limiter.ts';
 import { rateLimit } from './ratelimit/plugin.ts';
 import { chatRoutes } from './routes/chat.ts';
 import { createRedis } from './redis.ts';
-import { createBreaker, probeLockTtlMs } from './resilience/breaker.ts';
+import { createBreaker, probeLockTtlMs, type Breaker } from './resilience/breaker.ts';
 import { chainFor } from './resilience/fallback.ts';
 import { createUpstream } from './upstream.ts';
 
@@ -26,6 +26,8 @@ export function buildApp(
     budgetPgLedger?: PgLedger;
     /** Pins the circuit breaker's clock (ms). Tests only: production reads Redis TIME. */
     breakerClock?: () => number;
+    /** Wraps the circuit breaker. Tests only. */
+    wrapBreaker?: (breaker: Breaker) => Breaker;
     /** How long a client of a deadline-cut stream gets to take the last bytes. Tests only. */
     cutDrainMs?: number;
   } = {},
@@ -113,7 +115,7 @@ export function buildApp(
   }
   // Shared in Redis when there is one, so every gateway process sees the same open or closed provider; each
   // process keeps its own in-memory breaker for as long as Redis cannot answer.
-  const breaker = createBreaker({
+  const breaker = (extra.wrapBreaker ?? ((b: Breaker) => b))(createBreaker({
     redis,
     keyPrefix: config.redisKeyPrefix,
     settings: {
@@ -128,7 +130,7 @@ export function buildApp(
     probeTtlMs: probeLockTtlMs(config.upstreamConnectTimeoutMs + config.upstreamHeadersTimeoutMs, config.breakerOpenMs),
     log: app.log,
     ...(extra.breakerClock ? { clock: extra.breakerClock } : {}),
-  });
+  }));
   app.register(chatRoutes, {
     upstream,
     breaker,

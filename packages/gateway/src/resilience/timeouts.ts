@@ -40,24 +40,41 @@ const CONNECT_CODES = new Set([
   'ETIMEDOUT',
 ]);
 
+const HEADERS_CODES = new Set(['UND_ERR_HEADERS_TIMEOUT']);
+const BODY_CODES = new Set(['UND_ERR_BODY_TIMEOUT']);
+const DEADLINE_CODES = new Set(['UND_ERR_ABORTED', 'ABORT_ERR']);
+const TIMEOUT_CODES = new Set(['UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_CONNECT_TIMEOUT']);
+const KNOWN_CODES = new Set([...CONNECT_CODES, ...HEADERS_CODES, ...BODY_CODES, ...DEADLINE_CODES]);
+
+/**
+ * Walks an error and its causes (an aggregate or wrapped error, as happy-eyeballs connect failures are, carries
+ * the code on its cause) and returns the first code that is in `wanted`, or '' if none is. An AbortError by
+ * name counts as ABORT_ERR.
+ */
+export function codeOf(err: unknown, wanted: ReadonlySet<string> = KNOWN_CODES): string {
+  const seen = new Set<unknown>();
+  let e: unknown = err;
+  while (e !== null && typeof e === 'object' && !seen.has(e) && seen.size < 8) {
+    seen.add(e);
+    const { code, name, cause } = e as { code?: unknown; name?: unknown; cause?: unknown };
+    if (typeof code === 'string' && wanted.has(code)) return code;
+    if (name === 'AbortError' && wanted.has('ABORT_ERR')) return 'ABORT_ERR';
+    e = cause;
+  }
+  return '';
+}
+
 /** Sorts an undici (or socket) error into the phase it failed in. */
 export function phaseOf(err: unknown): Phase {
-  const e = err as { code?: unknown; name?: unknown; cause?: unknown } | null;
-  const code = typeof e?.code === 'string' ? e.code : '';
-  if (code === 'UND_ERR_HEADERS_TIMEOUT') return 'headers';
-  if (code === 'UND_ERR_BODY_TIMEOUT') return 'body';
-  if (code === 'UND_ERR_ABORTED' || code === 'ABORT_ERR' || e?.name === 'AbortError') return 'deadline';
+  const code = codeOf(err);
+  if (HEADERS_CODES.has(code)) return 'headers';
+  if (BODY_CODES.has(code)) return 'body';
+  if (DEADLINE_CODES.has(code)) return 'deadline';
   if (CONNECT_CODES.has(code)) return 'connect';
-  // An aggregate or wrapped error (happy-eyeballs connect failures) carries the code on its cause.
-  if (e?.cause !== undefined && e.cause !== err) return phaseOf(e.cause);
   return 'other';
 }
 
 /** Whether an error is a timeout of any of the three limits (a connect timeout is a connect-phase error). */
 export function isTimeout(err: unknown): boolean {
-  const phase = phaseOf(err);
-  if (phase === 'headers' || phase === 'body') return true;
-  const e = err as { code?: unknown; cause?: unknown } | null;
-  if (e?.code === 'UND_ERR_CONNECT_TIMEOUT') return true;
-  return e?.cause !== undefined && e.cause !== err && isTimeout(e.cause);
+  return codeOf(err, TIMEOUT_CODES) !== '';
 }
