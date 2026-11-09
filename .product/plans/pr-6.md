@@ -35,6 +35,8 @@ closed here.
 | `packages/gateway/src/routes/chat.test.ts` | existing tests renamed to `mock-*` models and the fake upstream fitted to the new interface |
 | `packages/gateway/src/routes/chat-providers.test.ts` | **new**. Routing, translation, unbuffered-through-translation, key isolation, usage, errors (beside the route, separate from chat.test's shared fixtures) |
 | `packages/gateway/src/{config.test.ts,test-env.ts,auth/plugin.test.ts,ratelimit/*.test.ts,pricing/prices.test.ts}`, `bench/run-{baseline,ratelimit,budget}.sh`, `bench/k6/chat.js` | provider settings tests; test config mirrors OPENAI_BASE_URL into MOCK_BASE_URL; models renamed `mock-*`; bench scripts set MOCK_BASE_URL; k6 takes MODEL |
+| `packages/gateway/src/budget/plugin.ts` | an unroutable model name holds nothing (`isRoutable`), so the router answers `model_not_found` |
+| `.product/DECISIONS.md`, `.product/FOUNDER-TODO.md`, `docs/mock-provider/mock-provider.html` | D-026 and its ratify line; the mock diagram shows its three formats |
 | `packages/gateway/src/pricing/prices.ts` | real models added with price, `asOf` date and source URL per row |
 | `packages/gateway/src/config.ts`, `.env.example` | provider rows (Decisions) |
 | `packages/mock-provider/src/server.ts` | add Anthropic-format `POST /v1/messages` and Gemini-format `:generateContent` / `:streamGenerateContent`, same latency/outage controls |
