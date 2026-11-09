@@ -179,3 +179,15 @@ behind `mock-openai-1` is killed with SIGKILL at 20 s and a fresh one is started
 `mock-openai-1>mock-anthropic-1` and once with no chain. `summary.md` gives, per phase (before, outage, after) and kind, the
 client success rate, p50 and p95, upstream calls per request and how many requests the fallback served. A short run on the build
 machine only proved the scripts work; it is not a result.
+
+## Exact-match cache (PR 8)
+
+Pending quiet run. `bash bench/quiet.sh bench/results/pr-8 && bash bench/run-cache.sh` writes `cache-cold.json`, `cache-warm.json`,
+`cache-warm-stream.json`, `cache-stampede.json` and `summary.md` to `bench/results/pr-8/`; no figure is quoted here until that run is
+committed (R3).
+
+What the run measures: all with `temperature: 0` against a mock with realistic latency. Cold sends only prompts the cache has never
+seen. Warm draws from 200 of 2 000 distinct prompts with a Zipf skew (s = 1.1), so the hit rate is measured, not assumed, both
+non-streamed and streamed. Stampede sends 50 identical non-streamed requests at once and counts upstream calls. `summary.md` gives
+hit rate, p50 and p95 for hits and misses, and upstream calls. A short run on the build machine only proved the scripts work; it is
+not a result.
