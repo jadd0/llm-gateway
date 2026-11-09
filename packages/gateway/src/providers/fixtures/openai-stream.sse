@@ -1,0 +1,12 @@
+data: {"id": "chatcmpl-fixture", "object": "chat.completion.chunk", "created": 1700000000, "model": "gpt-5-nano", "choices": [{"index": 0, "delta": {"role": "assistant", "content": ""}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-fixture", "object": "chat.completion.chunk", "created": 1700000000, "model": "gpt-5-nano", "choices": [{"index": 0, "delta": {"content": "Hello"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-fixture", "object": "chat.completion.chunk", "created": 1700000000, "model": "gpt-5-nano", "choices": [{"index": 0, "delta": {"content": "!"}, "finish_reason": null}]}
+
+data: {"id": "chatcmpl-fixture", "object": "chat.completion.chunk", "created": 1700000000, "model": "gpt-5-nano", "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}
+
+data: {"id": "chatcmpl-fixture", "object": "chat.completion.chunk", "created": 1700000000, "model": "gpt-5-nano", "choices": [], "usage": {"prompt_tokens": 9, "completion_tokens": 2, "total_tokens": 11}}
+
+data: [DONE]
+
