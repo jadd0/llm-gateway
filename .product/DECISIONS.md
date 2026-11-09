@@ -45,6 +45,10 @@ Format — one entry per decision under its category, newest last, ids never reu
   Src: founder chose "Drizzle ORM" in chat · Code: packages/gateway/src/db/
 - **D-014** 2026-11-09 · founder · active — Auth.js is not used for gateway auth (machine API keys, not human login); it is a candidate for dashboard login in PR 11. Why: Auth.js has no per-request API-key check.
   Src: chat 2026-11-09, founder asked about Auth.js and accepted
+- **D-015** 2026-11-09 · founder · active — The rate limiter enforces both requests per minute and tokens per minute per key, in one atomic Lua script; tokens are charged an estimate before the call and corrected to actual usage after. Why: founder chose "Requests + tokens" over requests only.
+  Src: .product/plans/pr-4.md · Code: packages/gateway/src/ratelimit/
+- **D-016** 2026-11-09 · founder · active — If Redis is unavailable the rate limiter fails open (requests served, limits off, one warning per outage). Why: availability over strict limits; budgets still cap spend.
+  Src: founder chose "Fail open" in chat · Code: packages/gateway/src/ratelimit/limiter.ts
 - **D-002** 2026-11-08 · founder · active — Gateway HTTP framework is Fastify (not Express or Hono), to be backed by a raw node:http vs Express 5 vs Fastify k6 comparison in docs/decisions/0001-framework.md. Why: framework cost lands in the measured overhead and req/s ceiling.
   Src: founder in chat: "lets go with fastify then." · Code: packages/gateway/package.json
 
