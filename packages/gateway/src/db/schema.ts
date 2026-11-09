@@ -86,6 +86,9 @@ export const budgetReservations = pgTable(
     period: char('period', { length: 7 }).notNull(),
     amountMicros: bigint('amount_micros', { mode: 'number' }).notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    // True once the request was refused: the hold is not going to be used, so it counts against no cap and the
+    // sweeper deletes it rather than charging its estimate. Set when dropping the row failed.
+    refused: boolean('refused').notNull().default(false),
   },
   (t) => [
     index('budget_reservations_tenant_period_idx').on(t.tenantId, t.period),

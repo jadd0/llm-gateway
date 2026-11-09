@@ -46,6 +46,8 @@ export interface AppliedSettle {
   period: Period;
   id: string;
   costMicros: number;
+  /** True for a charge the sweeper made at the hold's estimate: the balance remembers it, to correct it if the real cost arrives. */
+  estimated?: boolean;
 }
 
 /** What Postgres knows about a tenant's month: the record a lost balance is rebuilt from. */
@@ -55,6 +57,8 @@ export interface Snapshot {
   charges: number;
   /** Every hold row, lapsed ones too (negative time left): a lapsed hold may still have a settle queued, and is charged by the worker's sweeper, not forgotten. */
   holds: Array<{ id: string; amount: number; ttlMs: number }>;
+  /** Charges made at their estimate: a balance rebuilt from this counts them, and corrects them if the real cost arrives. */
+  estimated: Array<{ id: string; cost: number }>;
 }
 
 /** `changed`: the hold was released or the spend moved. `unchanged`: nothing to do. `rebuild`: the balance is gone. */
@@ -107,19 +111,25 @@ export async function applySettled(redis: Redis, keyPrefix: string, epoch: numbe
   const groups = new Map<string, { tenantId: string; period: Period; args: Array<string | number> }>();
   for (const s of settled) {
     const g = groups.get(`${s.tenantId}|${s.period}`) ?? { tenantId: s.tenantId, period: s.period, args: [] };
-    g.args.push(s.id, s.costMicros);
+    g.args.push(s.id, s.costMicros, s.estimated ? 1 : 0);
     groups.set(`${s.tenantId}|${s.period}`, g);
   }
   let changed = 0;
   for (const g of groups.values()) {
     const b = balanceKey(keyPrefix, g.tenantId, g.period, epoch);
-    const r = await withTimeout(c.budApply(b, `${b}:res`, `${b}:amt`, ...g.args), timeoutMs);
+    const r = await withTimeout(c.budApply(b, `${b}:res`, `${b}:amt`, `${b}:est`, ...g.args), timeoutMs);
     if (r > 0) changed += r;
   }
   return changed;
 }
 
-/** The key of a tenant's balance for a month. Its hold zset is `<key>:res` and its hold amounts `<key>:amt`. The tag {tenantId} keeps them in one slot. */
+/**
+ * The zset of live balance keys, scored by the unix second each expires. The worker's reconcile walks it instead of
+ * scanning the keyspace; a balance adds itself when it is built, and members past their score are dropped.
+ */
+export const indexKey = (keyPrefix: string): string => `${keyPrefix}bud:index`;
+
+/** The key of a tenant's balance for a month. Its hold zset is `<key>:res`, its hold amounts `<key>:amt` and its estimated charges `<key>:est`. The tag {tenantId} keeps them in one slot. */
 export const balanceKey = (keyPrefix: string, tenantId: string, period: string, epoch: number): string =>
   `${keyPrefix}bud:{${tenantId}}:${period}:${epoch}`;
 
@@ -141,10 +151,10 @@ function commandsOf(redis: Redis): Commands {
   const c = redis as Partial<Commands> & Redis;
   if (!c.budReserve) {
     redis.defineCommand('budReserve', { numberOfKeys: 3, lua: SCRIPTS.reserve });
-    redis.defineCommand('budSettle', { numberOfKeys: 4, lua: SCRIPTS.settle });
+    redis.defineCommand('budSettle', { numberOfKeys: 5, lua: SCRIPTS.settle });
     redis.defineCommand('budRelease', { numberOfKeys: 3, lua: SCRIPTS.release });
-    redis.defineCommand('budApply', { numberOfKeys: 3, lua: SCRIPTS.apply });
-    redis.defineCommand('budInit', { numberOfKeys: 3, lua: SCRIPTS.init });
+    redis.defineCommand('budApply', { numberOfKeys: 4, lua: SCRIPTS.apply });
+    redis.defineCommand('budInit', { numberOfKeys: 5, lua: SCRIPTS.init });
   }
   return redis as Commands;
 }
@@ -178,6 +188,7 @@ export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
     const b = balanceKey(keyPrefix, tenantId, period, epoch);
     return [b, `${b}:res`, `${b}:amt`] as const;
   };
+  const estKey = (k: readonly [string, string, string]) => `${k[0]}:est`;
 
   const within = <T>(p: Promise<T>): Promise<T> => withTimeout(p, timeoutMs);
 
@@ -198,8 +209,10 @@ export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
         onRebuild?.({ tenantId: a.tenantId, period: a.period, epoch: a.epoch });
         const snap = await loadSnapshot(a.tenantId, a.period);
         const holds = snap.holds.flatMap((h) => [h.id, h.amount, h.ttlMs]);
+        const estimated = snap.estimated.flatMap((e) => [e.id, e.cost]);
+        const k = keys(a.tenantId, a.period, a.epoch);
         await within(
-          cmd.budInit(...keys(a.tenantId, a.period, a.epoch), snap.spent, periodExpiryS(a.period), clock ? clock() : '', ...holds),
+          cmd.budInit(...k, estKey(k), indexKey(keyPrefix), snap.spent, periodExpiryS(a.period), clock ? clock() : '', snap.holds.length, ...holds, ...estimated),
         );
         [status, remaining] = await reserveOnce(a);
         if (status === -1) throw new Error('budget balance missing after rebuild');
@@ -208,8 +221,9 @@ export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
     },
 
     async settle(a) {
+      const k = keys(a.tenantId, a.period, a.epoch);
       const r = await within(
-        cmd.budSettle(...keys(a.tenantId, a.period, a.epoch), spendKey(keyPrefix), a.entry.id, a.entry.kind === 'charge' ? a.entry.costMicros : 0, ...toSpendFields(a.entry)),
+        cmd.budSettle(...k, estKey(k), spendKey(keyPrefix), a.entry.id, a.entry.kind === 'charge' ? a.entry.costMicros : 0, ...toSpendFields(a.entry)),
       );
       if (r[0] === -1) return 'rebuild';
       return r[0] === 1 ? 'changed' : 'unchanged';

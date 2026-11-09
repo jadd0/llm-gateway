@@ -77,6 +77,11 @@ export interface PgLedger {
   /** Drops a hold that is not going to be used (Redis refused it). */
   release(id: string): Promise<void>;
   /**
+   * Marks a hold as refused when dropping it failed: it then counts against no cap, and the sweeper deletes it
+   * instead of charging its estimate.
+   */
+  markRefused(id: string): Promise<void>;
+  /**
    * Drops a hold and records the charge (once per request id) in one transaction. `entry` is null for a
    * refund.
    */
@@ -97,12 +102,80 @@ export interface PgLedger {
   bumpEpoch(observed: number): Promise<{ epoch: number; bumped: boolean }>;
 }
 
+/** A change to a month's totals: the spend moves by `cost` (may be negative) and the charge count by `n`. */
+interface Correction {
+  tenantId: string;
+  period: string;
+  cost: number;
+  n: number;
+}
+
+/**
+ * Replaces charges the sweeper made at the estimate with what the request really cost, and removes the charge of
+ * a request that was in fact refunded. The sweeper charges a lapsed hold whose settle was still queued; when that
+ * settle is applied the ledger row already exists, and leaving it would bill the estimate for good. Only rows with
+ * `estimated = true` are touched, locked in id order. Returns the change to each month's totals.
+ */
+async function correctEstimated(tx: Tx, reals: SpendEntry[], refundIds: string[]): Promise<Correction[]> {
+  const out: Correction[] = [];
+  const byId = new Map(reals.map((r) => [r.requestId, r]));
+  if (byId.size > 0) {
+    const old = await tx
+      .select({ id: spendLedger.requestId, cost: spendLedger.costMicros })
+      .from(spendLedger)
+      .where(and(inArray(spendLedger.requestId, [...byId.keys()]), eq(spendLedger.estimated, true)))
+      .orderBy(spendLedger.requestId)
+      .for('update');
+    for (const o of old) {
+      const r = byId.get(o.id)!;
+      await tx
+        .update(spendLedger)
+        .set({ model: r.model, promptTokens: r.promptTokens, completionTokens: r.completionTokens, costMicros: r.costMicros, estimated: false })
+        .where(eq(spendLedger.requestId, o.id));
+      out.push({ tenantId: r.tenantId, period: r.period, cost: r.costMicros - o.cost, n: 0 });
+    }
+  }
+  if (refundIds.length > 0) {
+    const gone = await tx
+      .delete(spendLedger)
+      .where(and(inArray(spendLedger.requestId, refundIds), eq(spendLedger.estimated, true)))
+      .returning({ tenantId: spendLedger.tenantId, period: spendLedger.period, cost: spendLedger.costMicros });
+    for (const g of gone) out.push({ tenantId: g.tenantId, period: g.period, cost: -g.cost, n: -1 });
+  }
+  return out;
+}
+
+// Adds each month's change to tenant_spend, one upsert per tenant and month, in a fixed order so two workers
+// cannot wait on each other.
+async function applyCorrections(tx: Tx, changes: Correction[]): Promise<void> {
+  const totals = new Map<string, Correction>();
+  for (const c of changes) {
+    const t = totals.get(`${c.tenantId}|${c.period}`) ?? { tenantId: c.tenantId, period: c.period, cost: 0, n: 0 };
+    t.cost += c.cost;
+    t.n += c.n;
+    totals.set(`${c.tenantId}|${c.period}`, t);
+  }
+  for (const key of [...totals.keys()].sort()) {
+    const t = totals.get(key)!;
+    if (t.cost === 0 && t.n === 0) continue;
+    await tx
+      .insert(tenantSpend)
+      .values({ tenantId: t.tenantId, period: t.period, spentMicros: t.cost, charges: t.n })
+      .onConflictDoUpdate({
+        target: [tenantSpend.tenantId, tenantSpend.period],
+        set: { spentMicros: sql`${tenantSpend.spentMicros} + ${t.cost}`, charges: sql`${tenantSpend.charges} + ${t.n}` },
+      });
+  }
+}
+
 // Inserts the ledger row and adds to the period's spend in the caller's transaction. The ledger's
 // primary key makes a repeat a no-op, so a retried settle never charges twice. The spend row is updated
 // under its lock, so the charge count it returns orders charges in commit order.
 async function recordIn(tx: Tx, e: SpendEntry): Promise<Omit<SettleRecord, 'epoch'>> {
   const inserted = await tx.insert(spendLedger).values(e).onConflictDoNothing().returning({ id: spendLedger.requestId });
   if (inserted.length === 0) {
+    // The sweeper may have charged the estimate first: the real cost replaces it.
+    if (!e.estimated) await applyCorrections(tx, await correctEstimated(tx, [e], []));
     // Already recorded (a retry whose first reply was lost). Its charge is in tenant_spend, so hand back
     // the current totals: they include it, and the live balance only takes them if it is behind.
     const [cur] = await tx
@@ -158,6 +231,7 @@ export function createPgLedger(db: Db['db']): PgLedger {
               eq(budgetReservations.tenantId, a.tenantId),
               eq(budgetReservations.period, a.period),
               sql`${budgetReservations.id} <> ${a.id}`,
+              eq(budgetReservations.refused, false),
               // Lapsed holds count too: a hold row stays until its settle is applied or the worker's sweeper
               // charges its estimate, and its settle may be queued, so it is money not yet in spent.
             ),
@@ -193,13 +267,20 @@ export function createPgLedger(db: Db['db']): PgLedger {
               ttlMs: sql<string>`floor(extract(epoch from (${budgetReservations.expiresAt} - now())) * 1000)`,
             })
             .from(budgetReservations)
-            .where(and(eq(budgetReservations.tenantId, tenantId), eq(budgetReservations.period, period)));
+            .where(and(eq(budgetReservations.tenantId, tenantId), eq(budgetReservations.period, period), eq(budgetReservations.refused, false)));
+          // Charges made at the estimate: a balance rebuilt now counts them, and the real cost, if it arrives
+          // later, is a correction to apply (see budget.lua).
+          const estimated = await tx
+            .select({ id: spendLedger.requestId, cost: spendLedger.costMicros })
+            .from(spendLedger)
+            .where(and(eq(spendLedger.tenantId, tenantId), eq(spendLedger.period, period), eq(spendLedger.estimated, true)));
           // Every row, lapsed or not: a row exists exactly until its charge is in the ledger, so a lapsed one is
           // a settle still queued (or a hold waiting for the sweeper) and must count against the cap.
           return {
             spent: row?.spent ?? 0,
             charges: row?.charges ?? 0,
             holds: holds.map((h) => ({ id: h.id, amount: h.amount, ttlMs: Number(h.ttlMs) })),
+            estimated,
           };
         },
         { isolationLevel: 'repeatable read' },
@@ -223,10 +304,19 @@ export function createPgLedger(db: Db['db']): PgLedger {
       await db.delete(budgetReservations).where(eq(budgetReservations.id, id));
     },
 
+    async markRefused(id) {
+      await db.update(budgetReservations).set({ refused: true }).where(eq(budgetReservations.id, id));
+    },
+
     async settle(id, entry) {
       const rec = await db.transaction(async (tx) => {
         await tx.delete(budgetReservations).where(eq(budgetReservations.id, id));
-        return entry === null ? { recorded: false, spent: 0, charges: 0 } : recordIn(tx, entry);
+        if (entry === null) {
+          // A refund that arrives after the sweeper charged the estimate takes the charge back.
+          await applyCorrections(tx, await correctEstimated(tx, [], [id]));
+          return { recorded: false, spent: 0, charges: 0 };
+        }
+        return recordIn(tx, entry);
       });
       // The epoch is read after the commit. A balance rebuilt from a snapshot taken before the commit still
       // holds this request's hold, and it can only be at an epoch that is current now or older.
@@ -272,7 +362,9 @@ export function createPgLedger(db: Db['db']): PgLedger {
 /**
  * Writes queued spend to the ledger, in the caller's transaction. A ledger row that is already there is left
  * alone (`ON CONFLICT DO NOTHING`), and `tenant_spend` grows only by the rows actually inserted, so an entry
- * delivered twice is applied once. Every charge and refund then drops its hold, whether or not the row was new.
+ * delivered twice is applied once. The exception is a row the sweeper wrote at the estimate: a real charge for
+ * that request replaces it (and a refund removes it), with `tenant_spend` moved by the difference.
+ * Every charge and refund then drops its hold, whether or not the row was new.
  * Returns the charges and refunds, for catching the live balances up (see `applySettled`).
  */
 export async function applySpendBatch(tx: Tx, entries: QueuedSpend[]): Promise<{ inserted: number; settled: AppliedSettle[] }> {
@@ -303,25 +395,16 @@ export async function applySpendBatch(tx: Tx, entries: QueuedSpend[]): Promise<{
         .returning({ id: spendLedger.requestId, tenantId: spendLedger.tenantId, period: spendLedger.period, cost: spendLedger.costMicros, cached: spendLedger.cached })
     : [];
 
-  // One upsert per tenant and month, in a fixed order so two workers cannot wait on each other.
-  const totals = new Map<string, { tenantId: string; period: string; cost: number; n: number }>();
-  for (const r of inserted) {
-    if (r.cached) continue;
-    const t = totals.get(`${r.tenantId}|${r.period}`) ?? { tenantId: r.tenantId, period: r.period, cost: 0, n: 0 };
-    t.cost += r.cost;
-    t.n += 1;
-    totals.set(`${r.tenantId}|${r.period}`, t);
-  }
-  for (const key of [...totals.keys()].sort()) {
-    const t = totals.get(key)!;
-    await tx
-      .insert(tenantSpend)
-      .values({ tenantId: t.tenantId, period: t.period, spentMicros: t.cost, charges: t.n })
-      .onConflictDoUpdate({
-        target: [tenantSpend.tenantId, tenantSpend.period],
-        set: { spentMicros: sql`${tenantSpend.spentMicros} + ${t.cost}`, charges: sql`${tenantSpend.charges} + ${t.n}` },
-      });
-  }
+  const changes: Correction[] = inserted.filter((r) => !r.cached).map((r) => ({ tenantId: r.tenantId, period: r.period, cost: r.cost, n: 1 }));
+  // A real charge or a refund whose request the sweeper already charged at its estimate: the row is replaced (or
+  // removed) and the month's spend moves by the difference, in this transaction.
+  const insertedIds = new Set(inserted.map((r) => r.id));
+  const reals = rows
+    .filter((r) => !r.cached && !r.estimated && !insertedIds.has(r.requestId))
+    .map((r) => ({ ...r, costMicros: r.costMicros }));
+  const refundIds = unique.filter((e) => e.kind === 'refund').map((e) => e.id);
+  changes.push(...(await correctEstimated(tx, reals, refundIds)));
+  await applyCorrections(tx, changes);
 
   const holdIds = unique.filter((e) => e.kind !== 'hit').map((e) => e.id);
   if (holdIds.length) await tx.delete(budgetReservations).where(inArray(budgetReservations.id, holdIds));
@@ -329,7 +412,7 @@ export async function applySpendBatch(tx: Tx, entries: QueuedSpend[]): Promise<{
     inserted: inserted.length,
     settled: unique
       .filter((e) => e.kind !== 'hit')
-      .map((e) => ({ tenantId: e.tenantId, period: e.period, id: e.id, costMicros: e.kind === 'charge' ? e.costMicros : 0 })),
+      .map((e) => ({ tenantId: e.tenantId, period: e.period, id: e.id, costMicros: e.kind === 'charge' ? e.costMicros : 0, estimated: e.kind === 'charge' && e.estimated })),
   };
 }
 
@@ -342,10 +425,12 @@ export async function applySpendBatch(tx: Tx, entries: QueuedSpend[]): Promise<{
  */
 export async function chargeExpiredHolds(db: Db['db'], limit: number, graceMs = 0): Promise<AppliedSettle[]> {
   return db.transaction(async (tx) => {
+    // A refused request's hold is never charged: it is deleted.
+    await tx.delete(budgetReservations).where(eq(budgetReservations.refused, true));
     const lapsed = await tx
       .select({ id: budgetReservations.id, tenantId: budgetReservations.tenantId, period: budgetReservations.period, amount: budgetReservations.amountMicros })
       .from(budgetReservations)
-      .where(sql`${budgetReservations.expiresAt} < now() - ${graceMs} * interval '1 millisecond'`)
+      .where(and(eq(budgetReservations.refused, false), sql`${budgetReservations.expiresAt} < now() - ${graceMs} * interval '1 millisecond'`))
       .orderBy(budgetReservations.expiresAt)
       .limit(limit)
       .for('update', { skipLocked: true });

@@ -43,6 +43,13 @@
       "when": 1794250840547,
       "tag": "0005_numerous_nomad",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1794254906967,
+      "tag": "0006_spicy_ezekiel",
+      "breakpoints": true
     }
   ]
 }

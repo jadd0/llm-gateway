@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { testConfig } from '../test-env.ts';
 import { periodOf } from './period.ts';
 import { fromStreamFields } from '../requestlog/entry.ts';
-import { assertNotCluster, createRedisLedger, type RedisLedger, type SettleArgs, type Snapshot } from './redis-ledger.ts';
+import { applySettled, assertNotCluster, balanceKey, createRedisLedger, indexKey, type RedisLedger, type SettleArgs, type Snapshot } from './redis-ledger.ts';
 
 // A random prefix per run: parallel files and other worktrees never share a key.
 const base = testConfig();
@@ -14,7 +14,7 @@ const T0 = 1_700_000_000_000;
 let now = T0;
 let redis: Redis;
 const tenant = () => randomUUID();
-const EMPTY: Snapshot = { spent: 0, charges: 0, holds: [] };
+const EMPTY: Snapshot = { spent: 0, charges: 0, holds: [], estimated: [] };
 
 const ledger = (loadSnapshot: (t: string, p: string) => Promise<Snapshot> = async () => EMPTY): RedisLedger =>
   createRedisLedger({ redis, keyPrefix: prefix, timeoutMs: 30_000, loadSnapshot, clock: () => now });
@@ -217,7 +217,7 @@ describe('redis ledger', { timeout: 120_000 }, () => {
     let release!: () => void;
     const slow = new Promise<void>((r) => (release = r));
     const calls = { slow: 0, fast: 0 };
-    const snap = { spent: 4000, charges: 7, holds: [] };
+    const snap = { spent: 4000, charges: 7, holds: [], estimated: [] };
     // Instance A reads Postgres (4000) and is then held up before it can write the balance.
     const a = ledger(async () => {
       calls.slow++;
@@ -247,7 +247,7 @@ describe('redis ledger', { timeout: 120_000 }, () => {
   it('a rebuilt balance counts the live holds and releases them on settle', async () => {
     const t = tenant();
     const live = randomUUID();
-    const l = ledger(async () => ({ spent: 4000, charges: 7, holds: [{ id: live, amount: 3000, ttlMs: 60_000 }] }));
+    const l = ledger(async () => ({ spent: 4000, charges: 7, holds: [{ id: live, amount: 3000, ttlMs: 60_000 }], estimated: [] }));
     // 4000 settled + 3000 held leaves 3000 under a 10000 cap.
     expect((await l.reserve(args(t, 3001, 10_000))).allowed).toBe(false);
     expect((await l.reserve(args(t, 3000, 10_000))).allowed).toBe(true);
@@ -266,7 +266,7 @@ describe('redis ledger', { timeout: 120_000 }, () => {
     // them rebuilds the balance, which imports all 30. The cap fits three.
     const t = tenant();
     const ids = Array.from({ length: 30 }, () => randomUUID());
-    const l = ledger(async () => ({ spent: 0, charges: 0, holds: ids.map((id) => ({ id, amount: 61, ttlMs: 60_000 })) }));
+    const l = ledger(async () => ({ spent: 0, charges: 0, holds: ids.map((id) => ({ id, amount: 61, ttlMs: 60_000 })), estimated: [] }));
     const results = await Promise.all(ids.map((id) => l.reserve({ tenantId: t, period: P, epoch: 1, id, estimate: 61, cap: 190, ttlMs: 60_000 })));
     expect(results.filter((r) => r.allowed)).toHaveLength(3);
     expect(await bal(t)).toMatchObject({ spent: 0, reserved: 183 });
@@ -277,7 +277,7 @@ describe('redis ledger', { timeout: 120_000 }, () => {
   });
 
   it('rebuilt spend counts against the cap', async () => {
-    const l = ledger(async () => ({ spent: 9500, charges: 3, holds: [] }));
+    const l = ledger(async () => ({ spent: 9500, charges: 3, holds: [], estimated: [] }));
     const t = tenant();
     expect((await l.reserve(args(t, 600, 10_000))).allowed).toBe(false);
     expect((await l.reserve(args(t, 500, 10_000))).allowed).toBe(true);
@@ -298,5 +298,74 @@ describe('redis ledger', { timeout: 120_000 }, () => {
     expect(seen).toEqual([P, next]);
     expect(await bal(t, P)).toMatchObject({ spent: 0, reserved: 1000 });
     expect(await bal(t, next)).toMatchObject({ spent: 0, reserved: 1000 });
+  });
+  describe('a real settle after the sweeper charged the estimate', () => {
+    const settled = (t: string, id: string, costMicros: number, estimated: boolean) => [{ tenantId: t, period: P, id, costMicros, estimated }];
+    const apply = (t: string, id: string, costMicros: number, estimated: boolean) => applySettled(redis, prefix, 1, settled(t, id, costMicros, estimated), 30_000);
+
+    it('a balance that counted the estimate takes the difference once', async () => {
+      const t = tenant();
+      const l = ledger();
+      const a = args(t, 401, 100_000);
+      await l.reserve(a);
+      // The sweeper charged the hold at its estimate, then the worker applies the real settle (9).
+      expect(await apply(t, a.id, 401, true)).toBe(1);
+      expect(await bal(t)).toMatchObject({ spent: 401, reserved: 0 });
+      expect(await apply(t, a.id, 9, false)).toBe(1);
+      expect(await bal(t)).toMatchObject({ spent: 9, reserved: 0 });
+      expect(await apply(t, a.id, 9, false)).toBe(0); // repeated: nothing
+      expect(await bal(t)).toMatchObject({ spent: 9 });
+    });
+
+    it('a balance that took the real settle itself ignores both the estimate and the correction', async () => {
+      const t = tenant();
+      const l = ledger();
+      const a = args(t, 401, 100_000);
+      await l.reserve(a);
+      await l.settle(settleArgs(t, a.id, 9));
+      expect(await apply(t, a.id, 401, true)).toBe(0);
+      expect(await apply(t, a.id, 9, false)).toBe(0);
+      expect(await bal(t)).toMatchObject({ spent: 9, reserved: 0 });
+    });
+
+    it('a balance rebuilt after the sweeper charged the estimate imports it and takes the correction', async () => {
+      const t = tenant();
+      const id = randomUUID();
+      const l = ledger(async () => ({ spent: 401, charges: 1, holds: [], estimated: [{ id, cost: 401 }] }));
+      await l.reserve(args(t, 1, 100_000));
+      expect(await bal(t)).toMatchObject({ spent: 401 });
+      expect(await apply(t, id, 9, false)).toBe(1);
+      expect(await bal(t)).toMatchObject({ spent: 9 });
+      expect(await apply(t, id, 9, false)).toBe(0);
+      // A refund takes it back to nothing the same way.
+      const refunded = randomUUID();
+      const l2 = ledger(async () => ({ spent: 250, charges: 1, holds: [], estimated: [{ id: refunded, cost: 250 }] }));
+      const t2 = tenant();
+      await l2.reserve(args(t2, 1, 100_000));
+      expect(await apply(t2, refunded, 0, false)).toBe(1);
+      expect(await bal(t2)).toMatchObject({ spent: 0 });
+    });
+
+    it('a settle script that runs after the estimate was counted replaces it instead of adding to it', async () => {
+      const t = tenant();
+      const l = ledger();
+      const a = args(t, 401, 100_000);
+      await l.reserve(a);
+      await apply(t, a.id, 401, true);
+      await l.settle(settleArgs(t, a.id, 9));
+      expect(await bal(t)).toMatchObject({ spent: 9, reserved: 0 }); // not 410
+      expect(await apply(t, a.id, 9, false)).toBe(0); // and the worker's later copy is a no-op
+      expect(await bal(t)).toMatchObject({ spent: 9 });
+    });
+  });
+
+  it('a rebuilt balance is listed in the index, scored by when it expires, so reconcile needs no keyspace scan', async () => {
+    const t = tenant();
+    await ledger().reserve(args(t, 1, 100));
+    const key = balanceKey(prefix, t, P, 1);
+    const score = await redis.zscore(indexKey(prefix), key);
+    expect(Number(score)).toBe(await redis.expiretime(key));
+    await ledger().reserve(args(t, 1, 100)); // not rebuilt again, still one member
+    expect(await redis.zrank(indexKey(prefix), key)).not.toBeNull();
   });
 });

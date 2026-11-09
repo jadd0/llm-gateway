@@ -5,6 +5,7 @@
 --   bal   hash  spent, reserved          settled money and money held for in-flight requests
 --   res   zset  request id -> expiry     when each hold was due to lapse (ms)
 --   amt   hash  request id -> amount     what each hold is worth
+--   est   hash  request id -> cost       requests this balance counted at their estimate (see below)
 -- Postgres is the record, written by the log worker from the spend stream. `spent` runs ahead of it by
 -- the settles still queued, and a balance rebuilt from Postgres counts those as holds (their estimate) until
 -- the worker has applied them.
@@ -13,6 +14,14 @@
 -- worker, and a hold released before it is applied would let the cap be exceeded. Lapsed holds are charged at
 -- their estimate by the worker's sweeper, which then applies that charge here. So a hold present in a balance
 -- means the balance has not charged that request, and a hold absent means it has (or never held it).
+--
+-- The sweeper can charge a request's estimate before that request's real settle is applied (the settle was
+-- queued behind a stalled worker). Postgres then replaces the estimate with the real cost when the settle
+-- arrives. A balance that counted the estimate must make the same correction, and one that took the real
+-- settle itself must not, so every balance records the estimates it counted in `est` (id -> estimated cost):
+-- apply adds an id when it releases a hold at an estimated charge, and a rebuild imports the ledger's
+-- estimated rows. A real settle for an id in `est` moves spent by (real - estimate) and removes the id, once.
+-- Without an `est` entry the balance already has the real cost, or never counted the request: nothing to do.
 
 -- @script reserve
 -- KEYS: bal, res, amt
@@ -57,9 +66,9 @@ redis.call('EXPIREAT', KEYS[3], ARGV[6])
 return {1, room - estimate}
 
 -- @script settle
--- KEYS: bal, res, amt, stream
+-- KEYS: bal, res, amt, est, stream
 -- ARGV: id, cost, then the stream entry's fields (name, value, ...)
--- Queues the settle for the log worker (KEYS[4] is the spend stream) and applies it to the live balance in one script, so neither can
+-- Queues the settle for the log worker (KEYS[5] is the spend stream) and applies it to the live balance in one script, so neither can
 -- happen without the other. The XADD is first: Redis does not undo earlier writes when a later command in a
 -- script fails, so a failing XADD must leave the balance untouched. Then the request's hold is released if it
 -- is still there, and `cost` (0 for a refund or a cache hit) is added to spent. The worker writes the ledger
@@ -69,18 +78,25 @@ return {1, room - estimate}
 -- all the same; the next reserve rebuilds from Postgres, which will have this settle once the worker applies it).
 local fields = {}
 for i = 3, #ARGV do fields[#fields + 1] = ARGV[i] end
-redis.call('XADD', KEYS[4], '*', unpack(fields))
+redis.call('XADD', KEYS[5], '*', unpack(fields))
 if redis.call('EXISTS', KEYS[1]) == 0 then return {-1} end
 local changed = 0
 local held = redis.call('HGET', KEYS[3], ARGV[1])
+local cost = tonumber(ARGV[2])
 if held then
   redis.call('HDEL', KEYS[3], ARGV[1])
   redis.call('ZREM', KEYS[2], ARGV[1])
   redis.call('HINCRBY', KEYS[1], 'reserved', -tonumber(held))
   changed = 1
 end
-local cost = tonumber(ARGV[2])
-if cost > 0 then
+-- A settle this late finds its estimate already counted (the sweeper charged it): replace the estimate.
+local counted = nil
+if not held then counted = redis.call('HGET', KEYS[4], ARGV[1]) end
+if counted then
+  redis.call('HDEL', KEYS[4], ARGV[1])
+  if cost ~= tonumber(counted) then redis.call('HINCRBY', KEYS[1], 'spent', cost - tonumber(counted)) end
+  changed = 1
+elseif cost > 0 then
   redis.call('HINCRBY', KEYS[1], 'spent', cost)
   changed = 1
 end
@@ -99,8 +115,8 @@ redis.call('HINCRBY', KEYS[1], 'reserved', -tonumber(held))
 return 1
 
 -- @script apply
--- KEYS: bal, res, amt
--- ARGV: (id, cost) pairs
+-- KEYS: bal, res, amt, est
+-- ARGV: (id, cost, estimated) triples; estimated is 1 for a charge the sweeper made at the estimate
 -- Catches the live balance up with settles the log worker has just written to Postgres. A triple counts only if
 -- the balance still holds that request's hold: a balance rebuilt while the settle was queued imported the hold
 -- (Postgres still had it) and not the charge, so the hold is released and the cost added. A balance that
@@ -109,10 +125,12 @@ return 1
 -- are queued the balance is rightly ahead of Postgres.
 -- A pair never adds spend without finding the hold: that is the proof this balance has not charged the request
 -- (see the note at the top), so no pair can be counted twice, whoever sends it and however late.
+-- With no hold, a real charge (or refund, cost 0) for an id in `est` is the correction described at the top:
+-- spent moves by (cost - the estimate counted) and the id leaves `est`, so it happens once.
 -- Returns how many triples changed the balance, or -1 when the balance is missing.
 if redis.call('EXISTS', KEYS[1]) == 0 then return -1 end
 local n = 0
-for i = 1, #ARGV, 2 do
+for i = 1, #ARGV, 3 do
   local held = redis.call('HGET', KEYS[3], ARGV[i])
   local cost = tonumber(ARGV[i + 1])
   if held then
@@ -120,18 +138,33 @@ for i = 1, #ARGV, 2 do
     redis.call('ZREM', KEYS[2], ARGV[i])
     redis.call('HINCRBY', KEYS[1], 'reserved', -tonumber(held))
     if cost > 0 then redis.call('HINCRBY', KEYS[1], 'spent', cost) end
+    if ARGV[i + 2] == '1' then
+      redis.call('HSET', KEYS[4], ARGV[i], cost)
+      local ttl = redis.call('TTL', KEYS[1])
+      if ttl > 0 then redis.call('EXPIRE', KEYS[4], ttl) end
+    end
     n = n + 1
+  elseif ARGV[i + 2] ~= '1' then
+    local counted = redis.call('HGET', KEYS[4], ARGV[i])
+    if counted then
+      redis.call('HDEL', KEYS[4], ARGV[i])
+      if cost ~= tonumber(counted) then redis.call('HINCRBY', KEYS[1], 'spent', cost - tonumber(counted)) end
+      n = n + 1
+    end
   end
 end
 return n
 
 -- @script init
--- KEYS: bal, res, amt
--- ARGV: spent, expireAt (unix s), nowMs (empty = Redis TIME), then (id, amount, ttlMs) per live hold
+-- KEYS: bal, res, amt, est, index
+-- ARGV: spent, expireAt (unix s), nowMs (empty = Redis TIME), holds (count of live holds), then (id, amount, ttlMs)
+-- per hold, then (id, cost) per charge the ledger holds at its estimate
 -- Builds the balance from a Postgres snapshot: settled spend, and every hold row (lapsed ones too, with a negative ttl)
--- (so their settles release them and they count against the cap now). Creates it only if it is still
--- missing, so two instances rebuilding at once cannot add anything twice. Returns 1 if this call
--- created it.
+-- (so their settles release them and they count against the cap now), and the estimated charges (so a real
+-- settle for one of them corrects this balance). Creates it only if it is still missing, so two instances
+-- rebuilding at once cannot add anything twice. Registers the balance in the index (a zset scored by the
+-- time it expires), which the worker's reconcile walks instead of scanning the keyspace, and drops index
+-- members already past it. Returns 1 if this call created it.
 if redis.call('EXISTS', KEYS[1]) == 1 then return 0 end
 local now = tonumber(ARGV[3])
 if now == nil then
@@ -139,16 +172,28 @@ if now == nil then
   now = t[1] * 1000 + math.floor(t[2] / 1000)
 end
 local reserved = 0
-for i = 4, #ARGV, 3 do
+local nHolds = tonumber(ARGV[4])
+local i = 5
+for _ = 1, nHolds do
   local amount = tonumber(ARGV[i + 1])
   redis.call('ZADD', KEYS[2], now + tonumber(ARGV[i + 2]), ARGV[i])
   redis.call('HSET', KEYS[3], ARGV[i], amount)
   reserved = reserved + amount
+  i = i + 3
+end
+local nEst = 0
+while i < #ARGV do
+  redis.call('HSET', KEYS[4], ARGV[i], tonumber(ARGV[i + 1]))
+  nEst = nEst + 1
+  i = i + 2
 end
 redis.call('HSET', KEYS[1], 'spent', ARGV[1], 'reserved', reserved)
 redis.call('EXPIREAT', KEYS[1], ARGV[2])
-if reserved > 0 or #ARGV > 3 then
+if nHolds > 0 then
   redis.call('EXPIREAT', KEYS[2], ARGV[2])
   redis.call('EXPIREAT', KEYS[3], ARGV[2])
 end
+if nEst > 0 then redis.call('EXPIREAT', KEYS[4], ARGV[2]) end
+redis.call('ZREMRANGEBYSCORE', KEYS[5], '-inf', math.floor(now / 1000))
+redis.call('ZADD', KEYS[5], ARGV[2], KEYS[1])
 return 1

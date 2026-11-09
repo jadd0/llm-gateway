@@ -569,7 +569,7 @@ describe('budget', { timeout: 120_000 }, () => {
     await redis.xdel(spendKey, queued[0]![0]); // the entry is dead-lettered: Postgres never gets the charge
     await lapse();
     const charged = (await chargeExpiredHolds(handle.db, 1000)).filter((c) => c.tenantId === t);
-    expect(charged).toEqual([{ tenantId: t, period: P, id: h.id, costMicros: 1000 }]);
+    expect(charged).toEqual([{ tenantId: t, period: P, id: h.id, costMicros: 1000, estimated: true }]);
     await applySettled(redis, prefix, e, charged, 5000);
     expect(await redisBal(t, e)).toMatchObject({ spent: 400, reserved: 0 }); // not 1400
   });
