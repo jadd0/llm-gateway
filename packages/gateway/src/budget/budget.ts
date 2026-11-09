@@ -51,6 +51,8 @@ export interface Budget {
   settle(reservation: Reservation, outcome: SettleOutcome): Promise<void>;
   /** Deletes lapsed holds from Postgres (bounded). Run on a timer; exposed for tests. Returns how many went. */
   sweepExpired(): Promise<number>;
+  /** Re-reads the epoch from Postgres and adopts it if newer. Run on a timer; exposed for tests. */
+  refreshEpoch(): Promise<void>;
   /** The Redis key generation this instance is using. */
   epoch(): number;
   /** Where reservations are going right now. */
@@ -67,8 +69,8 @@ export interface BudgetOptions {
   reservationTtlS: number;
   /** A Redis answer slower than this sends the request to the Postgres path. */
   redisTimeoutMs: number;
-  /** How often this instance re-reads the epoch from Postgres. */
-  epochRefreshS: number;
+  /** How often this instance re-reads the epoch from Postgres (one tiny select, never per request). */
+  epochRefreshMs: number;
   /** Consecutive failed Redis calls that declare an outage without waiting for a failed PING. */
   outageFailures: number;
   /** How often lapsed holds are deleted from Postgres, in seconds. */
@@ -78,6 +80,8 @@ export interface BudgetOptions {
   log?: { warn(obj: object, msg: string): void; info(obj: object, msg: string): void; error(obj: object, msg: string): void };
   /** Pins the time that picks the month and the Redis scripts' expiry clock, in ms. Tests only. */
   clock?: () => number;
+  /** First wait after a failed epoch bump; doubles per failure up to 2 s. 0 retries on every request. */
+  bumpBackoffBaseMs?: number;
   /** While on the Postgres path, how long to wait between tries at Redis. */
   redisRetryMs?: number;
   /** Waits between tries of a Postgres write that failed (so 3 retries by default). */
@@ -98,6 +102,7 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
     keyPrefix: opts.keyPrefix,
     timeoutMs: opts.redisTimeoutMs,
     loadSnapshot: (tenantId, period) => pg.snapshot(tenantId, period),
+    onRebuild: (a) => onRebuild(a),
     ...(clock ? { clock } : {}),
   });
   const ttlMs = opts.reservationTtlS * 1000;
@@ -117,9 +122,39 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
   let bumpDone = true;
   let bumping: Promise<void> | null = null;
   const pending = new Set<Promise<void>>();
+  // Balances this instance has used successfully at the current epoch. One that goes missing again at the
+  // same epoch did not expire and was not replaced by a bump: Redis lost it (a restart or a flush).
+  const seen = new Set<string>();
+  const seenKey = (tenantId: string, period: string, e: number) => `${tenantId}|${period}|${e}`;
+  const markSeen = (tenantId: string, period: string, e: number) => {
+    if (seen.size > 100_000) seen.clear();
+    seen.add(seenKey(tenantId, period, e));
+  };
+  // Consecutive failed epoch bumps, for the back-off.
+  let bumpFailures = 0;
+  let nextBumpAt = 0;
 
   const adopt = (e: number) => {
-    if (e > epoch) epoch = e;
+    if (e > epoch) {
+      // Every balance at the old epoch is behind; the next reserve finds no balance at the new one and
+      // rebuilds it from Postgres.
+      epoch = e;
+      seen.clear();
+    }
+  };
+
+  // Redis lost a balance this instance had been using, so every instance's balances are suspect. Move the
+  // epoch on (the same compare-and-set as an outage: of everyone who noticed, one bumps, the rest adopt),
+  // so all of them rebuild together from Postgres instead of each trusting what it rebuilt at its own moment.
+  const onRebuild = (a: { tenantId: string; period: string; epoch: number }) => {
+    const k = seenKey(a.tenantId, a.period, a.epoch);
+    if (!seen.delete(k)) return; // never used here: a new tenant or month, or the first use after a bump
+    const p = pg.bumpEpoch(a.epoch).then(
+      (r) => adopt(r.epoch),
+      (e: unknown) => log?.warn(errInfo(e), 'budget epoch bump after a lost balance failed'),
+    );
+    pending.add(p);
+    void p.finally(() => pending.delete(p));
   };
 
   // Redis is declared down. Money is decided in Postgres until Redis answers again, and the epoch moves
@@ -128,12 +163,20 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
   // seen when the failures began: of every instance that saw this outage, one bumps and the rest adopt.
   // One bump attempt at a time; a failed one is simply tried again by the next caller.
   const startBump = (): Promise<void> => {
+    // After a failure the next attempt waits (exponentially, at most 2 s): a database that is struggling
+    // is not hit with an UPDATE per request.
+    if (!bumping && Date.now() < nextBumpAt) return Promise.resolve();
     bumping ??= pg.bumpEpoch(streakEpoch).then(
       (r) => {
         adopt(r.epoch);
         bumpDone = true;
+        bumpFailures = 0;
       },
-      (e: unknown) => log?.error(errInfo(e), 'budget epoch bump failed, staying on postgres'),
+      (e: unknown) => {
+        bumpFailures++;
+        nextBumpAt = Date.now() + Math.min(2000, (opts.bumpBackoffBaseMs ?? 50) * 2 ** (bumpFailures - 1));
+        log?.error(errInfo(e), 'budget epoch bump failed, staying on postgres');
+      },
     ).finally(() => {
       bumping = null;
     });
@@ -171,9 +214,9 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
     return false;
   }
 
-  const timer = setInterval(() => {
+  const refreshEpoch = () =>
     pg.readEpoch().then(adopt, (e: unknown) => log?.warn(errInfo(e), 'budget epoch refresh failed'));
-  }, opts.epochRefreshS * 1000);
+  const timer = setInterval(() => void refreshEpoch(), opts.epochRefreshMs);
   timer.unref();
 
   // Holds are removed when they settle; one whose gateway died is only removed when it lapses. Redis
@@ -210,6 +253,7 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
       try {
         await redisLedger.settle({ ...args, epoch });
         redisAnswered();
+        markSeen(res.tenantId, res.period, epoch);
         return;
       } catch (err) {
         if (await redisFailed(err)) {
@@ -260,12 +304,18 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
       });
       const pgArgs = { id, tenantId: req.tenantId, period, estimate: req.estimate, ttlMs };
 
+      let usedEpoch = epoch; // the key a Redis attempt uses
+      // True once a Redis reserve was sent and did not come back with an answer: its script may have run and
+      // left a hold that nothing else knows of.
+      let redisMayHaveRun = false;
       const redisReserve = async (): Promise<{ allowed: boolean; remaining: number } | 'failed'> => {
+        usedEpoch = epoch;
         try {
           const r = await redisLedger.reserve({
-            tenantId: req.tenantId, period, epoch, id, estimate: req.estimate, cap: req.cap, ttlMs,
+            tenantId: req.tenantId, period, epoch: usedEpoch, id, estimate: req.estimate, cap: req.cap, ttlMs,
           });
           redisAnswered();
+          markSeen(req.tenantId, period, usedEpoch);
           return r;
         } catch (err) {
           await redisFailed(err);
@@ -287,7 +337,6 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
           log?.error(errInfo(err), 'budget hold could not be written to postgres');
           return { status: 'unavailable' };
         }
-        const usedEpoch = epoch; // the key the Redis attempt uses
         const outcome = await redisReserve();
         if (outcome !== 'failed' && !outcome.allowed) {
           // Not needed after all. If it can't be dropped it lapses by itself, which only errs towards refusing.
@@ -295,15 +344,28 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
           return { status: 'denied', remaining: outcome.remaining };
         }
         if (outcome !== 'failed') return hold('redis', usedEpoch, outcome.remaining);
+        redisMayHaveRun = true;
         if (!bumpDone) await startBump();
       }
 
+      // Anything but an admission leaves nothing behind: a Redis hold the failed attempt may have made is
+      // released (the request's settle would do it for an admitted one), and so is the Postgres row.
+      const cleanUp = async (): Promise<void> => {
+        const work = [
+          pg.release(id).catch((e: unknown) => log?.warn(errInfo(e), 'budget hold could not be dropped')),
+          ...(redisMayHaveRun ? [redisLedger.release(req.tenantId, period, usedEpoch, id)] : []),
+        ];
+        await Promise.all(work);
+      };
       try {
         // Decided on Postgres. A hold written above for the Redis attempt is replaced, not counted twice.
         const r = await pg.reserve({ ...pgArgs, cap: req.cap });
-        return r.allowed ? hold('postgres', epoch, r.remaining) : { status: 'denied', remaining: r.remaining };
+        if (r.allowed) return hold('postgres', epoch, r.remaining);
+        await cleanUp();
+        return { status: 'denied', remaining: r.remaining };
       } catch (err) {
         log?.error(errInfo(err), 'budget reserve failed on postgres');
+        await cleanUp();
         return { status: 'unavailable' };
       }
     },
@@ -318,6 +380,7 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
     },
 
     sweepExpired,
+    refreshEpoch,
     epoch: () => epoch,
     mode: () => (onPostgres ? 'postgres' : 'redis'),
 

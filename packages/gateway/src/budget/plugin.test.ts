@@ -31,6 +31,7 @@ let app: FastifyInstance;
 let handle: Db;
 let redis: Redis;
 const serverSockets: Socket[] = [];
+let floodClosed: () => void = () => {};
 let hits = 0;
 let held = 0;
 let gate: { open: () => void; wait: Promise<void> } = newGate();
@@ -49,6 +50,22 @@ beforeAll(async () => {
     req.on('end', async () => {
       hits++;
       const body = JSON.parse(Buffer.concat(chunks).toString('utf8')) as { model: string; stream?: boolean };
+      if (body.model === 'mock-flood') {
+        // Writes without end for as long as the reader takes it; stops when the gateway closes the connection.
+        res.writeHead(200, { 'content-type': 'text/event-stream' });
+        res.on('close', () => floodClosed());
+        const chunk = `data: ${'x'.repeat(60_000)}\n\n`;
+        while (!res.destroyed) {
+          if (!res.write(chunk)) await new Promise<void>((r) => res.once('drain', r).once('close', r));
+        }
+        return;
+      }
+      if (body.model === 'mock-json-hang' || body.model === 'mock-500-hang') {
+        // A stream request answered with something that is not an event stream, then silence.
+        res.writeHead(body.model === 'mock-500-hang' ? 500 : 200, { 'content-type': body.model === 'mock-500-hang' ? 'text/plain' : 'application/json' });
+        res.write('partial-body');
+        return;
+      }
       if (body.model === 'mock-500') {
         res.writeHead(500, { 'content-type': 'application/json' });
         res.end('{"error":{"message":"boom"}}');
@@ -82,7 +99,7 @@ beforeAll(async () => {
       OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
       BUDGET_ENABLED: 'true',
       BUDGET_REDIS_TIMEOUT_MS: '5000',
-      BUDGET_EPOCH_REFRESH_S: '3600',
+      BUDGET_EPOCH_REFRESH_MS: '3600000',
       RATE_LIMIT_REDIS_TIMEOUT_MS: '5000',
     }),
     { rateLimitClock: () => T0 },
@@ -237,7 +254,7 @@ describe('budget plugin', { timeout: 60_000 }, () => {
         OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
         BUDGET_ENABLED: 'true',
         BUDGET_REDIS_TIMEOUT_MS: '5000',
-        BUDGET_EPOCH_REFRESH_S: '3600',
+        BUDGET_EPOCH_REFRESH_MS: '3600000',
         RATE_LIMIT_REDIS_TIMEOUT_MS: '5000',
       }),
       {
@@ -386,7 +403,7 @@ describe('budget plugin', { timeout: 60_000 }, () => {
         OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
         BUDGET_ENABLED: 'true',
         BUDGET_REDIS_TIMEOUT_MS: '5000',
-        BUDGET_EPOCH_REFRESH_S: '3600',
+        BUDGET_EPOCH_REFRESH_MS: '3600000',
         RATE_LIMIT_REDIS_TIMEOUT_MS: '5000',
         ...extraConfig,
       }),
@@ -488,5 +505,51 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     await settledAt(s.tenantId, WORST);
     expect(await ledgerRows(s.tenantId)).toEqual([{ cost: WORST, estimated: true, prompt: 1, completion: 20 }]);
     expect(await tokensLeft(s.keyId)).toBe(TPM - 21); // the limiter keeps its estimate as well
+  });
+
+  it('at the deadline the upstream is aborted at once, the estimate is settled, and a client that stops reading is dropped', async () => {
+    const closed = new Promise<void>((r) => (floodClosed = r));
+    const short = capped({ UPSTREAM_MAX_DURATION_MS: '1000' }, { cutDrainMs: 300 });
+    await short.listen({ port: 0, host: '127.0.0.1' });
+    try {
+      const s = await fresh(1_000_000);
+      const sockets: Socket[] = [];
+      short.server.on('connection', (sk: Socket) => sockets.push(sk));
+      const { port } = short.server.address() as AddressInfo;
+      const req = http.request(
+        { port, host: '127.0.0.1', method: 'POST', path: '/v1/chat/completions', headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` } },
+        (res) => {
+          res.pause(); // takes the headers and then never reads
+          res.on('error', () => {});
+        },
+      );
+      req.on('error', () => {});
+      req.end(JSON.stringify(body('mock-flood', { stream: true })));
+      await closed; // the gateway closed its connection to the upstream at the deadline
+      await settledAt(s.tenantId, WORST); // and settled the estimate then, with the response still stuck
+      expect(await ledgerRows(s.tenantId)).toEqual([{ cost: WORST, estimated: true, prompt: 1, completion: 20 }]);
+      // The client that wouldn't read has its connection destroyed by the gateway.
+      await until(async () => sockets.length > 0 && sockets.every((sk) => sk.destroyed), (d) => d);
+    } finally {
+      await short.close();
+    }
+  });
+
+  it('a stream that is not an event stream is ended at the deadline without an error event added', async () => {
+    const short = capped({ UPSTREAM_MAX_DURATION_MS: '300' });
+    await short.listen({ port: 0, host: '127.0.0.1' });
+    try {
+      for (const model of ['mock-json-hang', 'mock-500-hang']) {
+        const s = await fresh(1_000_000);
+        const r = sendRaw(short, s.key, body(model, { stream: true }));
+        await r.ended;
+        expect(r.text()).not.toContain('upstream_max_duration'); // nothing appended
+        expect(r.text()).not.toContain('data:');
+        // (The usage tap holds an incomplete event back, so a 200 body shows nothing; a 500 passes straight through.)
+        if (model === 'mock-500-hang') expect(r.text()).toBe('partial-body');
+      }
+    } finally {
+      await short.close();
+    }
   });
 });

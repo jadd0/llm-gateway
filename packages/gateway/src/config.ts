@@ -66,7 +66,7 @@ const schema = z
     BUDGET_DEFAULT_MONTHLY_USD: usd('10'),
     BUDGET_RESERVATION_TTL_S: int(300, 1),
     BUDGET_REDIS_TIMEOUT_MS: int(50, 1),
-    BUDGET_EPOCH_REFRESH_S: int(5, 1),
+    BUDGET_EPOCH_REFRESH_MS: int(250, 10),
     BUDGET_OUTAGE_FAILURES: int(3, 1),
     BUDGET_SWEEP_INTERVAL_S: int(60, 1),
   })
@@ -121,7 +121,7 @@ export interface Config {
   budgetDefaultMonthlyMicros: number;
   budgetReservationTtlS: number;
   budgetRedisTimeoutMs: number;
-  budgetEpochRefreshS: number;
+  budgetEpochRefreshMs: number;
   budgetOutageFailures: number;
   budgetSweepIntervalS: number;
 }
@@ -155,7 +155,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     budgetDefaultMonthlyMicros: e.BUDGET_DEFAULT_MONTHLY_USD,
     budgetReservationTtlS: e.BUDGET_RESERVATION_TTL_S,
     budgetRedisTimeoutMs: e.BUDGET_REDIS_TIMEOUT_MS,
-    budgetEpochRefreshS: e.BUDGET_EPOCH_REFRESH_S,
+    budgetEpochRefreshMs: e.BUDGET_EPOCH_REFRESH_MS,
     budgetOutageFailures: e.BUDGET_OUTAGE_FAILURES,
     budgetSweepIntervalS: e.BUDGET_SWEEP_INTERVAL_S,
   };

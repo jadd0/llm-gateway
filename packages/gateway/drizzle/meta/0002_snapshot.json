@@ -1,5 +1,5 @@
 {
-  "id": "ebf8a577-927f-4d64-9b66-fd613c36190a",
+  "id": "cdf9f1ad-559c-482d-a093-05c405af937e",
   "prevId": "b1449a1b-989c-4f54-83c3-bb5dda92546b",
   "version": "7",
   "dialect": "postgresql",
@@ -188,6 +188,21 @@
             },
             {
               "expression": "period",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "budget_reservations_expires_idx": {
+          "name": "budget_reservations_expires_idx",
+          "columns": [
+            {
+              "expression": "expires_at",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

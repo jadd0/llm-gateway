@@ -60,6 +60,8 @@ export interface RedisLedger {
   reserve(args: ReserveArgs): Promise<ReserveResult>;
   /** Throws when Redis does not answer in time or fails. Safe to repeat and to reorder. */
   settle(args: SettleArgs): Promise<SettleResult>;
+  /** Releases a hold by id if the balance has it. Best effort and idempotent; never throws. */
+  release(tenantId: string, period: Period, epoch: number, id: string): Promise<void>;
   /** Resolves if Redis answers a PING in time. */
   ping(): Promise<void>;
 }
@@ -71,6 +73,8 @@ export interface RedisLedgerOptions {
   timeoutMs: number;
   /** Postgres's view of the tenant's period, read in one consistent snapshot. */
   loadSnapshot(tenantId: string, period: Period): Promise<Snapshot>;
+  /** Called when a reserve finds the balance missing, before it is rebuilt. */
+  onRebuild?: (a: { tenantId: string; period: Period; epoch: number }) => void;
   /** Pins the clock the scripts use, in ms. Production leaves it unset so they read Redis TIME. */
   clock?: () => number;
 }
@@ -86,7 +90,7 @@ export class RedisTimeout extends Error {
 }
 
 export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
-  const { redis, keyPrefix, timeoutMs, loadSnapshot, clock } = opts;
+  const { redis, keyPrefix, timeoutMs, loadSnapshot, clock, onRebuild } = opts;
   redis.defineCommand('budReserve', { numberOfKeys: 3, lua: SCRIPTS.reserve });
   redis.defineCommand('budSettle', { numberOfKeys: 3, lua: SCRIPTS.settle });
   redis.defineCommand('budInit', { numberOfKeys: 3, lua: SCRIPTS.init });
@@ -127,6 +131,7 @@ export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
         // The balance is missing (first request of the month, an epoch change, a flush or an
         // eviction). Rebuild it from Postgres, holds included. init creates it only if it is still
         // missing, so two instances rebuilding at once cannot add anything twice.
+        onRebuild?.({ tenantId: a.tenantId, period: a.period, epoch: a.epoch });
         const snap = await loadSnapshot(a.tenantId, a.period);
         const holds = snap.holds.flatMap((h) => [h.id, h.amount, h.ttlMs]);
         await withTimeout(
@@ -142,6 +147,14 @@ export function createRedisLedger(opts: RedisLedgerOptions): RedisLedger {
       const r = await withTimeout(cmd.budSettle(...keys(a.tenantId, a.period, a.epoch), a.id, a.charges, a.spentAfter));
       if (r[0] === -1) return 'rebuild';
       return r[0] === 1 ? 'changed' : 'unchanged';
+    },
+
+    async release(tenantId, period, epoch, id) {
+      try {
+        await withTimeout(cmd.budSettle(...keys(tenantId, period, epoch), id, 0, 0));
+      } catch {
+        // A hold that can't be released here lapses by itself.
+      }
     },
 
     async ping() {

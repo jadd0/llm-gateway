@@ -36,4 +36,5 @@ ALTER TABLE "tenants" ADD COLUMN "monthly_budget_micros" bigint;--> statement-br
 ALTER TABLE "budget_reservations" ADD CONSTRAINT "budget_reservations_tenant_id_tenants_id_fk" FOREIGN KEY ("tenant_id") REFERENCES "public"."tenants"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "spend_ledger" ADD CONSTRAINT "spend_ledger_tenant_id_tenants_id_fk" FOREIGN KEY ("tenant_id") REFERENCES "public"."tenants"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "tenant_spend" ADD CONSTRAINT "tenant_spend_tenant_id_tenants_id_fk" FOREIGN KEY ("tenant_id") REFERENCES "public"."tenants"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "budget_reservations_tenant_period_idx" ON "budget_reservations" USING btree ("tenant_id","period");
+CREATE INDEX "budget_reservations_tenant_period_idx" ON "budget_reservations" USING btree ("tenant_id","period");--> statement-breakpoint
+CREATE INDEX "budget_reservations_expires_idx" ON "budget_reservations" USING btree ("expires_at");

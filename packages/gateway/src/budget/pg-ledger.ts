@@ -39,7 +39,7 @@ export interface SettleRecord {
    */
   spent: number;
   charges: number;
-  /** The budget epoch when the transaction ran: the one the live balance should be corrected on. */
+  /** The budget epoch just after the transaction committed: the one the live balance should be corrected on. */
   epoch: number;
 }
 
@@ -152,11 +152,9 @@ export function createPgLedger(db: Db['db']): PgLedger {
           );
         const reserved = Number(held?.held ?? 0);
         const room = Math.max(0, a.cap - spent - reserved);
-        if (spent + reserved + a.estimate > a.cap) {
-          await tx.delete(budgetReservations).where(eq(budgetReservations.id, a.id));
-          return { allowed: false, remaining: room };
-        }
+        // Either way the hold written ahead of a Redis attempt goes: refused, or replaced just below.
         await tx.delete(budgetReservations).where(eq(budgetReservations.id, a.id));
+        if (spent + reserved + a.estimate > a.cap) return { allowed: false, remaining: room };
         await tx.insert(budgetReservations).values({
           id: a.id,
           tenantId: a.tenantId,
@@ -224,13 +222,16 @@ export function createPgLedger(db: Db['db']): PgLedger {
       return r.rowCount ?? 0;
     },
 
-    settle: (id, entry) =>
-      db.transaction(async (tx) => {
+    async settle(id, entry) {
+      const rec = await db.transaction(async (tx) => {
         await tx.delete(budgetReservations).where(eq(budgetReservations.id, id));
-        const rec = entry === null ? { recorded: false, spent: 0, charges: 0 } : await recordIn(tx, entry);
-        const [e] = await tx.select({ epoch: budgetEpoch.epoch }).from(budgetEpoch).where(eq(budgetEpoch.id, 1));
-        return { ...rec, epoch: e?.epoch ?? 1 };
-      }),
+        return entry === null ? { recorded: false, spent: 0, charges: 0 } : recordIn(tx, entry);
+      });
+      // The epoch is read after the commit. A balance rebuilt from a snapshot taken before the commit still
+      // holds this request's hold, and it can only be at an epoch that is current now or older.
+      const [e] = await db.select({ epoch: budgetEpoch.epoch }).from(budgetEpoch).where(eq(budgetEpoch.id, 1));
+      return { ...rec, epoch: e?.epoch ?? 1 };
+    },
 
     async readEpoch() {
       await db.insert(budgetEpoch).values({ id: 1, epoch: 1 }).onConflictDoNothing();

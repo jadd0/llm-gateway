@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import { Transform, type Readable } from 'node:stream';
+import { PassThrough, Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { errorBody } from '../errors.ts';
 import { chatRequest, type ChatBody } from '../request-body.ts';
@@ -70,10 +70,16 @@ function forwardBody(parsed: ChatBody, raw: Buffer, metered: boolean): { body: B
   };
 }
 
-// Sits last in a streamed answer's pipeline. When the call's total deadline passes it replaces the rest
-// of the answer with one OpenAI-shaped error event and ends the stream.
+// Sits last in a streamed answer's pipeline. When the call's total deadline passes it drops the rest of the
+// answer and ends the stream, with one OpenAI-shaped error event first if the answer is an event stream
+// (any other kind of body is ended without adding anything to it).
 class DeadlineGuard extends Transform {
   #cut = false;
+  readonly #appendsEvent: boolean;
+  constructor(appendsEvent: boolean) {
+    super();
+    this.#appendsEvent = appendsEvent;
+  }
   override _transform(chunk: Buffer, _enc: BufferEncoding, done: (err?: Error | null, data?: Buffer) => void) {
     if (this.#cut) done();
     else done(null, chunk);
@@ -82,7 +88,7 @@ class DeadlineGuard extends Transform {
     if (this.#cut) return;
     this.#cut = true;
     // A blank line first closes any event the cut interrupted.
-    this.push(`\n\n${event}`);
+    if (this.#appendsEvent) this.push(`\n\n${event}`);
     this.push(null);
   }
 }
@@ -91,8 +97,10 @@ const maxDurationEvent = `data: ${JSON.stringify({
   error: { message: 'upstream call exceeded the maximum duration', type: 'gateway_error', code: 'upstream_max_duration' },
 })}\n\n`;
 
-export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs: number }> = async (app, opts) => {
+export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs: number; cutDrainMs?: number }> = async (app, opts) => {
   const { upstream, maxDurationMs } = opts;
+  // After a cut stream's last bytes are written, a client that still hasn't taken them this long is dropped.
+  const cutDrainMs = opts.cutDrainMs ?? 5000;
 
   // Keep the original bytes so the upstream receives exactly what the client sent.
   app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) =>
@@ -103,11 +111,12 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
     // Every way out of the handler ends the request's up-front charges. keep() is last and counts only
     // if nothing above it (used, refund) already did: it is the case of no usage seen.
     const settle = usageSettler(request);
-    const timers: { deadline?: NodeJS.Timeout } = {};
+    const timers: { deadline?: NodeJS.Timeout; drain?: NodeJS.Timeout } = {};
     try {
       return await handleChat(request, reply, settle, timers);
     } finally {
       clearTimeout(timers.deadline);
+      clearTimeout(timers.drain);
       settle.keep();
     }
   });
@@ -116,7 +125,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
     request: FastifyRequest,
     reply: FastifyReply,
     settle: UsageSettler,
-    timers: { deadline?: NodeJS.Timeout },
+    timers: { deadline?: NodeJS.Timeout; drain?: NodeJS.Timeout },
   ) {
     const started = performance.now();
 
@@ -155,7 +164,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
 
     // A client that left before anything was sent upstream cost the provider nothing: everything held goes
     // back. After dispatch the provider may bill, so the estimate stays (the catch blocks below).
-    if (abort.signal.aborted || request.raw.socket.destroyed) {
+    if (reply.raw.destroyed || request.raw.socket.destroyed) {
       settle.refund();
       return reply;
     }
@@ -165,11 +174,18 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
     // answer could outlive the budget hold that covers it.
     let deadlineHit = false;
     let guard: DeadlineGuard | undefined;
+    let relay: PassThrough | undefined;
     timers.deadline = setTimeout(() => {
       deadlineHit = true;
+      // The provider may have worked and no usage will come: the estimate is charged now, not when the
+      // (possibly stuck) response finishes.
+      settle.keep();
       if (guard) {
         guard.cutWith(maxDurationEvent);
-        reply.raw.once('finish', () => abort.abort());
+        abort.abort(); // the upstream goes at once; the relay below lets the response still finish cleanly
+        relay?.end();
+        // A client that doesn't read what is left is dropped rather than kept waiting forever.
+        timers.drain = setTimeout(() => reply.raw.destroy(), cutDrainMs);
       } else {
         abort.abort();
       }
@@ -218,7 +234,20 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
         'server-timing': `gw-pre;dur=${ms(dispatched - started)}`,
       });
       reply.raw.flushHeaders();
-      guard = new DeadlineGuard();
+      guard = new DeadlineGuard(res.statusCode < 300 && /text\/event-stream/i.test(type ?? ''));
+      // The upstream body feeds the response through a relay, so aborting the upstream at the deadline
+      // doesn't tear down the response before the cut has been written.
+      relay = new PassThrough();
+      res.body.pipe(relay);
+      res.body.on('error', (e) => {
+        if (!deadlineHit) relay!.destroy(e);
+      });
+      // A body destroyed without an error event (a reset connection) ends the response the same way.
+      res.body.on('close', () => {
+        if (!upstreamDone && !deadlineHit) {
+          relay!.destroy(Object.assign(new Error('Premature close'), { code: 'ERR_STREAM_PREMATURE_CLOSE' }));
+        }
+      });
       try {
         if (metered && res.statusCode < 300 && forward.tap !== 'none') {
           // Once bytes are flowing a failure keeps the estimate charged: tokens were partly used.
@@ -228,9 +257,9 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
             },
             { stripUsageChunk: forward.tap === 'strip' },
           );
-          await pipeline(res.body, tap, guard, reply.raw);
+          await pipeline(relay, tap, guard, reply.raw);
         } else {
-          await pipeline(res.body, guard, reply.raw);
+          await pipeline(relay, guard, reply.raw);
         }
       } catch (err) {
         // Upstream died or the client left mid-stream; pipeline already destroyed both ends.

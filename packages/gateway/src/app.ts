@@ -22,6 +22,8 @@ export function buildApp(
     budgetClock?: () => number;
     /** Replaces the budget's Postgres ledger. Tests only. */
     budgetPgLedger?: PgLedger;
+    /** How long a client of a deadline-cut stream gets to take the last bytes. Tests only. */
+    cutDrainMs?: number;
   } = {},
 ): FastifyInstance {
   const app = Fastify({
@@ -93,7 +95,7 @@ export function buildApp(
         keyPrefix: config.redisKeyPrefix,
         reservationTtlS: config.budgetReservationTtlS,
         redisTimeoutMs: config.budgetRedisTimeoutMs,
-        epochRefreshS: config.budgetEpochRefreshS,
+        epochRefreshMs: config.budgetEpochRefreshMs,
         outageFailures: config.budgetOutageFailures,
         sweepIntervalS: config.budgetSweepIntervalS,
         ...(extra.budgetClock ? { clock: extra.budgetClock } : {}),
@@ -103,6 +105,10 @@ export function buildApp(
       defaultMaxTokens: config.rateLimitDefaultMaxTokens,
     });
   }
-  app.register(chatRoutes, { upstream, maxDurationMs: config.upstreamMaxDurationMs });
+  app.register(chatRoutes, {
+    upstream,
+    maxDurationMs: config.upstreamMaxDurationMs,
+    ...(extra.cutDrainMs ? { cutDrainMs: extra.cutDrainMs } : {}),
+  });
   return app;
 }

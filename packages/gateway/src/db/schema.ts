@@ -76,7 +76,11 @@ export const budgetReservations = pgTable(
     amountMicros: bigint('amount_micros', { mode: 'number' }).notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
   },
-  (t) => [index('budget_reservations_tenant_period_idx').on(t.tenantId, t.period)],
+  (t) => [
+    index('budget_reservations_tenant_period_idx').on(t.tenantId, t.period),
+    // The sweep of lapsed holds finds them by expiry.
+    index('budget_reservations_expires_idx').on(t.expiresAt),
+  ],
 );
 
 // A single row. Redis balance keys include the epoch; it moves when an instance falls back to
