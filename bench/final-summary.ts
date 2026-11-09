@@ -8,12 +8,14 @@
 // Layout it reads (run-all writes it):
 //   params.json                          the run's timings: rampMeasureS, spikeWindowS
 //   conditions.txt                       quiet.sh's record, quoted
+//   overhead/rep-<n>/{direct,gateway}-{instant,realistic}.json   k6 exports of bench/run-baseline.sh, one folder per repeat
+//   skipped.txt                          optional: scenarios run-all could not run on this base, one per line
 //   cluster/ramp-<n>i-<rep>.json         k6 export of bench/k6/ramp.js against n gateway instances
 //   cluster/steady-<n>i-<rate>-<rep>.json  k6 export of bench/k6/chat.js at one rate (60% of that ceiling)
 //   cluster/spike-<n>i-<rep>.json        k6 export of bench/k6/spike.js
 //   correctness/ratelimit-<run>.json, budget-<run>.json, budget-failover-<run>.json   one per run
 //   superseded.json                      optional: older figures and the key of the figure that replaces each
-//   <scenario>/summary.md                the per-scenario summaries other scripts write; appended verbatim
+//   <scenario>/{summary,latency}.md      the per-scenario summaries other scripts write; appended verbatim
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -177,8 +179,17 @@ export interface Superseded {
   replacedBy: string;
 }
 
+export const PROFILES = ['instant', 'realistic'] as const;
+export type Profile = (typeof PROFILES)[number];
+export interface OverheadRep {
+  direct: Slice;
+  gateway: Slice;
+}
+
 export interface Data {
   params: Params;
+  overhead: Record<Profile, OverheadRep[]>;
+  skipped: string[];
   conditions: string | null;
   ramps: Map<number, K6[]>;
   steady: Map<string, K6[]>;
@@ -227,6 +238,23 @@ export function render(d: Data): string {
     '',
   ];
   if (d.conditions !== null) out.push('## Conditions', '', '```', d.conditions.trimEnd(), '```', '');
+
+  out.push('## Overhead of one gateway', '');
+  if (PROFILES.every((p) => d.overhead[p].length === 0)) out.push('No overhead files.', '');
+  else {
+    out.push(
+      'Source: `overhead/rep-<n>/{direct,gateway}-<profile>.json` (bench/run-baseline.sh). Added latency is the gateway run minus the direct-to-mock run, per repeat. Instant: no mock latency, non-streamed. Realistic: 200 ms to first token, streamed.',
+      '',
+      '| profile | repeats | added p50 | added p95 | added p99 |',
+      '|---|---:|---|---|---|',
+    );
+    for (const p of PROFILES) {
+      const rs = d.overhead[p];
+      if (rs.length === 0) continue;
+      out.push(`| ${p} | ${rs.length} | ${ms(spread(rs.map((r) => r.gateway.p50 - r.direct.p50)))} | ${ms(spread(rs.map((r) => r.gateway.p95 - r.direct.p95)))} | ${ms(spread(rs.map((r) => r.gateway.p99 - r.direct.p99)))} |`);
+    }
+    out.push('');
+  }
 
   // Steady state and ceiling.
   out.push('## Ramp: throughput ceiling and breaking point', '');
@@ -340,6 +368,8 @@ export function render(d: Data): string {
     out.push('');
   }
 
+  if (d.skipped.length > 0) out.push('## Not run on this base', '', ...d.skipped.map((l) => `- ${l}`), '');
+
   for (const a of d.appendices) {
     out.push(`## Scenario: ${a.name}`, '', a.text.trimEnd().replace(/^#/gm, '###'), '');
   }
@@ -366,9 +396,26 @@ export function load(dir: string): Data {
   const jsons = <T>(re: RegExp) => files(corr, re).map((f) => readJson<T>(join(corr, f)));
   const appendices = readdirSync(dir)
     .sort()
-    .filter((n) => statSync(join(dir, n)).isDirectory() && existsSync(join(dir, n, 'summary.md')))
-    .map((n) => ({ name: n, text: readFileSync(join(dir, n, 'summary.md'), 'utf8') }));
+    .filter((n) => statSync(join(dir, n)).isDirectory())
+    .flatMap((n) =>
+      ['summary.md', 'latency.md']
+        .filter((f) => existsSync(join(dir, n, f)))
+        .map((f) => ({ name: f === 'summary.md' ? n : `${n} (${f})`, text: readFileSync(join(dir, n, f), 'utf8') })),
+    );
+  const overhead = { instant: [], realistic: [] } as Record<Profile, OverheadRep[]>;
+  const overheadDir = join(dir, 'overhead');
+  for (const rep of files(overheadDir, /^rep-\d+$/)) {
+    for (const p of PROFILES) {
+      const direct = join(overheadDir, rep, `direct-${p}.json`);
+      const gateway = join(overheadDir, rep, `gateway-${p}.json`);
+      if (existsSync(direct) && existsSync(gateway)) {
+        overhead[p].push({ direct: slice(readJson<K6>(direct), 'phase:measure'), gateway: slice(readJson<K6>(gateway), 'phase:measure') });
+      }
+    }
+  }
   return {
+    overhead,
+    skipped: existsSync(join(dir, 'skipped.txt')) ? readFileSync(join(dir, 'skipped.txt'), 'utf8').split('\n').filter((l) => l !== '') : [],
     params: readJson<Params>(join(dir, 'params.json')),
     conditions: existsSync(join(dir, 'conditions.txt')) ? readFileSync(join(dir, 'conditions.txt'), 'utf8') : null,
     ramps: groupBy(cluster, /^ramp-(\d+)i-\d+\.json$/, (m) => Number(m[1])),

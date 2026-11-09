@@ -58,6 +58,13 @@ function fixture(): string {
     w(`correctness/budget-failover-${run}.json`, { rounds: 10, requestsPerRound: 50, admitted: 210, ledgerRows: 210, roundsOverCap: 0, maxOvershootMicros: 0 });
   }
   w('logging/summary.md', '# Request logging\n\n| a |\n');
+  w('skipped.txt', 'frameworks: bench/frameworks is not on this base\n');
+  for (const rep of [1, 2]) {
+    mkdirSync(join(dir, `overhead/rep-${rep}`), { recursive: true });
+    for (const [name, p50, p95, p99] of [['direct-instant', 1, 2, 3], ['gateway-instant', 1.5 * rep + 1, 2.5 * rep + 2, 4 * rep + 3]] as const) {
+      w(`overhead/rep-${rep}/${name}.json`, k6({ 'phase:measure': { n: 1000, p50, p95, p99 } }));
+    }
+  }
   return dir;
 }
 
@@ -72,6 +79,9 @@ describe('final summary', () => {
     expect(first).toContain('| 3 | 3 | 3000 (3000 to 3000) | p95 over 2x the first step | 5000 (5000 to 5000) |');
     expect(first).toContain('| 3000 | 3000 (3000 to 3000) | 0 | 0 | 1.9 ms (0.9 to 2.8) | 3.8 ms (1.9 to 5.7) |');
     expect(first).toContain('| 3 | 2400 | 3 | 432000 | 3 | 2.5 ms (1.3 to 3.8) | 5.0 ms (2.5 to 7.5) | 7.5 ms (3.8 to 11.3) |');
+    // Added latency is gateway minus direct per repeat: p50 1.5 and 3, p95 2.5 and 5, p99 4 and 8.
+    expect(first).toContain('| instant | 2 | 2.3 ms (1.5 to 3.0) | 3.8 ms (2.5 to 5.0) | 6.0 ms (4.0 to 8.0) |');
+    expect(first).toContain('- frameworks: bench/frameworks is not on this base');
     // The appended per-scenario summary has its headings demoted under the scenario heading.
     expect(first).toContain('## Scenario: logging');
     expect(first).toContain('### Request logging');
