@@ -31,6 +31,7 @@ vitest config, compose file, `.env.example`, and a working mock provider at
 | `packages/mock-provider/src/server.test.ts` | **new** |
 | `packages/gateway/package.json` | **new** (scaffold). Deps: fastify, undici, zod |
 | `packages/gateway/src/config.ts` | **new**. Env parsed with zod; blank strings treated as unset |
+| `packages/gateway/src/errors.ts` | **new**. `errorBody`, the one OpenAI-shaped error constructor shared by `app.ts` and the chat route |
 | `packages/gateway/src/upstream.ts` | **new**. One undici `Pool` per upstream origin, size `UPSTREAM_CONNECTIONS` |
 | `packages/gateway/src/app.ts` | **new**. `buildApp(config)` returns a Fastify instance; registers the chat route |
 | `packages/gateway/src/routes/chat.ts` | **new**. `POST /v1/chat/completions` passthrough, streamed and non-streamed |
