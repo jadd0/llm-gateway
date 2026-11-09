@@ -507,28 +507,44 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     expect(await tokensLeft(s.keyId)).toBe(TPM - 21); // the limiter keeps its estimate as well
   });
 
-  it('at the deadline the upstream is aborted at once, the estimate is settled, and a client that stops reading is dropped', async () => {
+  // A client that takes the headers and never reads, against a stream that never stops writing.
+  const stuckReader = async (cutDrainMs: number) => {
     const closed = new Promise<void>((r) => (floodClosed = r));
-    const short = capped({ UPSTREAM_MAX_DURATION_MS: '1000' }, { cutDrainMs: 300 });
+    const short = capped({ UPSTREAM_MAX_DURATION_MS: '1000' }, { cutDrainMs });
     await short.listen({ port: 0, host: '127.0.0.1' });
+    const sockets: Socket[] = [];
+    short.server.on('connection', (sk: Socket) => sockets.push(sk));
+    const s = await fresh(1_000_000);
+    const { port } = short.server.address() as AddressInfo;
+    const req = http.request(
+      { port, host: '127.0.0.1', method: 'POST', path: '/v1/chat/completions', headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` } },
+      (res) => {
+        res.pause();
+        res.on('error', () => {});
+      },
+    );
+    req.on('error', () => {});
+    req.end(JSON.stringify(body('mock-flood', { stream: true })));
+    return { short, sockets, s, closed, req };
+  };
+
+  it('at the deadline the upstream is aborted at once and the estimate settled, however slowly the client reads', async () => {
+    // The client never reads and is not dropped for a minute: whatever happens at the deadline happens on its own.
+    const { short, s, closed, req } = await stuckReader(60_000);
     try {
-      const s = await fresh(1_000_000);
-      const sockets: Socket[] = [];
-      short.server.on('connection', (sk: Socket) => sockets.push(sk));
-      const { port } = short.server.address() as AddressInfo;
-      const req = http.request(
-        { port, host: '127.0.0.1', method: 'POST', path: '/v1/chat/completions', headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` } },
-        (res) => {
-          res.pause(); // takes the headers and then never reads
-          res.on('error', () => {});
-        },
-      );
-      req.on('error', () => {});
-      req.end(JSON.stringify(body('mock-flood', { stream: true })));
       await closed; // the gateway closed its connection to the upstream at the deadline
-      await settledAt(s.tenantId, WORST); // and settled the estimate then, with the response still stuck
+      await settledAt(s.tenantId, WORST); // and charged the estimate then, with the response still stuck
       expect(await ledgerRows(s.tenantId)).toEqual([{ cost: WORST, estimated: true, prompt: 1, completion: 20 }]);
-      // The client that wouldn't read has its connection destroyed by the gateway.
+    } finally {
+      req.destroy();
+      short.server.closeAllConnections();
+      await short.close();
+    }
+  });
+
+  it('a client that does not take what is left after the cut is dropped', async () => {
+    const { short, sockets } = await stuckReader(300);
+    try {
       await until(async () => sockets.length > 0 && sockets.every((sk) => sk.destroyed), (d) => d);
     } finally {
       await short.close();
