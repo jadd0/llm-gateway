@@ -96,11 +96,13 @@ export function createLimiter(opts: LimiterOptions): Limiter {
 
   return {
     async take(keyId, rpm, tpm, cost) {
+      const [kReq, kTok] = keys(keyId);
+      const args: Array<string | number> = [rpm, tpm, cost];
+      if (clock) args.push(clock());
+      let call: Promise<number[]> | undefined;
       try {
-        const [kReq, kTok] = keys(keyId);
-        const args: Array<string | number> = [rpm, tpm, cost];
-        if (clock) args.push(clock());
-        const r = await withTimeout(cmd.rlTake(kReq, kTok, ...args));
+        call = cmd.rlTake(kReq, kTok, ...args);
+        const r = await withTimeout(call);
         ok();
         const [allowed, remReq, remTok, wait, resetReq, resetTok, short] = r as [
           number, number, number, number, number, number, number,
@@ -113,7 +115,26 @@ export function createLimiter(opts: LimiterOptions): Limiter {
         return { status: 'denied', buckets, retryAfterMs: wait, limited: short === 2 ? 'tokens' : 'requests' };
       } catch (err) {
         failed(err);
+        // The request is served unlimited, but Redis may still run the script. If it does and admits the
+        // request, the charge is taken for a request that was never counted against the key: hand it back.
+        if (err instanceof RedisTimeout && call !== undefined) {
+          call.then(
+            (late) => {
+              if (late[0] === 1) void refundBoth();
+            },
+            () => {}, // the command failed, so nothing was charged
+          );
+        }
         return { status: 'skipped' };
+      }
+
+      async function refundBoth(): Promise<void> {
+        try {
+          const extra: Array<string | number> = clock ? [clock()] : [];
+          await Promise.all([cmd.rlAdjust(kReq, rpm, 1, ...extra), cmd.rlAdjust(kTok, tpm, cost, ...extra)]);
+        } catch (err) {
+          failed(err);
+        }
       }
     },
 

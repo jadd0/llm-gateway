@@ -15,9 +15,10 @@ export interface Tenant {
   tpmLimit: number | null;
 }
 
+/** A limit that is left out is left as it is; null sets the key back to the gateway default. */
 export interface Limits {
-  rpm: number | null;
-  tpm: number | null;
+  rpm?: number | null | undefined;
+  tpm?: number | null | undefined;
 }
 
 export interface KeyStore {
@@ -34,7 +35,10 @@ export interface KeyStore {
    * gateway sees them. `updated` is false when no active key had this hash; `cached` is false when
    * Redis was unreachable, in which case a cached copy keeps the old limits until its TTL runs out.
    */
-  setLimits(keyHash: string, limits: Limits): Promise<{ updated: boolean; cached: boolean }>;
+  setLimits(
+    keyHash: string,
+    limits: Limits,
+  ): Promise<{ updated: boolean; cached: boolean; rpm: number | null; tpm: number | null }>;
 }
 
 export interface KeyStoreOptions {
@@ -177,14 +181,19 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
     },
 
     async setLimits(hash, limits) {
-      // Postgres first, and the cache is rewritten from the row just written, so a concurrent fill
-      // can only ever carry the new limits or lose to them.
+      if (limits.rpm === undefined && limits.tpm === undefined) throw new Error('no limits given');
+      // Postgres first, and only the named columns are written, so two changes to different limits
+      // cannot undo each other. The cache is rewritten from the row, so a concurrent fill can only
+      // ever carry the new limits or lose to them.
       const updated = await db
         .update(apiKeys)
-        .set({ rpmLimit: limits.rpm, tpmLimit: limits.tpm })
+        .set({
+          ...(limits.rpm !== undefined ? { rpmLimit: limits.rpm } : {}),
+          ...(limits.tpm !== undefined ? { tpmLimit: limits.tpm } : {}),
+        })
         .where(and(eq(apiKeys.keyHash, hash), isNull(apiKeys.revokedAt)))
-        .returning({ id: apiKeys.id });
-      if (updated.length === 0) return { updated: false, cached: false };
+        .returning({ id: apiKeys.id, rpm: apiKeys.rpmLimit, tpm: apiKeys.tpmLimit });
+      if (updated.length === 0) return { updated: false, cached: false, rpm: null, tpm: null };
       let cached = false;
       if (redis !== null) {
         const tenant = await fromPostgres(hash);
@@ -203,7 +212,7 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
           }
         }
       }
-      return { updated: true, cached };
+      return { updated: true, cached, rpm: updated[0]!.rpm, tpm: updated[0]!.tpm };
     },
   };
 }

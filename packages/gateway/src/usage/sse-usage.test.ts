@@ -70,6 +70,81 @@ describe('SseUsageTap', () => {
   });
 });
 
+describe('SseUsageTap with stripping', () => {
+  const content = event({ choices: [{ delta: { content: 'a' } }], usage: null });
+  const usageOnly = event({ choices: [], usage });
+  const done = 'data: [DONE]\n\n';
+
+  async function strip(chunks: Buffer[]) {
+    let got: Usage | undefined;
+    let called = 0;
+    const out: Buffer[] = [];
+    const tap = new SseUsageTap((u) => {
+      got = u;
+      called++;
+    }, { stripUsageChunk: true });
+    tap.on('data', (c: Buffer) => out.push(c));
+    await pipeline(Readable.from(chunks), tap);
+    return { got, called, out: Buffer.concat(out).toString() };
+  }
+
+  it('drops the usage-only event, keeps every other byte, and still reads the usage', async () => {
+    const all = Buffer.from(content + content + usageOnly + done);
+    const { got, called, out } = await strip([all]);
+    expect(out).toBe(content + content + done);
+    expect(got?.totalTokens).toBe(33);
+    expect(called).toBe(1);
+  });
+
+  it('does the same however the bytes are split', async () => {
+    const all = Buffer.from(content + usageOnly + done);
+    for (const size of [1, 2, 5, 17, 64, all.length]) {
+      const chunks: Buffer[] = [];
+      for (let i = 0; i < all.length; i += size) chunks.push(all.subarray(i, i + size));
+      const { got, out } = await strip(chunks);
+      expect(out).toBe(content + done);
+      expect(got?.totalTokens).toBe(33);
+    }
+  });
+
+  it('keeps a usage chunk that also carries choices, and a stream without any usage', async () => {
+    const withChoice = event({ choices: [{ delta: {}, finish_reason: 'stop' }], usage });
+    expect((await strip([Buffer.from(withChoice + done)])).out).toBe(withChoice + done);
+    const none = await strip([Buffer.from(content + done)]);
+    expect(none.out).toBe(content + done);
+    expect(none.got).toBeUndefined();
+    expect(none.called).toBe(1);
+  });
+
+  it('holds back only the event in progress', async () => {
+    const tap = new SseUsageTap(() => {}, { stripUsageChunk: true });
+    const seen: string[] = [];
+    tap.on('data', (c: Buffer) => seen.push(c.toString()));
+    tap.write(Buffer.from(content));
+    await new Promise((r) => setImmediate(r));
+    expect(seen.join('')).toBe(content); // a complete event is out at once
+    tap.write(Buffer.from(content.slice(0, 20)));
+    await new Promise((r) => setImmediate(r));
+    expect(seen.join('')).toBe(content); // half an event waits for its other half
+    tap.write(Buffer.from(content.slice(20)));
+    await new Promise((r) => setImmediate(r));
+    expect(seen.join('')).toBe(content + content);
+    tap.end();
+  });
+});
+
+describe('multi-byte characters', () => {
+  it('a character split across chunks inside the usage event still settles', async () => {
+    const ev = event({ model: 'é€😀', choices: [], usage });
+    const all = Buffer.from(ev + 'data: [DONE]\n\n');
+    for (let cut = 1; cut < all.length; cut++) {
+      const { got, out } = await run([all.subarray(0, cut), all.subarray(cut)]);
+      expect(got.usage?.totalTokens).toBe(33);
+      expect(out.equals(all)).toBe(true);
+    }
+  });
+});
+
 describe('usage parsing', () => {
   it('reads usage from a non-streamed body', () => {
     expect(usageFromBody(Buffer.from(JSON.stringify({ usage })))?.totalTokens).toBe(33);

@@ -30,3 +30,27 @@ export function estimateTokens(body: unknown, defaultMaxTokens: number): number 
   const output = [b.max_tokens, b.max_completion_tokens].find(isPositiveInt) ?? defaultMaxTokens;
   return Math.ceil(promptChars(b.messages) / CHARS_PER_TOKEN) + output;
 }
+
+export interface LimitEstimate {
+  /** Tokens to charge the key's token bucket. */
+  cost: number;
+  /** True when the request can never fit in a whole minute of the key's tokens. */
+  tooLarge: boolean;
+}
+
+/**
+ * The estimate as the rate limiter charges it, for a key allowed `tpm` tokens a minute. A caller who
+ * names max_tokens is held to it: prompt plus max_tokens above `tpm` can never be admitted. A caller who
+ * names none gets the default output allowance, trimmed to what the key could ever hold, so a small
+ * request is not refused because of a guess the caller never made.
+ */
+export function estimateForLimit(body: unknown, defaultMaxTokens: number, tpm: number): LimitEstimate {
+  const b = (body ?? {}) as { messages?: unknown; max_tokens?: unknown; max_completion_tokens?: unknown };
+  const prompt = Math.ceil(promptChars(b.messages) / CHARS_PER_TOKEN);
+  const explicit = [b.max_tokens, b.max_completion_tokens].find(isPositiveInt);
+  if (explicit !== undefined) {
+    const cost = prompt + explicit;
+    return { cost, tooLarge: cost > tpm };
+  }
+  return { cost: prompt + Math.min(defaultMaxTokens, Math.max(0, tpm - prompt)), tooLarge: prompt > tpm };
+}

@@ -1,6 +1,6 @@
 import { parseArgs } from 'node:util';
 import { asc, eq, sql } from 'drizzle-orm';
-import { loadConfig, loadDbConfig, loadPepperConfig } from '../config.ts';
+import { loadCacheConfig, loadConfig, loadDbConfig, loadPepperConfig } from '../config.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { apiKeys, tenants } from '../db/schema.ts';
 import { generateKey, hashKey, keyPrefix, KEY_PREFIX_LENGTH } from '../auth/keys.ts';
@@ -109,17 +109,10 @@ export async function setLimits(
 ) {
   if (limits.rpm === undefined && limits.tpm === undefined) throw new CliError('give --rpm and/or --tpm');
   const target = await resolveKey(db, prefixArg, true);
-  const [current] = await db
-    .select({ rpm: apiKeys.rpmLimit, tpm: apiKeys.tpmLimit })
-    .from(apiKeys)
-    .where(eq(apiKeys.keyHash, target.keyHash));
-  const next = {
-    rpm: limits.rpm === undefined ? current!.rpm : limits.rpm,
-    tpm: limits.tpm === undefined ? current!.tpm : limits.tpm,
-  };
-  const result = await keyStore.setLimits(target.keyHash, next);
+  // Only the limits named are written; the result carries the key's limits as stored.
+  const result = await keyStore.setLimits(target.keyHash, limits);
   if (!result.updated) throw new CliError(`key "${target.prefix}" is revoked`);
-  return { prefix: target.prefix, ...next, cached: result.cached };
+  return { prefix: target.prefix, rpm: result.rpm, tpm: result.tpm, cached: result.cached };
 }
 
 const USAGE = `usage:
@@ -187,7 +180,8 @@ async function main(argv: string[]) {
         ...(values.rpm !== undefined ? { rpm: parseLimit('rpm', values.rpm) } : {}),
         ...(values.tpm !== undefined ? { tpm: parseLimit('tpm', values.tpm) } : {}),
       };
-      const config = loadConfig();
+      // Needs no pepper and no Redis: the database write is the change, the cache is only told when it can be.
+      const config = loadCacheConfig();
       const redis = config.authCache === 'redis' && config.redisUrl ? createRedis(config.redisUrl) : null;
       try {
         const r = await withDb(config.databaseUrl, (db) =>

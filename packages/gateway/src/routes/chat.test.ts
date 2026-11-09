@@ -277,7 +277,7 @@ describe('usage reconcile', { timeout: 30_000 }, () => {
   const TPM = 6000;
   const ESTIMATE = 1 + 1024; // 'hi' is one token, plus the default max_tokens
   const seen: Array<{ raw: string; json: any }> = [];
-  let mode: 'usage' | 'no-usage' | 'slow' = 'usage';
+  let mode: 'usage' | 'no-usage' | 'slow' | 'status500' | 'status429' | 'reset' | 'midfail' = 'usage';
   let up: Server;
   let app3: FastifyInstance;
   let gw3 = '';
@@ -294,6 +294,12 @@ describe('usage reconcile', { timeout: 30_000 }, () => {
         const raw = Buffer.concat(parts).toString('utf8');
         const json = JSON.parse(raw);
         seen.push({ raw, json });
+        if (mode === 'reset') return void req.socket.destroy();
+        if (mode === 'status500' || mode === 'status429') {
+          res.writeHead(mode === 'status500' ? 500 : 429, { 'content-type': 'application/json' });
+          res.end('{"error":{"message":"no","type":"x"}}');
+          return;
+        }
         if (json.stream !== true) {
           res.writeHead(200, { 'content-type': 'application/json' });
           res.end(JSON.stringify({ id: 'x', choices: [], ...(mode === 'usage' ? { usage } : {}) }));
@@ -302,6 +308,7 @@ describe('usage reconcile', { timeout: 30_000 }, () => {
         res.writeHead(200, { 'content-type': 'text/event-stream' });
         res.write('data: {"id":"x","choices":[{"delta":{"content":"a"}}],"usage":null}\n\n');
         if (mode === 'slow') return; // never finishes; the client leaves
+        if (mode === 'midfail') return void setTimeout(() => res.destroy(), 20); // dies after the first chunk
         if (mode === 'usage') res.write(`data: ${JSON.stringify({ id: 'x', choices: [], usage })}\n\n`);
         res.end('data: [DONE]\n\n');
       });
@@ -389,6 +396,84 @@ describe('usage reconcile', { timeout: 30_000 }, () => {
     ctrl.abort();
     await new Promise((r) => setTimeout(r, 300));
     expect(await bucketTokens(s.keyId)).toBe(TPM - ESTIMATE); // clock pinned: exactly the estimate
+  });
+
+  // Settled buckets that end up full are deleted, so a missing key means "whole".
+  const tokensOrFull = async (keyId: string) => {
+    const v = await rc.hget(`${base.redisKeyPrefix}rl:{${keyId}}:tok`, 'tokens');
+    return v === null ? TPM : Number(v);
+  };
+  const quiet = () => new Promise((r) => setTimeout(r, 300));
+
+  it('an upstream 500 or 429 gives the whole estimate back, streamed and not', async () => {
+    for (const m of ['status500', 'status429'] as const) {
+      for (const stream of [false, true]) {
+        const s = await freshKey();
+        mode = m;
+        const res = await send(s.key, payload({ stream }));
+        expect(res.statusCode).toBe(m === 'status500' ? 500 : 429);
+        expect(res.headers['x-ratelimit-remaining-tokens']).toBe(String(TPM - ESTIMATE)); // it was charged first
+        await vi.waitFor(async () => expect(await tokensOrFull(s.keyId)).toBe(TPM));
+      }
+    }
+  });
+
+  it('an upstream that cannot be reached (502) gives the estimate back', async () => {
+    const s = await freshKey();
+    mode = 'reset';
+    const res = await send(s.key, payload());
+    expect(res.statusCode).toBe(502);
+    await vi.waitFor(async () => expect(await tokensOrFull(s.keyId)).toBe(TPM));
+  });
+
+  it('a stream that fails after bytes were sent keeps the estimate', async () => {
+    const s = await freshKey();
+    mode = 'midfail';
+    await send(s.key, payload({ stream: true })).catch(() => null);
+    await quiet();
+    expect(await tokensOrFull(s.keyId)).toBe(TPM - ESTIMATE);
+  });
+
+  it('a client that did not ask for usage does not get the usage-only chunk; one that did keeps it', async () => {
+    const s = await freshKey();
+    const plain = await send(s.key, payload({ stream: true }));
+    expect(plain.body).toContain('data: [DONE]');
+    expect(plain.body).toContain('"content":"a"');
+    expect(plain.body).not.toContain('total_tokens');
+    await vi.waitFor(async () => expect(await bucketTokens(s.keyId)).toBe(TPM - 3000)); // still reconciled
+
+    const asked = await freshKey();
+    const body = payload({ stream: true, stream_options: { include_usage: true } });
+    const kept = await send(asked.key, body);
+    expect(kept.body).toContain('"total_tokens":3000');
+    expect(seen.at(-1)!.raw).toBe(body); // forwarded untouched
+    await vi.waitFor(async () => expect(await bucketTokens(asked.keyId)).toBe(TPM - 3000));
+
+    const off = await freshKey();
+    const denied = await send(off.key, payload({ stream: true, stream_options: { include_usage: false } }));
+    expect(denied.body).not.toContain('total_tokens');
+    expect(seen.at(-1)!.json.stream_options).toEqual({ include_usage: true });
+  });
+
+  it('adds include_usage without a JSON round trip: a large integer survives byte for byte', async () => {
+    const s = await freshKey();
+    const body = '{"model":"m","seed":12345678901234567890,"messages":[{"role":"user","content":"hi"}],"stream":true}';
+    const res = await send(s.key, body);
+    expect(res.statusCode).toBe(200);
+    expect(seen.at(-1)!.raw).toBe('{"stream_options":{"include_usage":true},' + body.slice(1));
+    expect(seen.at(-1)!.raw).toContain('"seed":12345678901234567890');
+  });
+
+  it('a stream_options that is not an object is forwarded unchanged and not reconciled', async () => {
+    for (const odd of ['"yes"', 'null', '[1]', '7']) {
+      const s = await freshKey();
+      const body = `{"model":"m","stream":true,"stream_options":${odd},"messages":[{"role":"user","content":"hi"}]}`;
+      const res = await send(s.key, body);
+      expect(res.statusCode).toBe(200);
+      expect(seen.at(-1)!.raw).toBe(body);
+      await quiet();
+      expect(await bucketTokens(s.keyId)).toBe(TPM - ESTIMATE); // the estimate stays
+    }
   });
 });
 

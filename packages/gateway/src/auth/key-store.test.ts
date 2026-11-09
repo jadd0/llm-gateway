@@ -1,3 +1,5 @@
+import { eq } from 'drizzle-orm';
+import { apiKeys } from '../db/schema.ts';
 import type { Redis } from 'ioredis';
 import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -72,7 +74,7 @@ describe('key store', () => {
     const store = storeFor(redis);
     expect(await store.lookup(s.hash)).toEqual(caller(s, { rpm: 100, tpm: 50_000 }));
     expect(await redis.get(`${config.redisKeyPrefix}apikey:${s.hash}`)).toContain('"rpmLimit":100');
-    expect(await store.setLimits(s.hash, { rpm: 7, tpm: null })).toEqual({ updated: true, cached: true });
+    expect(await store.setLimits(s.hash, { rpm: 7, tpm: null })).toMatchObject({ updated: true, cached: true, rpm: 7, tpm: null });
     queries = 0;
     expect(await store.lookup(s.hash)).toEqual(caller(s, { rpm: 7 }));
     expect(queries).toBe(0); // served from the overwritten cache entry, not Postgres
@@ -80,18 +82,30 @@ describe('key store', () => {
     expect(await storeFor(redis).lookup(s.hash)).toEqual(caller(s, { rpm: 7 }));
   });
 
+  it('two concurrent set-limits on different fields both stick', async () => {
+    const s = await seedKey(handle.db, config, { rpm: 10, tpm: 20 });
+    tenantIds.push(s.tenantId);
+    const store = storeFor(redis);
+    for (let round = 0; round < 20; round++) {
+      await Promise.all([store.setLimits(s.hash, { rpm: 100 + round }), store.setLimits(s.hash, { tpm: 200 + round })]);
+      const [row] = await handle.db.select().from(apiKeys).where(eq(apiKeys.keyHash, s.hash));
+      expect(row).toMatchObject({ rpmLimit: 100 + round, tpmLimit: 200 + round });
+    }
+    await expect(store.setLimits(s.hash, {})).rejects.toThrow('no limits given');
+  });
+
   it('setLimits never overwrites a tombstone and ignores revoked keys', async () => {
     const s = await seed();
     const store = storeFor(redis);
     expect(await store.lookup(s.hash)).not.toBeNull();
     await store.revoke(s.hash);
-    expect(await store.setLimits(s.hash, { rpm: 1, tpm: 1 })).toEqual({ updated: false, cached: false });
+    expect(await store.setLimits(s.hash, { rpm: 1, tpm: 1 })).toMatchObject({ updated: false, cached: false });
     expect(await store.lookup(s.hash)).toBeNull();
     // The tombstone alone, with an active row (a revoke that lost the race to a limit change): it wins.
     const t = await seed();
     const key = `${config.redisKeyPrefix}apikey:${t.hash}`;
     await redis.set(key, 'revoked', 'EX', 60);
-    expect(await store.setLimits(t.hash, { rpm: 1, tpm: 1 })).toEqual({ updated: true, cached: true });
+    expect(await store.setLimits(t.hash, { rpm: 1, tpm: 1 })).toMatchObject({ updated: true, cached: true });
     expect(await redis.get(key)).toBe('revoked');
   });
 

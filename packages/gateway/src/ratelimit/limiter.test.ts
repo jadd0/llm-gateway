@@ -224,6 +224,36 @@ describe('fail open', { timeout: 30_000 }, () => {
     }
   });
 
+  it('a take that times out but still runs in Redis is handed back, in both buckets', async () => {
+    const limiter = newLimiter({ timeoutMs: 20 });
+    const keyId = id();
+    const real = (redis as unknown as { rlTake: (...a: unknown[]) => Promise<unknown> }).rlTake.bind(redis);
+    let ran: Promise<unknown> = Promise.resolve();
+    // Redis answers after 150 ms: the caller has long since given up, and the script then charges.
+    (redis as unknown as { rlTake: unknown }).rlTake = (...a: unknown[]) => {
+      ran = new Promise((r) => setTimeout(r, 150)).then(() => real(...a));
+      return ran;
+    };
+    try {
+      expect((await limiter.take(keyId, 10, 1000, 1000)).status).toBe('skipped');
+    } finally {
+      (redis as unknown as { rlTake: unknown }).rlTake = real;
+    }
+    await ran; // the script has now run and charged: the request bucket holds 9, the token bucket 0
+    // Both buckets are whole again once the late charge is handed back, and a full bucket expires. The
+    // keys cannot expire any other way inside this wait (the request bucket's expiry is 6 s away).
+    await vi.waitFor(
+      async () => expect(await redis.exists(`${prefix}rl:{${keyId}}:req`, `${prefix}rl:{${keyId}}:tok`)).toBe(0),
+      { timeout: 5000 },
+    );
+    // All ten requests and all 1000 tokens are available again, and not an eleventh.
+    const fast = newLimiter();
+    const results = [];
+    for (let i = 0; i < 10; i++) results.push((await fast.take(keyId, 10, 1000, 100)).status);
+    expect(results).toEqual(Array(10).fill('allowed'));
+    expect((await fast.take(keyId, 10, 1000, 100)).status).toBe('denied');
+  });
+
   it('an unreachable Redis serves the request and a client still connecting is not logged as down', async () => {
     const warns: object[] = [];
     const dead = createRedis('redis://127.0.0.1:1', { startupGraceMs: 0 });

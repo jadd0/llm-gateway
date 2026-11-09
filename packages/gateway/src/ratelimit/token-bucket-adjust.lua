@@ -1,6 +1,7 @@
--- Corrects the token bucket after the real usage is known.
--- KEYS[1] = token bucket. ARGV[1] = tokens per minute, ARGV[2] = delta (estimate minus actual:
--- positive refunds, negative debits), ARGV[3] = optional clock override in ms (tests only).
+-- Moves one bucket by a delta: corrects the token bucket once the real usage is known, and hands back
+-- a charge taken by a take whose caller had already given up.
+-- KEYS[1] = the bucket. ARGV[1] = its per-minute limit (its capacity), ARGV[2] = delta (positive
+-- refunds, negative debits), ARGV[3] = optional clock override in ms (tests only).
 local tpm = tonumber(ARGV[1])
 local delta = tonumber(ARGV[2])
 

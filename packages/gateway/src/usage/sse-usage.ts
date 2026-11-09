@@ -1,3 +1,4 @@
+import { StringDecoder } from 'node:string_decoder';
 import { Transform, type TransformCallback } from 'node:stream';
 
 export interface Usage {
@@ -32,32 +33,60 @@ export function usageFromBody(body: Buffer): Usage | undefined {
   }
 }
 
-// A line longer than this is not an SSE event the gateway needs to read; the carry-over is dropped
-// rather than grown without bound.
+// A line (or, when stripping, an event) longer than this is not something the gateway needs to read;
+// it is forwarded or skipped rather than held without bound.
 const MAX_LINE = 1024 * 1024;
 
+const EMPTY = Buffer.alloc(0);
+
+// Index just past the first blank line (the end of an SSE event), or -1 while the event is incomplete.
+function eventEnd(buf: Buffer): number {
+  const lf = buf.indexOf('\n\n');
+  const crlf = buf.indexOf('\r\n\r\n');
+  const a = lf < 0 ? Infinity : lf + 2;
+  const b = crlf < 0 ? Infinity : crlf + 4;
+  const end = Math.min(a, b);
+  return end === Infinity ? -1 : end;
+}
+
+export interface SseUsageTapOptions {
+  /**
+   * Drops the usage-only event (`choices: []` plus `usage`) from what is forwarded, for a client that
+   * did not ask for usage. Only the event in progress is held back; every other event is forwarded as
+   * soon as it is complete.
+   */
+  stripUsageChunk?: boolean;
+}
+
 /**
- * Pass-through tap on an SSE response. Every chunk is forwarded the moment it arrives, byte for byte;
- * the tap only reads complete `data: {` lines that carry a `usage` object. `onEnd` runs once when the
- * stream finishes, with the last usage seen (undefined when none came). A stream that is destroyed
- * early (client left, upstream died) never reaches it.
+ * Pass-through tap on an SSE response. Without stripping, every chunk is forwarded the moment it
+ * arrives, byte for byte. The tap reads complete `data: {` lines that carry a `usage` object. `onEnd`
+ * runs once when the stream finishes, with the last usage seen (undefined when none came). A stream
+ * that is destroyed early (client left, upstream died) never reaches it.
  */
 export class SseUsageTap extends Transform {
+  private readonly decoder = new StringDecoder('utf8');
   private carry = '';
   private skipping = false;
   private last: Usage | undefined;
-
+  private strip: boolean;
+  private pending: Buffer = EMPTY;
   private readonly onEnd: (usage: Usage | undefined) => void;
 
-  constructor(onEnd: (usage: Usage | undefined) => void) {
+  constructor(onEnd: (usage: Usage | undefined) => void, opts: SseUsageTapOptions = {}) {
     super();
     this.onEnd = onEnd;
+    this.strip = opts.stripUsageChunk === true;
   }
 
   override _transform(chunk: Buffer, _enc: BufferEncoding, cb: TransformCallback): void {
-    this.push(chunk);
     try {
-      this.scan(chunk.toString('utf8'));
+      if (this.strip) this.stripChunk(chunk);
+      else {
+        this.push(chunk);
+        // A decoder keeps a multi-byte character split across chunks together.
+        this.scan(this.decoder.write(chunk));
+      }
     } catch {
       // Reading usage must never break the stream.
     }
@@ -66,13 +95,49 @@ export class SseUsageTap extends Transform {
 
   override _flush(cb: TransformCallback): void {
     try {
-      if (this.carry) this.line(this.carry);
+      if (this.pending.length > 0) {
+        if (!this.inspect(this.pending.toString('utf8'))) this.push(this.pending);
+        this.pending = EMPTY;
+      }
+      if (!this.strip) {
+        this.carry += this.decoder.end();
+        if (this.carry) this.line(this.carry);
+      }
       this.carry = '';
       this.onEnd(this.last);
     } catch {
       // Same: the bytes already went out.
     }
     cb();
+  }
+
+  private stripChunk(chunk: Buffer): void {
+    let buf = this.pending.length > 0 ? Buffer.concat([this.pending, chunk]) : chunk;
+    for (let end = eventEnd(buf); end >= 0; end = eventEnd(buf)) {
+      const event = buf.subarray(0, end);
+      buf = buf.subarray(end);
+      if (!this.inspect(event.toString('utf8'))) this.push(event);
+    }
+    if (buf.length > MAX_LINE) {
+      // Not an event worth holding: forward it and stop stripping.
+      this.push(buf);
+      this.pending = EMPTY;
+      this.strip = false;
+      return;
+    }
+    this.pending = buf.length > 0 ? Buffer.from(buf) : EMPTY;
+  }
+
+  // Reads the usage in a complete event. True when the event is the usage-only chunk.
+  private inspect(text: string): boolean {
+    let usageOnly = false;
+    for (const l of text.split(/\r?\n/)) {
+      const parsed = this.parseLine(l);
+      if (parsed === undefined) continue;
+      this.last = parsed.usage;
+      if (parsed.emptyChoices) usageOnly = true;
+    }
+    return usageOnly;
   }
 
   private scan(text: string): void {
@@ -92,12 +157,19 @@ export class SseUsageTap extends Transform {
   }
 
   private line(l: string): void {
-    if (!l.startsWith('data: {') || !HAS_USAGE.test(l)) return;
+    const parsed = this.parseLine(l);
+    if (parsed) this.last = parsed.usage;
+  }
+
+  private parseLine(l: string): { usage: Usage; emptyChoices: boolean } | undefined {
+    if (!l.startsWith('data: {') || !HAS_USAGE.test(l)) return undefined;
     try {
-      const usage = parseUsage((JSON.parse(l.slice(6)) as { usage?: unknown }).usage);
-      if (usage) this.last = usage;
+      const obj = JSON.parse(l.slice(6)) as { usage?: unknown; choices?: unknown };
+      const usage = parseUsage(obj.usage);
+      if (!usage) return undefined;
+      return { usage, emptyChoices: Array.isArray(obj.choices) && obj.choices.length === 0 };
     } catch {
-      // Not JSON we understand; ignore the line.
+      return undefined; // not JSON we understand
     }
   }
 }

@@ -98,6 +98,15 @@ describe('keys CLI', { timeout: 30_000 }, () => {
     expect(await store.lookup(hash)).toMatchObject({ rpmLimit: 5, tpmLimit: null });
   });
 
+  it('set-limits needs neither the pepper nor Redis for its database write', async () => {
+    const tenant = await newTenant();
+    const key = (await cli('create-key', tenant, '--rpm', '9')).stdout.trim();
+    const out = await cliWith({ API_KEY_PEPPER: '', REDIS_URL: '' }, 'set-limits', key.slice(0, 12), '--tpm', '4000');
+    expect(out.stdout).toContain('rpm 9, tpm 4000');
+    const [row] = await handle.db.select().from(apiKeys).where(eq(apiKeys.keyHash, hashKey(config.apiKeyPepper, key)));
+    expect(row).toMatchObject({ rpmLimit: 9, tpmLimit: 4000 });
+  });
+
   it('limits that are not whole numbers are refused, and so is a revoked key', async () => {
     const tenant = await newTenant();
     const key = (await cli('create-key', tenant)).stdout.trim();

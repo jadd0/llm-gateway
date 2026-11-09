@@ -1,7 +1,7 @@
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { errorBody } from '../errors.ts';
-import { jsonBody } from '../request-body.ts';
-import { estimateTokens } from '../usage/estimate.ts';
+import { chatRequest } from '../request-body.ts';
+import { estimateForLimit } from '../usage/estimate.ts';
 import type { Buckets, Limiter } from './limiter.ts';
 
 /** What the route needs to correct the charge once it knows the real usage. */
@@ -59,15 +59,15 @@ const rateLimitPlugin: FastifyPluginAsync<RateLimitOptions> = async (app, opts) 
   // estimated), before the route does any upstream work.
   app.addHook('preHandler', async (request, reply) => {
     if (!request.routeOptions.config.rateLimited || request.tenant === null) return;
-    const body = jsonBody(request);
-    // A body that is not a JSON object cannot cost anything upstream; the route rejects it with a 400.
-    if (!body.ok || typeof body.value !== 'object' || body.value === null || Array.isArray(body.value)) return;
+    // A body the route is going to reject with a 400 costs nothing: no request token, no tokens.
+    const body = chatRequest(request);
+    if (!body.ok) return;
 
     const rpm = request.tenant.rpmLimit ?? opts.defaultRpm;
     const tpm = request.tenant.tpmLimit ?? opts.defaultTpm;
-    const estimate = estimateTokens(body.value, opts.defaultMaxTokens);
+    const { cost: estimate, tooLarge } = estimateForLimit(body.value, opts.defaultMaxTokens, tpm);
     // A request bigger than a whole minute's tokens can never be admitted: say so now, charge nothing.
-    if (estimate > tpm) {
+    if (tooLarge) {
       return reply
         .code(400)
         .send(

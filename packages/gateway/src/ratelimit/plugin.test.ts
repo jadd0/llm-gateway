@@ -130,7 +130,7 @@ describe('rate limit plugin', { timeout: 30_000 }, () => {
       method: 'POST',
       url: '/__settle-twice',
       headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
-      payload: JSON.stringify({ messages: [], max_tokens: 100 }),
+      payload: JSON.stringify({ model: 'm', messages: [], max_tokens: 100 }),
     });
     expect(res.json()).toEqual({ estimate: 100 });
     // Charged 100, then corrected to an actual 500 (a 400 debit); the second settle(5) is ignored.
@@ -156,14 +156,37 @@ describe('rate limit plugin', { timeout: 30_000 }, () => {
   it('request whose estimate exceeds tpm gets 400 request_too_large and touches no bucket', async () => {
     const s = await fresh({ rpm: 100, tpm: 500 });
     const hits = upstreamHits;
-    const res = await chat(s.key, { model: 'm', messages: [{ role: 'user', content: 'hi' }] }); // 1025 > 500
+    // The caller asked for 1000 output tokens from a key that holds 500 a minute.
+    const res = await chat(s.key, { model: 'm', messages: [{ role: 'user', content: 'hi' }], max_tokens: 1000 });
     expect(res.statusCode).toBe(400);
     expect(res.json().error).toMatchObject({ type: 'invalid_request_error', code: 'request_too_large' });
     expect(res.headers['retry-after']).toBeUndefined();
+    // A prompt alone bigger than the key's minute, with no max_tokens, is refused the same way.
+    const big = await chat(s.key, { model: 'm', messages: [{ role: 'user', content: 'x'.repeat(2400) }] });
+    expect(big.statusCode).toBe(400);
+    expect(big.json().error.code).toBe('request_too_large');
     expect(await redis.exists(`${prefix}rl:{${s.keyId}}:req`, `${prefix}rl:{${s.keyId}}:tok`)).toBe(0);
     expect(upstreamHits).toBe(hits);
     // The same key can still send a request that fits.
     expect((await chat(s.key)).statusCode).toBe(200);
+  });
+
+  it('a small request with no max_tokens is admitted by a key whose minute is smaller than the default allowance', async () => {
+    const s = await fresh({ rpm: 100, tpm: 1000 });
+    const res = await chat(s.key, { model: 'm', messages: [{ role: 'user', content: 'hi' }] });
+    expect(res.statusCode).toBe(200);
+    // 1 prompt token plus the output allowance trimmed to what is left of the minute (999), not 1024.
+    expect(res.headers['x-ratelimit-remaining-tokens']).toBe('0');
+  });
+
+  it('a body the route rejects is not charged', async () => {
+    const s = await fresh({ rpm: 5, tpm: 100_000 });
+    for (const body of [{}, { model: 'm' }, { model: 1, messages: [] }, { model: 'm', messages: 'x' }, { model: 'm', messages: [], stream: 'yes' }]) {
+      const res = await chat(s.key, body);
+      expect(res.statusCode).toBe(400);
+      expect(res.headers['x-ratelimit-limit-requests']).toBeUndefined();
+    }
+    expect(await redis.exists(`${prefix}rl:{${s.keyId}}:req`, `${prefix}rl:{${s.keyId}}:tok`)).toBe(0);
   });
 
   it('limit change via set-limits applies to the next request', async () => {
@@ -174,7 +197,7 @@ describe('rate limit plugin', { timeout: 30_000 }, () => {
     expect(blocked.headers['x-ratelimit-limit-requests']).toBe('1');
 
     const store = keyStoreFromConfig(base, handle.db, redis);
-    expect(await store.setLimits(s.hash, { rpm: 600, tpm: 100_000 })).toEqual({ updated: true, cached: true });
+    expect(await store.setLimits(s.hash, { rpm: 600, tpm: 100_000 })).toMatchObject({ updated: true, cached: true });
     now += 6000; // 6 s at the new rate (10 per second) is 60 request tokens
     const res = await chat(s.key);
     expect(res.statusCode).toBe(200);

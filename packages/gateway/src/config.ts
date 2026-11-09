@@ -115,3 +115,31 @@ export function loadPepperConfig(env: NodeJS.ProcessEnv = process.env): { databa
   const e = z.object({ ...dbFields, ...pepperField }).parse(env);
   return { databaseUrl: e.DATABASE_URL, apiKeyPepper: e.API_KEY_PEPPER };
 }
+
+// What set-limits needs: the database, and the key cache's settings when a Redis is configured. No pepper,
+// and Redis is optional because the database write is the change; the cache entry is only refreshed.
+export function loadCacheConfig(env: NodeJS.ProcessEnv = process.env): Pick<
+  Config,
+  'databaseUrl' | 'redisUrl' | 'redisKeyPrefix' | 'authCache' | 'authCacheTtlS' | 'authNegativeTtlS' | 'authTombstoneTtlS'
+> {
+  const e = z
+    .object({
+      ...dbFields,
+      REDIS_URL: z.preprocess(blankAsUnset, z.string().optional()),
+      REDIS_KEY_PREFIX: z.preprocess(blankAsUnset, z.string().default('')),
+      AUTH_CACHE: z.preprocess(blankAsUnset, z.enum(['redis', 'none']).default('redis')),
+      AUTH_CACHE_TTL_S: int(600, 1),
+      AUTH_NEGATIVE_TTL_S: int(60, 1),
+      AUTH_TOMBSTONE_TTL_S: int(1200, 1),
+    })
+    .parse(env);
+  return {
+    databaseUrl: e.DATABASE_URL,
+    redisUrl: e.REDIS_URL,
+    redisKeyPrefix: e.REDIS_KEY_PREFIX,
+    authCache: e.AUTH_CACHE,
+    authCacheTtlS: e.AUTH_CACHE_TTL_S,
+    authNegativeTtlS: e.AUTH_NEGATIVE_TTL_S,
+    authTombstoneTtlS: e.AUTH_TOMBSTONE_TTL_S,
+  };
+}
