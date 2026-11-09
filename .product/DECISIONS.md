@@ -89,3 +89,13 @@ Format — one entry per decision under its category, newest last, ids never reu
   Src: chat 2026-11-09 · Code: docs/README.md
 - **D-010** 2026-11-09 · founder · active — The PR 2 framework comparison runs each contender as one process (no cluster) and compares only node:http, Express 5 and Fastify (no Hono). Why: one process is the like-for-like per-core test and leaves cores for k6 and the mock.
   Src: .product/plans/pr-2.md; founder chose both recommended options in chat · Code: bench/frameworks/
+- **D-027** 2026-11-09 · founder · active — Fallback chains live in gateway config (`MODEL_FALLBACKS`, e.g. `claude-fable-5-1>gpt-6-astra;mock-openai-1>mock-anthropic-1`), default empty; the request body has no `fallbacks` field. Why: apps send nothing new, and the operator owns which models may stand in for which.
+  Src: founder in chat 2026-11-09 via plan questions · Code: packages/gateway/src/resilience/fallback.ts
+- **D-028** 2026-11-09 · founder · active — A request's budget hold is priced at the dearest model in its chain; the charge is settled at the price of the model that served. Why: a tenant near its cap may be refused slightly early, but the cap is never overshot by a fallback to a dearer model.
+  Src: founder in chat 2026-11-09 via plan questions · Code: packages/gateway/src/budget/plugin.ts
+- **D-029** 2026-11-09 · founder · active — When Redis is unreachable each gateway process falls back to a local in-memory circuit breaker with the same state machine; local state is discarded when Redis answers again. Why: breaking must keep working in the outage that most needs it, at the cost of per-process (not fleet-wide) views.
+  Src: founder in chat 2026-11-09 via plan questions · Code: packages/gateway/src/resilience/breaker.ts
+- **D-030** 2026-11-09 · founder · active — Up to 3 attempts per model (2 retries), full-jitter backoff with 200 ms base and 2 s cap, honouring `retry-after` up to 5 s. Why: bounded extra load on a struggling provider while riding out short blips.
+  Src: founder in chat 2026-11-09 via plan questions · Code: packages/gateway/src/resilience/retry.ts
+- **D-031** 2026-11-09 · loop default · active — A response-headers timeout is retried on the next model in the chain only, never on the same model. Why: the provider may still be working on (and billing) a request the gateway gave up on, so a same-model retry could bill twice.
+  Src: .product/plans/pr-7.md · Code: packages/gateway/src/resilience/retry.ts

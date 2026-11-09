@@ -26,6 +26,8 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
     GEMINI_API_KEY: '',
     MODEL_ROUTES: '',
     LOG_LEVEL: 'silent',
+    // A developer's old .env.local may still carry the removed single timeout; no test depends on it.
+    UPSTREAM_TIMEOUT_MS: '',
     API_KEY_PEPPER: randomBytes(24).toString('hex'),
     REDIS_KEY_PREFIX: `test-${randomBytes(6).toString('hex')}:`,
     AUTH_CACHE: 'redis',

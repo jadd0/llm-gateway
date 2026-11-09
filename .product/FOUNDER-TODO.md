@@ -32,3 +32,4 @@ How to start the coordinator here, and anything it needs from the founder first.
 - [ ] Add real `ANTHROPIC_API_KEY`, `OPENAI_API_KEY` and `GEMINI_API_KEY` to the repo-root `.env.local` (gitignored), then run `npm run smoke:providers` (and `-- --record` to refresh fixtures). PR 6 shipped without live calls: the current OPENAI_API_KEY is the placeholder `mock-key` (D-022).
 - [ ] Ratify D-023 (loop default): budgets fail closed with 503 when both Redis and Postgres are unavailable.
 - [ ] Ratify D-026 (loop default): a provider's 401/403 to the gateway's own key becomes 502 `provider_auth_failed` with a generic message, details logged only.
+- [ ] Ratify D-031 (loop default): a response-headers timeout moves to the next model in the chain and is never retried on the same model (a provider may still be billing the abandoned request).

@@ -27,7 +27,7 @@ export interface Upstream {
 
 const joinPath = (base: string, extra = '') => `${base.replace(/\/+$/, '')}${extra}`;
 
-type PoolSettings = Pick<Config, 'upstreamConnections' | 'upstreamTimeoutMs'>;
+type PoolSettings = Pick<Config, 'upstreamConnections' | 'upstreamConnectTimeoutMs' | 'upstreamHeadersTimeoutMs' | 'upstreamIdleTimeoutMs'>;
 
 type TargetConfig = Pick<
   Config,
@@ -39,13 +39,17 @@ type TargetConfig = Pick<
   | 'geminiBaseUrl'
   | 'geminiApiKey'
   | 'mockBaseUrl'
+  | 'mockAnthropicBaseUrl'
+  | 'mockGeminiBaseUrl'
   | 'modelRoutes'
 > &
   PoolSettings;
 
 // One keep-alive pool per upstream origin (created on first use). `connections` caps sockets to that
 // origin, so the pool size is the number to name when it becomes the bottleneck. The three mock formats
-// share an origin and so a pool.
+// share an origin and so a pool unless MOCK_ANTHROPIC_BASE_URL or MOCK_GEMINI_BASE_URL moves one away.
+// The three timeouts apply to every attempt made on the pool: connecting, waiting for response headers,
+// and silence between body bytes.
 export function createUpstream(config: TargetConfig): Upstream {
   const pools = new Map<string, Pool>();
   const poolFor = (origin: string) => {
@@ -53,9 +57,9 @@ export function createUpstream(config: TargetConfig): Upstream {
     if (!pool) {
       pool = new Pool(origin, {
         connections: config.upstreamConnections,
-        headersTimeout: config.upstreamTimeoutMs,
-        bodyTimeout: config.upstreamTimeoutMs,
-        connectTimeout: config.upstreamTimeoutMs,
+        connectTimeout: config.upstreamConnectTimeoutMs,
+        headersTimeout: config.upstreamHeadersTimeoutMs,
+        bodyTimeout: config.upstreamIdleTimeoutMs,
       });
       pools.set(origin, pool);
     }
@@ -86,8 +90,8 @@ export function createUpstream(config: TargetConfig): Upstream {
     gemini: () => make('gemini', gemini, config.geminiBaseUrl, config.geminiApiKey, false),
     // The mock serves each format at the path the real provider uses, under the same version prefix.
     'mock-openai': () => make('mock-openai', mockOpenai, config.mockBaseUrl, undefined, true, '/v1'),
-    'mock-anthropic': () => make('mock-anthropic', mockAnthropic, config.mockBaseUrl, undefined, true),
-    'mock-gemini': () => make('mock-gemini', mockGemini, config.mockBaseUrl, undefined, true, '/v1beta'),
+    'mock-anthropic': () => make('mock-anthropic', mockAnthropic, config.mockAnthropicBaseUrl, undefined, true),
+    'mock-gemini': () => make('mock-gemini', mockGemini, config.mockGeminiBaseUrl, undefined, true, '/v1beta'),
   };
   const targets = new Map<ProviderId, Target>();
 
