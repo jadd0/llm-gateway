@@ -229,3 +229,12 @@ A figure in README.md, BENCHMARKS.md or `docs/` must trace to a committed k6 sum
 output. Never type, round or estimate one.
 Why: every number on the founder's CV must be reproducible live in an interview.
 
+### R4. Benchmarks run quiet, and only the orchestrator runs the full ones
+
+A builder writes and smoke-tests benchmark scripts with tiny durations only; the full benchmark
+run is done by the orchestrator after the build, one at a time, preceded by
+`bash bench/quiet.sh <results-dir>` (waits for low load and mains power, writes
+`conditions.txt` next to the results). Every published figure names its conditions file.
+Why: PR 2 and PR 3 benchmarked while other builds and other projects shared the CPU, and the
+numbers were unusable (R8).
+
