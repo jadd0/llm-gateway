@@ -6,6 +6,7 @@ import { Redis } from 'ioredis';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createMockServer, type Settings } from '../../../mock-provider/src/server.ts';
 import { buildApp } from '../app.ts';
+import { costMicros, defaultMaxTokensFor, formatUsd, priceFor } from '../pricing/prices.ts';
 import { estimateWorstCase } from '../usage/estimate.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
@@ -143,7 +144,7 @@ beforeAll(async () => {
   tenantIds.push(tenantId);
   const cfg = (env: Record<string, string>) =>
     testConfig({ API_KEY_PEPPER: base.apiKeyPepper, REDIS_KEY_PREFIX: prefix, BUDGET_ENABLED: 'true', RATE_LIMIT_REDIS_TIMEOUT_MS: '5000', BUDGET_REDIS_TIMEOUT_MS: '5000', ...env });
-  viaMock = buildApp(cfg({ OPENAI_BASE_URL: urls.mock, MOCK_BASE_URL: urls.mock }));
+  viaMock = buildApp(cfg({ OPENAI_BASE_URL: `${urls.mock}/v1`, MOCK_BASE_URL: urls.mock }));
   viaStub = buildApp(
     cfg({
       OPENAI_BASE_URL: `${urls.stub}/api/v1`, // a path prefix, as OpenRouter's
@@ -153,8 +154,8 @@ beforeAll(async () => {
       ...KEYS,
     }),
   );
-  noKeys = buildApp(cfg({ OPENAI_BASE_URL: urls.stub, MOCK_BASE_URL: urls.stub }));
-  unmetered = buildApp(cfg({ OPENAI_BASE_URL: urls.stub, MOCK_BASE_URL: urls.stub, BUDGET_ENABLED: 'false' }));
+  noKeys = buildApp(cfg({ OPENAI_BASE_URL: `${urls.stub}/v1`, MOCK_BASE_URL: urls.stub }));
+  unmetered = buildApp(cfg({ OPENAI_BASE_URL: `${urls.stub}/v1`, MOCK_BASE_URL: urls.stub, BUDGET_ENABLED: 'false' }));
   logged = buildApp(
     cfg({ OPENAI_BASE_URL: `${urls.stub}/api/v1`, ANTHROPIC_BASE_URL: `${urls.stub}/anthropic`, GEMINI_BASE_URL: `${urls.stub}/v1beta`, MOCK_BASE_URL: urls.stub, LOG_LEVEL: 'error', ...KEYS }),
     { logStream: { write: (line: string) => void logLines.push(line) } as unknown as NodeJS.WritableStream },
@@ -305,6 +306,22 @@ describe('providers through the gateway', { timeout: 60_000 }, () => {
     }
     expect(seen).toHaveLength(0);
     expect(await settledTo(s.tenantId, 0)).toEqual({ spent: 0, reserved: 0 });
+  });
+
+  it('a model name that is not header-safe gets the normal 400 and no x-gateway-model header', async () => {
+    const s = await fresh();
+    const names = ['gpt\u0001x', 'mod\u00e8le-\u6a21\u578b', 'a'.repeat(70_000), 'x'.repeat(129)];
+    for (const model of names) {
+      for (const url of [urls.unmetered, urls.viaMock]) {
+        const res = await post(url, { model }, s.key);
+        expect(res.status, `${model.length} chars`).toBe(400);
+        expect(((await res.json()) as any).error.code).toBe('model_not_found');
+        expect(res.headers.get('x-gateway-model')).toBeNull();
+      }
+    }
+    // Control: a plain name is still echoed.
+    const plain = await post(urls.unmetered, { model: 'llama-3-70b' }, s.key);
+    expect(plain.headers.get('x-gateway-model')).toBe('llama-3-70b');
   });
 
   it('unknown model returns 400 model_not_found; unsupported parameters 400 unsupported_parameter; both give the hold back', async () => {
@@ -459,5 +476,37 @@ describe('translated streams and errors', { timeout: 60_000 }, () => {
     const sent = seen[0]!.body.generationConfig.maxOutputTokens;
     expect(sent).toBe(estimateWorstCase({ model: 'gemini-3.1-flash-lite', ...body }, base.rateLimitDefaultMaxTokens).output);
     expect(sent).toBe(base.rateLimitDefaultMaxTokens);
+  });
+
+  it('default cap per model is sent and equals the hold\'s output estimate', async () => {
+    const body = { messages: [{ role: 'user', content: 'hi' }] };
+    const sentCap = (b: any) => b.max_tokens ?? b.generationConfig?.maxOutputTokens;
+    for (const model of ['claude-fable-5-1', 'claude-haiku-5-5', 'gemini-3.1-pro-preview']) {
+      seen.length = 0;
+      const s = await fresh();
+      const res = await fetch(`${urls.viaStub}/v1/chat/completions`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
+        body: JSON.stringify({ model, ...body }),
+      });
+      expect(res.status, model).toBe(200);
+      expect(seen, model).toHaveLength(1);
+      const sent = sentCap(seen[0]!.body);
+      const { prompt, output } = estimateWorstCase({ model, ...body }, defaultMaxTokensFor(model, base.rateLimitDefaultMaxTokens));
+      expect(sent, model).toBe(output);
+      expect(sent, model).toBe(4096);
+      // The hold is the price of exactly that cap: the balance header shows the cap less the hold.
+      const hold = costMicros(priceFor(model)!, prompt, sent);
+      expect(res.headers.get('x-budget-remaining-usd'), model).toBe(formatUsd(base.budgetDefaultMonthlyMicros - hold));
+    }
+    // Control: a model with no per-model default keeps the gateway-wide one.
+    seen.length = 0;
+    const s = await fresh();
+    await fetch(`${urls.viaStub}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
+      body: JSON.stringify({ model: 'gemini-3.1-flash-lite', ...body }),
+    });
+    expect(sentCap(seen[0]!.body)).toBe(base.rateLimitDefaultMaxTokens);
   });
 });

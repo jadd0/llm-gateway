@@ -60,7 +60,7 @@ beforeAll(async () => {
   const seeded = await seedKey(handle.db, base);
   key = seeded.key;
   tenantId = seeded.tenantId;
-  app = buildApp(cfg({ OPENAI_BASE_URL: mockUrl, UPSTREAM_HEADERS_TIMEOUT_MS: '1000', UPSTREAM_IDLE_TIMEOUT_MS: '1000', LOG_LEVEL: 'silent' }));
+  app = buildApp(cfg({ OPENAI_BASE_URL: `${mockUrl}/v1`, UPSTREAM_HEADERS_TIMEOUT_MS: '1000', UPSTREAM_IDLE_TIMEOUT_MS: '1000', LOG_LEVEL: 'silent' }));
   await app.listen({ port: 0, host: '127.0.0.1' });
   gw = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 });
@@ -169,7 +169,7 @@ describe('POST /v1/chat/completions', () => {
   });
 
   it('upstream down returns 502 with an OpenAI-shaped error', async () => {
-    const down = buildApp(cfg({ OPENAI_BASE_URL: 'http://127.0.0.1:1', LOG_LEVEL: 'silent' }));
+    const down = buildApp(cfg({ OPENAI_BASE_URL: 'http://127.0.0.1:1/v1', LOG_LEVEL: 'silent' }));
     try {
       const res = await down.inject({
         method: 'POST',
@@ -207,7 +207,8 @@ describe('POST /v1/chat/completions', () => {
     const timing = res.headers.get('server-timing') ?? '';
     const m = /^gw-pre;dur=([\d.]+), gw-post;dur=([\d.]+), upstream;dur=([\d.]+)$/.exec(timing);
     expect(m).not.toBeNull();
-    expect(Number(m![3])).toBeGreaterThanOrEqual(100);
+    // A 100 ms timer can fire a fraction of a millisecond early against performance.now().
+    expect(Number(m![3])).toBeGreaterThanOrEqual(99);
     expect(Number(m![1])).toBeGreaterThanOrEqual(0);
     expect(Number(m![2])).toBeGreaterThanOrEqual(0);
   });
@@ -248,7 +249,7 @@ describe('POST /v1/chat/completions', () => {
     });
     const port = await listen(limited);
     const app2 = buildApp(
-      cfg({ OPENAI_BASE_URL: `http://127.0.0.1:${port}`, LOG_LEVEL: 'silent', RATE_LIMIT_ENABLED: 'false' }),
+      cfg({ OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, LOG_LEVEL: 'silent', RATE_LIMIT_ENABLED: 'false' }),
     );
     try {
       for (const stream of [false, true]) {
@@ -321,7 +322,7 @@ describe('usage reconcile', { timeout: 30_000 }, () => {
       });
     });
     const port = await listen(up);
-    app3 = buildApp(cfg({ OPENAI_BASE_URL: `http://127.0.0.1:${port}`, RATE_LIMIT_REDIS_TIMEOUT_MS: '5000' }), {
+    app3 = buildApp(cfg({ OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, RATE_LIMIT_REDIS_TIMEOUT_MS: '5000' }), {
       rateLimitClock: () => FIXED_CLOCK,
     });
     await app3.listen({ port: 0, host: '127.0.0.1' });
@@ -524,7 +525,7 @@ describe('mid-stream failure logging', () => {
 
   const gatewayFor = async (port: number) => {
     const g = buildApp(
-      cfg({ OPENAI_BASE_URL: `http://127.0.0.1:${port}`, UPSTREAM_HEADERS_TIMEOUT_MS: '1000', UPSTREAM_IDLE_TIMEOUT_MS: '1000', LOG_LEVEL: 'warn' }),
+      cfg({ OPENAI_BASE_URL: `http://127.0.0.1:${port}/v1`, UPSTREAM_HEADERS_TIMEOUT_MS: '1000', UPSTREAM_IDLE_TIMEOUT_MS: '1000', LOG_LEVEL: 'warn' }),
       { logStream },
     );
     await g.listen({ port: 0, host: '127.0.0.1' });

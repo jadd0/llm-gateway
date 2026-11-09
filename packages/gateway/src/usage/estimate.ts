@@ -27,7 +27,7 @@ function promptChars(messages: unknown): number {
 
 // The two halves of an estimate: the prompt in tokens, and the output the caller allowed (undefined when it
 // named none).
-function splitRequest(body: unknown): { prompt: number; explicitOutput: number | undefined } {
+export function splitRequest(body: unknown): { prompt: number; explicitOutput: number | undefined } {
   const b = (body ?? {}) as { messages?: unknown; max_tokens?: unknown; max_completion_tokens?: unknown };
   return {
     prompt: Math.ceil(promptChars(b.messages) / CHARS_PER_TOKEN),

@@ -27,9 +27,34 @@ export interface Limits {
   tpm?: number | null | undefined;
 }
 
+/**
+ * Runs before a lookup that would cost a Postgres query (or answers from a cached "unknown key"): takes a
+ * token from the client's failed-authentication bucket, or refuses. refund() hands the token back once
+ * the key proves valid.
+ */
+export type PostgresGuard = (
+  ip: string,
+) => Promise<{ refused: true; retryAfterMs: number } | { refused: false; refund(): Promise<void> }>;
+
+/** Thrown by lookup() when the client's failed-authentication bucket is empty. */
+export class LookupRefused extends Error {
+  override name = 'LookupRefused';
+  readonly retryAfterMs: number;
+  constructor(retryAfterMs: number) {
+    super('too many failed authentications from this address');
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
 export interface KeyStore {
-  /** The tenant a key hash belongs to, or null for unknown and revoked keys. */
-  lookup(keyHash: string): Promise<Tenant | null>;
+  /**
+   * The tenant a key hash belongs to, or null for unknown and revoked keys. With an address and a
+   * guard, every lookup that is not a cache hit on a valid key first takes a token from the address's
+   * bucket (and gives it back if the key is valid); it throws LookupRefused when there is none. A
+   * cached valid key never touches the guard. With no cache (redis null) the address is charged only after
+   * Postgres found no such key, so a valid key never touches the bucket.
+   */
+  lookup(keyHash: string, ip?: string): Promise<Tenant | null>;
   /**
    * Revokes in Postgres, then writes a tombstone to Redis. `revoked` is false when no active key had
    * this hash; `tombstoned` is false when Redis was unreachable, in which case a cached copy of the
@@ -70,6 +95,7 @@ export interface KeyStoreOptions {
   negativeTtlS: number;
   tombstoneTtlS: number;
   log?: { warn(obj: object, msg: string): void; info(obj: object, msg: string): void };
+  beforePostgres?: PostgresGuard;
 }
 
 const DEL_IF_EQUAL = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
@@ -124,6 +150,33 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
     return rows[0] ?? null;
   }
 
+  // Postgres only after the guard: a refused address costs no query, and a key that proves valid gives its token back.
+  async function guarded(hash: string, ip: string | undefined): Promise<Tenant | null> {
+    if (ip === undefined || !opts.beforePostgres) return fromPostgres(hash);
+    const g = await opts.beforePostgres(ip);
+    if (g.refused) throw new LookupRefused(g.retryAfterMs);
+    let tenant: Tenant | null;
+    try {
+      tenant = await fromPostgres(hash);
+    } catch (err) {
+      await g.refund(); // a database fault is not this client's failed authentication
+      throw err;
+    }
+    if (tenant !== null) void g.refund(); // never throws; the response need not wait for it
+    return tenant;
+  }
+
+  // Without a key cache every request queries Postgres anyway, so the guard has nothing to protect: charge the
+  // address only after the lookup came back unknown, and a valid key never touches the bucket.
+  async function chargedAfterMiss(hash: string, ip: string | undefined): Promise<Tenant | null> {
+    const tenant = await fromPostgres(hash);
+    if (tenant === null && ip !== undefined && opts.beforePostgres) {
+      const g = await opts.beforePostgres(ip);
+      if (g.refused) throw new LookupRefused(g.retryAfterMs);
+    }
+    return tenant;
+  }
+
   const parseTenant = (raw: string): Tenant | undefined => {
     try {
       const v = JSON.parse(raw) as Partial<Tenant> | null;
@@ -174,8 +227,8 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
   }
 
   return {
-    async lookup(hash) {
-      if (redis === null) return fromPostgres(hash);
+    async lookup(hash, ip) {
+      if (redis === null) return chargedAfterMiss(hash, ip);
 
       const key = redisKey(hash);
       let cached: string | null;
@@ -185,9 +238,16 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
       } catch (err) {
         // Postgres is the source of truth, so a dead cache costs latency, never correctness.
         redisFailed('get', err);
-        return fromPostgres(hash);
+        return guarded(hash, ip);
       }
-      if (cached === REVOKED || cached === UNKNOWN) return null;
+      if (cached === REVOKED || cached === UNKNOWN) {
+        // No query, but still a failed authentication: it takes a token and keeps it.
+        if (ip !== undefined && opts.beforePostgres) {
+          const g = await opts.beforePostgres(ip);
+          if (g.refused) throw new LookupRefused(g.retryAfterMs);
+        }
+        return null;
+      }
       let corrupt: string | undefined;
       if (cached !== null) {
         const hit = parseTenant(cached);
@@ -195,7 +255,7 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
         corrupt = cached; // not a value this store wrote: treat as a miss and replace it
       }
 
-      const tenant = await fromPostgres(hash);
+      const tenant = await guarded(hash, ip);
       try {
         const value = tenant ? JSON.stringify(tenant) : UNKNOWN;
         const ttl = tenant ? opts.cacheTtlS : opts.negativeTtlS;
@@ -310,6 +370,7 @@ export function keyStoreFromConfig(
   db: Db['db'],
   redis: Redis | null,
   log?: KeyStoreOptions['log'],
+  beforePostgres?: PostgresGuard,
 ): KeyStore {
   return createKeyStore({
     db,
@@ -319,5 +380,6 @@ export function keyStoreFromConfig(
     negativeTtlS: config.authNegativeTtlS,
     tombstoneTtlS: config.authTombstoneTtlS,
     ...(log ? { log } : {}),
+    ...(beforePostgres ? { beforePostgres } : {}),
   });
 }

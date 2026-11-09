@@ -46,18 +46,11 @@ const schema = z
     GATEWAY_HOST: z.preprocess(blankAsUnset, z.string().default('127.0.0.1')),
     GATEWAY_PORT: int(8080, 0),
     // Base URLs carry the API version prefix, as the providers' own SDKs expect; adapters append to them.
-    // A URL with no path is refused: this one carries /v1 (the gateway used to add it), and a leftover
-    // `http://host:port` would send every request to a path the provider does not serve.
-    OPENAI_BASE_URL: z.preprocess(
-      blankAsUnset,
-      z
-        .url()
-        .default('https://api.openai.com/v1')
-        .refine((u) => new URL(u).pathname.replace(/\/+$/, '') !== '', {
-          message:
-            'OPENAI_BASE_URL needs the API version path, as OpenAI\'s SDKs take it: https://api.openai.com/v1 (a proxy: https://host/v1). The gateway no longer adds /v1',
-        }),
-    ),
+    // A URL with no path is refused unless OPENAI_BASE_URL_ALLOW_ROOT=true: this one carries /v1 (the gateway
+    // used to add it), and a leftover `http://host:port` would send every request to a path the provider
+    // does not serve. A root-mounted OpenAI-compatible upstream sets the flag.
+    OPENAI_BASE_URL: z.preprocess(blankAsUnset, z.url().default('https://api.openai.com/v1')),
+    OPENAI_BASE_URL_ALLOW_ROOT: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('false')),
     OPENAI_API_KEY: z.preprocess(blankAsUnset, z.string().optional()),
     ANTHROPIC_BASE_URL: z.preprocess(blankAsUnset, z.url().default('https://api.anthropic.com')),
     ANTHROPIC_API_KEY: z.preprocess(blankAsUnset, z.string().optional()),
@@ -112,6 +105,10 @@ const schema = z
     // A total deadline for the whole request, every attempt and backoff included. The per-attempt timeouts
     // only limit silence, so a slow stream that keeps trickling bytes could otherwise outlive the budget hold.
     UPSTREAM_MAX_DURATION_MS: int(240_000, 1),
+    // A provider's error answer (status and headers in) is waited for this long for its body; a slower body is
+    // dropped, the status kept, and the request moves on.
+    UPSTREAM_ERROR_BODY_TIMEOUT_MS: int(2_000, 1),
+    UPSTREAM_ERROR_BODY_MAX_BYTES: int(65_536, 1),
     RETRY_MAX_ATTEMPTS_PER_MODEL: int(3, 1),
     RETRY_BASE_MS: int(200, 1),
     RETRY_CAP_MS: int(2_000, 1),
@@ -129,10 +126,22 @@ const schema = z
     ...dbFields,
     ...cacheFields,
     ...pepperField,
+    // Failed authentications one client address may make per minute before it is refused with 429 ahead of
+    // any key lookup. 0 turns the limit off.
+    AUTH_FAIL_LIMIT_PER_MIN: int(30, 0),
+    // Comma-separated addresses or CIDRs whose X-Forwarded-For is believed ('none': trust nobody).
+    TRUSTED_PROXIES: z.preprocess(
+      blankAsUnset,
+      z
+        .string()
+        .default('127.0.0.1')
+        .transform((v) => (v.trim().toLowerCase() === 'none' ? [] : v.split(',').map((x) => x.trim()).filter((x) => x !== ''))),
+    ),
     RATE_LIMIT_ENABLED: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
     RATE_LIMIT_DEFAULT_RPM: int(600, 1),
     RATE_LIMIT_DEFAULT_TPM: int(200_000, 1),
     RATE_LIMIT_DEFAULT_MAX_TOKENS: int(1024, 1),
+    MOCK_MAX_OUTPUT_TOKENS: int(4096, 1),
     RATE_LIMIT_REDIS_TIMEOUT_MS: int(50, 1),
     BUDGET_ENABLED: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
     BUDGET_DEFAULT_MONTHLY_USD: usd('10'),
@@ -166,6 +175,11 @@ const schema = z
     SEMANTIC_PG_TIMEOUT_MS: int(100, 1),
     SEMANTIC_FILL_QUEUE: int(1000, 1),
     SEMANTIC_CLEANUP_S: int(300, 1),
+  })
+  .refine((e) => e.OPENAI_BASE_URL_ALLOW_ROOT === 'true' || new URL(e.OPENAI_BASE_URL).pathname.replace(/\/+$/, '') !== '', {
+    message:
+      "OPENAI_BASE_URL needs the API version path, as OpenAI's SDKs take it: https://api.openai.com/v1 (a proxy: https://host/v1). The gateway no longer adds /v1. An upstream mounted at the root of its host: set OPENAI_BASE_URL_ALLOW_ROOT=true",
+    path: ['OPENAI_BASE_URL'],
   })
   .refine((e) => e.UPSTREAM_TIMEOUT_MS === undefined, {
     message:
@@ -238,6 +252,8 @@ export interface Config {
   upstreamHeadersTimeoutMs: number;
   upstreamIdleTimeoutMs: number;
   upstreamMaxDurationMs: number;
+  upstreamErrorBodyTimeoutMs: number;
+  upstreamErrorBodyMaxBytes: number;
   retryMaxAttemptsPerModel: number;
   retryBaseMs: number;
   retryCapMs: number;
@@ -258,11 +274,14 @@ export interface Config {
   authCacheTtlS: number;
   authNegativeTtlS: number;
   authTombstoneTtlS: number;
+  authFailLimitPerMin: number;
+  trustedProxies: string[];
   rateLimitEnabled: boolean;
   rateLimitDefaultRpm: number;
   rateLimitDefaultTpm: number;
   /** Output tokens assumed when a request names no max_tokens. */
   rateLimitDefaultMaxTokens: number;
+  mockMaxOutputTokens: number;
   rateLimitRedisTimeoutMs: number;
   budgetEnabled: boolean;
   /** Monthly cap in micro-USD for tenants with none of their own. */
@@ -335,6 +354,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     upstreamHeadersTimeoutMs: e.UPSTREAM_HEADERS_TIMEOUT_MS,
     upstreamIdleTimeoutMs: e.UPSTREAM_IDLE_TIMEOUT_MS,
     upstreamMaxDurationMs: e.UPSTREAM_MAX_DURATION_MS,
+    upstreamErrorBodyTimeoutMs: e.UPSTREAM_ERROR_BODY_TIMEOUT_MS,
+    upstreamErrorBodyMaxBytes: e.UPSTREAM_ERROR_BODY_MAX_BYTES,
     retryMaxAttemptsPerModel: e.RETRY_MAX_ATTEMPTS_PER_MODEL,
     retryBaseMs: e.RETRY_BASE_MS,
     retryCapMs: e.RETRY_CAP_MS,
@@ -355,10 +376,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     authCacheTtlS: e.AUTH_CACHE_TTL_S,
     authNegativeTtlS: e.AUTH_NEGATIVE_TTL_S,
     authTombstoneTtlS: e.AUTH_TOMBSTONE_TTL_S,
+    authFailLimitPerMin: e.AUTH_FAIL_LIMIT_PER_MIN,
+    trustedProxies: e.TRUSTED_PROXIES,
     rateLimitEnabled: e.RATE_LIMIT_ENABLED === 'true',
     rateLimitDefaultRpm: e.RATE_LIMIT_DEFAULT_RPM,
     rateLimitDefaultTpm: e.RATE_LIMIT_DEFAULT_TPM,
     rateLimitDefaultMaxTokens: e.RATE_LIMIT_DEFAULT_MAX_TOKENS,
+    mockMaxOutputTokens: e.MOCK_MAX_OUTPUT_TOKENS,
     rateLimitRedisTimeoutMs: e.RATE_LIMIT_REDIS_TIMEOUT_MS,
     budgetEnabled: e.BUDGET_ENABLED === 'true',
     budgetDefaultMonthlyMicros: e.BUDGET_DEFAULT_MONTHLY_USD,

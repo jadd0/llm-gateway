@@ -5181,11 +5181,11 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <rect x="894" y="535" width="10" height="117" rx="3" class="c-security" stroke-width="1"/>
 
         <!-- Messages -->
-        <g data-edge-from="client" data-edge-to="auth" data-edge-label="request + key" data-edge-key="0" data-edge-id="req">
+        <g data-edge-from="client" data-edge-to="auth" data-edge-label="key check, address bucket on a miss (after the lookup with no cache)" data-edge-key="0" data-edge-id="req">
           <path data-composition-edge-from="client" data-composition-edge-to="auth" data-composition-edge-id="req" data-composition-points="130,165;271.2,165" d="M 130 165 L 271.2 165" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <g data-detail="context">
           <rect x="160.79999999999998" y="145" width="79.60000000000001" height="16" rx="3" class="c-mask"/>
-          <text x="200.6" y="155" class="t-backend" font-size="9" text-anchor="middle">request + key</text>
+          <text x="200.6" y="155" class="t-backend" font-size="9" text-anchor="middle">key check, address bucket on a miss (after the lookup with no cache)</text>
         </g>
         </g>
 
@@ -5253,11 +5253,11 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         </g>
         </g>
 
-        <g data-edge-from="auth" data-edge-to="client" data-edge-label="401 invalid_api_key" data-edge-key="9" data-edge-id="r401">
+        <g data-edge-from="auth" data-edge-to="client" data-edge-label="401 invalid_api_key, address charged" data-edge-key="9" data-edge-id="r401">
           <path data-composition-edge-from="auth" data-composition-edge-to="client" data-composition-edge-id="r401" data-composition-points="271.2,478;130,478" d="M 271.2 478 L 130 478" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
         <g data-detail="context">
           <rect x="145.2" y="458" width="110.8" height="16" rx="3" class="c-mask"/>
-          <text x="200.6" y="468" class="t-security" font-size="9" text-anchor="middle">401 invalid_api_key</text>
+          <text x="200.6" y="468" class="t-security" font-size="9" text-anchor="middle">401 invalid_api_key, address charged</text>
         </g>
         </g>
 
@@ -5328,7 +5328,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <path d="M6 3 3 8l3 5M10 3l3 5-3 5"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="278.2" y="94" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Auth hook</text>
-          <text data-detail="context" x="278.2" y="111" class="t-muted" font-size="7" text-anchor="middle">auth/plugin.ts</text>
+          <text data-detail="context" x="278.2" y="111" class="t-muted" font-size="7" text-anchor="middle">key check, address guard on a miss</text>
         </g>
 
         <g id="node-redis" data-node-id="redis" data-node-label="Redis" tabindex="0" role="button" aria-label="Focus Redis, apikey:hash, Sequence participant" aria-pressed="false" data-node-kind="database" data-node-sublabel="apikey:hash" data-node-context="Sequence participant">

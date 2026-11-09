@@ -17,7 +17,8 @@ try {
 }
 
 export function testConfig(overrides: Record<string, string> = {}): Config {
-  const upstreamUrl = overrides.OPENAI_BASE_URL ?? 'http://127.0.0.1:9';
+  // OPENAI_BASE_URL carries its /v1 path like the real one; a test names it in full.
+  const upstreamUrl = overrides.OPENAI_BASE_URL ?? 'http://127.0.0.1:9/v1';
   return loadConfig({
     ...process.env,
     // No test carries a real provider key, whatever the developer's .env.local holds.
@@ -43,11 +44,10 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
     RETRY_MAX_ATTEMPTS_PER_MODEL: '1',
     BREAKER_MIN_FAILURES: '1000000',
     ...overrides,
-    // Tests give the upstream's origin; OPENAI_BASE_URL needs a path, so /v1 is added when none is given.
+    OPENAI_BASE_URL: upstreamUrl,
     // The mock adds its own /v1 for the OpenAI format, so it gets the origin. Tests stand one stub in for
     // "the upstream": the mock-* models reach it too unless a test says otherwise.
-    OPENAI_BASE_URL: new URL(upstreamUrl).pathname === '/' ? `${upstreamUrl.replace(/\/+$/, '')}/v1` : upstreamUrl,
-    MOCK_BASE_URL: overrides.MOCK_BASE_URL ?? upstreamUrl,
+    MOCK_BASE_URL: overrides.MOCK_BASE_URL ?? new URL(upstreamUrl).origin,
   });
 }
 
