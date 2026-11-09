@@ -13,7 +13,7 @@ export const RUNS = [
   { name: 'seed', title: 'Seed: the original prompts, once each' },
   { name: 'paraphrase', title: 'Paraphrase: another wording of a seeded prompt' },
   { name: 'exact', title: 'Exact: a seeded prompt repeated' },
-  { name: 'miss', title: 'Miss: a prompt nobody has sent' },
+  { name: 'miss', title: 'Miss: a system prompt nobody has used' },
 ] as const;
 
 export const STATUSES = ['hit', 'semantic-hit', 'miss'] as const;
