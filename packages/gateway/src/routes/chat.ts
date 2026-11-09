@@ -204,7 +204,8 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
     const translated = adapter.translates ? adapter : undefined;
 
     // The provider rejected the gateway's own credential. That is not the caller's doing and the provider's
-    // wording is not the caller's business: they get a generic 502; the real status and message are logged.
+    // wording is not the caller's business: they get a generic 502. The log keeps the status and the provider's
+    // error code only, never its message, which can echo part of the key.
     if (res.statusCode === 401 || res.statusCode === 403) {
       let errBody: Buffer;
       try {
@@ -214,9 +215,10 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
         if (abort.signal.aborted) return reply;
         return upstreamFailure(reply, err, null);
       }
-      const detail = (tryJson(errBody) as { error?: { message?: unknown } } | undefined)?.error?.message;
+      const e = (tryJson(errBody) as { error?: { code?: unknown; type?: unknown; status?: unknown } } | undefined)?.error;
+      const providerCode = [e?.code, e?.type, e?.status].find((v): v is string => typeof v === 'string')?.slice(0, 64);
       reply.log.error(
-        { provider: target.provider, upstreamStatus: res.statusCode, providerMessage: typeof detail === 'string' ? detail.slice(0, 300) : undefined },
+        { provider: target.provider, upstreamStatus: res.statusCode, providerCode },
         'provider rejected the gateway credentials',
       );
       return reply.code(502).send(errorBody(providerAuthMessage(target.provider), 'gateway_error', 'provider_auth_failed'));

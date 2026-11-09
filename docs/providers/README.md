@@ -57,7 +57,7 @@ request, the answer, the streamed chunks, the usage and the errors between OpenA
 - **Errors keep the provider's status** (a 429 stays 429 with `retry-after`; Anthropic's 529 becomes 503) and get an
   OpenAI-shaped body carrying the provider's message. The exception is a provider that rejects the gateway's own
   key (401 or 403): the client gets a 502 `provider_auth_failed` saying the gateway's credentials for that provider
-  were rejected, in all three formats, and the provider's real status and message go to the server log only. An
+  were rejected, in all three formats, and the provider's real status and error code go to the server log (never its message, which can echo part of the key). An
   error that arrives mid-stream is typed by meaning: rate limits are `rate_limit_error`, a request the provider
   called invalid stays `invalid_request_error`, and overload or provider faults are `server_error`.
 - **`OPENAI_BASE_URL` includes its version path** (`https://api.openai.com/v1`). The gateway starts only if it has

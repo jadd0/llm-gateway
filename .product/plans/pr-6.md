@@ -93,7 +93,7 @@ none.
 - **Errors:** provider status kept (429 stays 429 with `retry-after`; Anthropic 529 overloaded →
   503); body mapped to the OpenAI error shape with the provider's message. Exception: a provider 401
   or 403 (the gateway's own key was rejected) is a 502 `provider_auth_failed` with a generic message,
-  for all three formats including OpenAI pass-through; the real status and message are logged only
+  for all three formats including OpenAI pass-through; the real status and provider error code are logged, never the message
   (D-026).
 - **Credentials isolation:** each provider receives only its own key; a test asserts no
   Anthropic key reaches Gemini and vice versa, and no client key reaches any provider.

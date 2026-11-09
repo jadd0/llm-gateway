@@ -411,14 +411,15 @@ describe('translated streams and errors', { timeout: 60_000 }, () => {
         expect(text).not.toContain('sk-live');
       }
     }
-    // The status and the provider's own words are in the server log, not in the reply.
+    // The status and the provider's error code are in the server log; its words (which can echo the key) are nowhere.
     const entries = logLines.map((l) => JSON.parse(l)).filter((e) => e.msg === 'provider rejected the gateway credentials');
     expect(entries.map((e) => [e.provider, e.upstreamStatus])).toEqual([
       ['mock-openai', 401], ['mock-openai', 401],
       ['mock-anthropic', 403], ['mock-anthropic', 403],
       ['mock-gemini', 401], ['mock-gemini', 401],
     ]);
-    expect(entries.every((e) => e.providerMessage === 'Incorrect API key provided: sk-live-REDACTED')).toBe(true);
+    expect(entries.every((e) => e.providerCode === 'invalid_api_key')).toBe(true);
+    expect(logLines.join('\n')).not.toContain('sk-live');
     // The provider did no work: nothing is charged and nothing stays held.
     expect(await settledTo(s.tenantId, 0)).toEqual({ spent: 0, reserved: 0 });
   });
