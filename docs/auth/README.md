@@ -3,7 +3,7 @@
 Diagram: [api-key-check.html](api-key-check.html). Code: `packages/gateway/src/auth/`, `src/cli/keys.ts`, `src/db/`.
 
 Every request needs `Authorization: Bearer gw_...`. A key belongs to a tenant; the hook answers 401 or sets
-`request.tenant`. Limits (PR 4) and budgets (PR 5) will hang off that tenant. This is machine-to-machine auth
+`request.tenant`. Rate limits ([../rate-limiter/README.md](../rate-limiter/README.md)) hang off the key; budgets (PR 5) will hang off the tenant. This is machine-to-machine auth
 only; there is no user login and no admin UI.
 
 | File | Job |
@@ -12,7 +12,7 @@ only; there is no user login and no admin UI.
 | `auth/keys.ts` | Generate a key (`gw_` + 32 random bytes, base64url), derive its 12-char display prefix, HMAC-SHA256 it |
 | `auth/key-store.ts` | `lookup(hash)`: Redis, then Postgres on a miss, then fill the cache. `revoke(hash)` |
 | `auth/plugin.ts` | `onRequest` hook: parse the bearer key, look it up, 401 or attach the tenant |
-| `cli/keys.ts` | `create-tenant`, `create-key`, `revoke-key <prefix>`, `list-keys` (`npm run keys -- ...`) |
+| `cli/keys.ts` | `create-tenant`, `create-key [--rpm --tpm]`, `set-limits <prefix> --rpm --tpm`, `revoke-key <prefix>`, `list-keys` (`npm run keys -- ...`) |
 
 ## How a request is checked
 
@@ -39,6 +39,12 @@ revoke time the CLI exits non-zero and says a cached copy can live for up to `AU
 same `revoke-key` again once Redis is up rewrites the tombstone (it is safe to repeat, and says so when the
 key was already revoked). A prefix shared with old revoked keys still revokes the one active key, and a revoke
 waits through a brief Redis reconnect (up to 2 s) before reporting the tombstone as failed.
+
+## Limits on the cached entry
+
+The cached entry carries the key's id and its `rpm_limit` / `tpm_limit` (null = the gateway default), so the rate
+limiter needs no database read. `set-limits` writes Postgres, then overwrites the cache entry (not NX) unless it
+is a revoke tombstone, so a limit change shows on the next request of every instance and can never undo a revoke.
 
 ## Removing a tenant
 

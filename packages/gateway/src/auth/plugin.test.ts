@@ -101,7 +101,13 @@ describe('auth hook', () => {
     tenantIds.push(s.tenantId);
     const res = await fetch(`${gw}/__whoami`, { headers: { authorization: `Bearer ${s.key}` } });
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({ tenantId: s.tenantId, tenantName: s.tenant });
+    expect(await res.json()).toEqual({
+      tenantId: s.tenantId,
+      tenantName: s.tenant,
+      keyId: s.keyId,
+      rpmLimit: null,
+      tpmLimit: null,
+    });
     expect(hashKey(config.apiKeyPepper, s.key)).toBe(s.hash);
     expect((await fetch(`${gw}/__whoami`)).status).toBe(401);
   });

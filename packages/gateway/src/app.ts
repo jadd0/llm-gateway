@@ -4,13 +4,19 @@ import { keyStoreFromConfig } from './auth/key-store.ts';
 import type { Config } from './config.ts';
 import { createDb } from './db/client.ts';
 import { errorBody } from './errors.ts';
+import { createLimiter } from './ratelimit/limiter.ts';
+import { rateLimit } from './ratelimit/plugin.ts';
 import { chatRoutes } from './routes/chat.ts';
 import { createRedis } from './redis.ts';
 import { createUpstream } from './upstream.ts';
 
 export function buildApp(
   config: Config,
-  extra: { logStream?: NodeJS.WritableStream } = {},
+  extra: {
+    logStream?: NodeJS.WritableStream;
+    /** Pins the rate limiter's clock (ms). Tests only: production reads Redis TIME. */
+    rateLimitClock?: () => number;
+  } = {},
 ): FastifyInstance {
   const app = Fastify({
     logger: { level: config.logLevel, ...(extra.logStream ? { stream: extra.logStream } : {}) },
@@ -21,8 +27,13 @@ export function buildApp(
   const upstream = createUpstream(config);
   // The app owns its Postgres pool and Redis client and closes them with itself.
   const handle = createDb({ databaseUrl: config.databaseUrl, poolSize: config.dbPoolSize });
-  const redis = config.authCache === 'redis' && config.redisUrl ? createRedis(config.redisUrl) : null;
-  const keyStore = keyStoreFromConfig(config, handle.db, redis, app.log);
+  // One client serves the key cache and the rate limiter. Its command timeout covers the limiter's
+  // own timeout, so the limiter decides when to give up, not the socket.
+  const useRedis = config.redisUrl !== undefined && (config.authCache === 'redis' || config.rateLimitEnabled);
+  const redis = useRedis
+    ? createRedis(config.redisUrl!, { commandTimeoutMs: Math.max(500, config.rateLimitRedisTimeoutMs) })
+    : null;
+  const keyStore = keyStoreFromConfig(config, handle.db, config.authCache === 'redis' ? redis : null, app.log);
   app.addHook('onClose', async () => {
     // Close everything even if one close fails.
     redis?.disconnect();
@@ -49,6 +60,21 @@ export function buildApp(
     reply.code(404).send(errorBody('unknown route', 'invalid_request_error')),
   );
   app.register(auth, { keyStore, pepper: config.apiKeyPepper });
+  if (config.rateLimitEnabled && redis !== null) {
+    const limiter = createLimiter({
+      redis,
+      keyPrefix: config.redisKeyPrefix,
+      timeoutMs: config.rateLimitRedisTimeoutMs,
+      log: app.log,
+      ...(extra.rateLimitClock ? { clock: extra.rateLimitClock } : {}),
+    });
+    app.register(rateLimit, {
+      limiter,
+      defaultRpm: config.rateLimitDefaultRpm,
+      defaultTpm: config.rateLimitDefaultTpm,
+      defaultMaxTokens: config.rateLimitDefaultMaxTokens,
+    });
+  }
   app.register(chatRoutes, { upstream });
   return app;
 }

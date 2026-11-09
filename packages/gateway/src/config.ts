@@ -13,6 +13,17 @@ const dbFields = {
 // The server-side secret mixed into every key hash. The gateway refuses to start without it.
 const pepperField = { API_KEY_PEPPER: z.string().min(32) };
 
+// The key cache's settings, shared by the gateway and by set-limits (which reads only these).
+const cacheFields = {
+  REDIS_URL: z.preprocess(blankAsUnset, z.string().optional()),
+  // Prepended to every Redis key so several gateways or test runs can share one Redis.
+  REDIS_KEY_PREFIX: z.preprocess(blankAsUnset, z.string().default('')),
+  AUTH_CACHE: z.preprocess(blankAsUnset, z.enum(['redis', 'none']).default('redis')),
+  AUTH_CACHE_TTL_S: int(600, 1),
+  AUTH_NEGATIVE_TTL_S: int(60, 1),
+  AUTH_TOMBSTONE_TTL_S: int(1200, 1),
+};
+
 const schema = z
   .object({
     GATEWAY_HOST: z.preprocess(blankAsUnset, z.string().default('127.0.0.1')),
@@ -26,17 +37,20 @@ const schema = z
       z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('warn'),
     ),
     ...dbFields,
-    REDIS_URL: z.preprocess(blankAsUnset, z.string().optional()),
-    // Prepended to every Redis key so several gateways or test runs can share one Redis.
-    REDIS_KEY_PREFIX: z.preprocess(blankAsUnset, z.string().default('')),
+    ...cacheFields,
     ...pepperField,
-    AUTH_CACHE: z.preprocess(blankAsUnset, z.enum(['redis', 'none']).default('redis')),
-    AUTH_CACHE_TTL_S: int(600, 1),
-    AUTH_NEGATIVE_TTL_S: int(60, 1),
-    AUTH_TOMBSTONE_TTL_S: int(1200, 1),
+    RATE_LIMIT_ENABLED: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
+    RATE_LIMIT_DEFAULT_RPM: int(600, 1),
+    RATE_LIMIT_DEFAULT_TPM: int(200_000, 1),
+    RATE_LIMIT_DEFAULT_MAX_TOKENS: int(1024, 1),
+    RATE_LIMIT_REDIS_TIMEOUT_MS: int(50, 1),
   })
   .refine((e) => e.AUTH_CACHE === 'none' || e.REDIS_URL !== undefined, {
     message: 'REDIS_URL is required when AUTH_CACHE=redis',
+    path: ['REDIS_URL'],
+  })
+  .refine((e) => e.RATE_LIMIT_ENABLED === 'false' || e.REDIS_URL !== undefined, {
+    message: 'REDIS_URL is required when RATE_LIMIT_ENABLED=true',
     path: ['REDIS_URL'],
   })
   .refine((e) => e.AUTH_TOMBSTONE_TTL_S > e.AUTH_CACHE_TTL_S, {
@@ -61,6 +75,12 @@ export interface Config {
   authCacheTtlS: number;
   authNegativeTtlS: number;
   authTombstoneTtlS: number;
+  rateLimitEnabled: boolean;
+  rateLimitDefaultRpm: number;
+  rateLimitDefaultTpm: number;
+  /** Output tokens assumed when a request names no max_tokens. */
+  rateLimitDefaultMaxTokens: number;
+  rateLimitRedisTimeoutMs: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -82,6 +102,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     authCacheTtlS: e.AUTH_CACHE_TTL_S,
     authNegativeTtlS: e.AUTH_NEGATIVE_TTL_S,
     authTombstoneTtlS: e.AUTH_TOMBSTONE_TTL_S,
+    rateLimitEnabled: e.RATE_LIMIT_ENABLED === 'true',
+    rateLimitDefaultRpm: e.RATE_LIMIT_DEFAULT_RPM,
+    rateLimitDefaultTpm: e.RATE_LIMIT_DEFAULT_TPM,
+    rateLimitDefaultMaxTokens: e.RATE_LIMIT_DEFAULT_MAX_TOKENS,
+    rateLimitRedisTimeoutMs: e.RATE_LIMIT_REDIS_TIMEOUT_MS,
   };
 }
 
@@ -94,4 +119,24 @@ export function loadDbConfig(env: NodeJS.ProcessEnv = process.env): { databaseUr
 export function loadPepperConfig(env: NodeJS.ProcessEnv = process.env): { databaseUrl: string; apiKeyPepper: string } {
   const e = z.object({ ...dbFields, ...pepperField }).parse(env);
   return { databaseUrl: e.DATABASE_URL, apiKeyPepper: e.API_KEY_PEPPER };
+}
+
+// What set-limits needs: the database, and the key cache's settings when a Redis is configured. No pepper,
+// and Redis is optional because the database write is the change; the cache entry is only refreshed.
+export function loadCacheConfig(env: NodeJS.ProcessEnv = process.env): Pick<
+  Config,
+  'databaseUrl' | 'redisUrl' | 'redisKeyPrefix' | 'authCache' | 'authCacheTtlS' | 'authNegativeTtlS' | 'authTombstoneTtlS'
+> {
+  const e = z
+    .object({ ...dbFields, ...cacheFields })
+    .parse(env);
+  return {
+    databaseUrl: e.DATABASE_URL,
+    redisUrl: e.REDIS_URL,
+    redisKeyPrefix: e.REDIS_KEY_PREFIX,
+    authCache: e.AUTH_CACHE,
+    authCacheTtlS: e.AUTH_CACHE_TTL_S,
+    authNegativeTtlS: e.AUTH_NEGATIVE_TTL_S,
+    authTombstoneTtlS: e.AUTH_TOMBSTONE_TTL_S,
+  };
 }

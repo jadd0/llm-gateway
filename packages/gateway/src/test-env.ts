@@ -29,9 +29,9 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
 }
 
 // A tenant with a random name and one fresh key, written through the same functions the CLI uses.
-export async function seedKey(db: Db['db'], config: Config) {
+export async function seedKey(db: Db['db'], config: Config, limits: { rpm?: number; tpm?: number } = {}) {
   const tenant = await createTenant(db, `t-${randomBytes(6).toString('hex')}`);
-  const created = await createKey(db, config.apiKeyPepper, tenant.name);
+  const created = await createKey(db, config.apiKeyPepper, tenant.name, undefined, limits);
   return { ...created, tenantId: tenant.id, hash: hashKey(config.apiKeyPepper, created.key) };
 }
 
