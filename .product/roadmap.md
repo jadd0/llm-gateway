@@ -25,22 +25,22 @@ completed_at:
 notes:
 
 ## PR 3 — Tenants and API keys
-status: pending
+status: done
 acceptance: tenants and keys in Postgres with keys stored hashed (never plaintext); a missing or wrong key gets 401, a valid key passes and the tenant is attached to the request; key lookup is cached so the hot path does not query Postgres per request; overhead re-measured with auth on and recorded.
 scope_notes: key creation by CLI script, no admin UI. No limits or budgets yet.
 base_branch: main
-commit:
-completed_at:
-notes:
+commit: b3b0706
+completed_at: 2026-11-09
+notes: HMAC-SHA256 keys, Redis-cached lookup with race-free tombstone revocation (verified live: 0 post-revoke 200s at 500 req/s), Postgres fallback, repeatable revoke. Benchmark figures provisional (R8). R9 opened.
 
 ## PR 4 — Distributed rate limiter (Redis Lua token bucket)
-status: pending
+status: done
 acceptance: per-key token buckets for requests per minute and tokens per minute, enforced together by one atomic Lua script in Redis; a test firing 1,000 concurrent requests at a key limited to 100 requests/min admits exactly 100 and returns 429 with Retry-After to the rest, including when the requests are spread across 3 gateway app instances sharing one Redis; the token bucket is charged an estimate before the call and corrected to actual usage after (streamed and non-streamed); refill verified over time; Redis unavailable fails open; docs/rate-limiter/ walks the script line by line.
 scope_notes: rate limits only (requests and tokens per minute, D-015). Spend caps are PR 5; the nginx multi-instance proof is PR 12.
 base_branch: main
-commit:
-completed_at:
-notes:
+commit: 7cda555
+completed_at: 2026-11-09
+notes: Requests+tokens per minute in one atomic Lua script on Redis TIME; verified live: exactly 100/1000 across two gateways with one clock skewed +30s; fail-open on Redis loss, limits back from the first request after recovery. Benchmark pending quiet run (R4/R8). R10 opened.
 
 ## PR 5 — Budgets: pre-estimate and reconcile
 status: pending

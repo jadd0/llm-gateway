@@ -85,3 +85,54 @@ step stalled briefly. Steps were run once each, so the single 99 ms p95 is one o
 Whether it is the single event loop, the pool size or CPU contention is not established here.
 
 Direct-to-mock reference: the mock alone sustained every step with p95 at most 1.437 ms.
+
+## Auth overhead (PR 3)
+
+> **Provisional.** These runs shared the laptop with other builds and other projects' test suites (load
+> around 11 on 10 cores was observed the same day), so the overhead figures are noisy and not comparable with
+> PR 1's. They are kept as recorded; the quiet re-run in PR 12 (residual R8) replaces them.
+
+Raw k6 summaries: [bench/results/pr-3/](bench/results/pr-3/), produced by `bash bench/run-baseline.sh` with
+`STEP_RATES=""` (the throughput sweep was not re-run for auth). Same machine, method and rates as the PR 1 runs
+above, with every gateway request sending `Authorization: Bearer gw_...`. "Redis" is `AUTH_CACHE=redis`, one
+Redis GET per request once the key is cached; "none" is `AUTH_CACHE=none`, a Postgres query on every request.
+Overhead is the gateway run minus the direct-to-mock run **of the same PR 3 session**. The direct-to-mock instant
+run was slower and noisier in this session than in PR 1 (p50 1.145 ms, p95 2.208 ms against 1.19 ms and
+1.278 ms), so the PR 1 overhead figures above and the figures here are not strictly like for like.
+
+| Scenario | Rate | Direct p50 ms | Gateway p50 ms | Overhead p50 ms | Direct p95 ms | Gateway p95 ms | Overhead p95 ms | Errors |
+|---|---|---|---|---|---|---|---|---|
+| Instant, total duration, auth + Redis | 1000 req/s | 1.145 | 1.762 | 0.617 | 2.208 | 2.580 | 0.372 | 0 |
+| Instant, total duration, auth, no cache | 1000 req/s | 1.145 | 1.919 | 0.774 | 2.208 | 2.690 | 0.482 | 0 |
+| Realistic, time to first byte, auth + Redis | 200 req/s | 200.197 | 201.251 | 1.054 | 201.275 | 202.722 | 1.447 | 0 |
+| Realistic, time to first byte, auth, no cache | 200 req/s | 200.197 | 201.555 | 1.358 | 201.275 | 203.041 | 1.766 | 0 |
+
+PR 1 gateway without auth, same scenarios, for reference: instant 0.233 ms p50 / 0.982 ms p95 over direct;
+realistic 0.238 ms p50 / 0.254 ms p95 over direct.
+
+What the figures say, and what they do not:
+
+- Against PR 1, the instant p50 overhead went from 0.233 ms to 0.617 ms, which puts the auth hook (HMAC, one
+  Redis round trip, a JSON parse) at roughly 0.4 ms at p50 at this rate. This is the difference of two sessions, not an isolated measurement.
+- The cache buys 0.157 ms at p50 and 0.110 ms at p95 in the instant run (1.762 against 1.919 ms; 2.580 against
+  2.690 ms), and 0.304 ms / 0.319 ms to first byte in the realistic run. At 1000 req/s the Postgres lookup on
+  a local pool is only modestly slower than a Redis lookup; the cache's larger benefit (Postgres load, tail latency under concurrent load) was not measured here.
+- The realistic first-byte overhead rose from 0.238 ms to 1.054 ms p50. The Redis hook accounts for a small part of
+  that; the rest is not explained by these runs and may be machine noise, since the streamed first-byte
+  figure moves with timer jitter. It was measured once per scenario.
+- The gateway's own `server-timing` `gw-pre` does not include the key check, because the hook runs before the route starts its clock.
+
+## Rate limiting (PR 4)
+
+Pending quiet run. `bash bench/run-ratelimit.sh`, started behind `bash bench/quiet.sh bench/results/pr-4`, writes the
+k6 summaries to `bench/results/pr-4/`; no figure is quoted here until that run is committed (R3).
+
+What the run measures:
+
+- **Overhead of the check:** the same arrival rate through the gateway with `RATE_LIMIT_ENABLED=false` and `true`,
+  using a key whose limits are never reached, instant non-streamed and realistic streamed. Files:
+  `gateway-{instant,realistic}-ratelimit-{off,on}.json`.
+- **Burst:** 1,000 requests at once at a key limited to 100 per minute, counting 200 versus 429
+  (`burst.json`, with `status_200`, `status_429`, `status_429_with_retry_after`). A 100-per-minute bucket gains a token
+  every 0.6 s, so a burst that takes longer than that admits one more; the run script checks the count against that bound.
+- **Estimate error:** the token estimate against the mock's reported usage.
