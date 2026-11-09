@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -7,7 +7,10 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { migrate } from 'drizzle-orm/node-postgres/migrator';
 import pg from 'pg';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { histogramOf } from '../../log-worker/src/histogram.ts';
+import { BOUNDS, histogramOf } from '../../log-worker/src/histogram.ts';
+import { aggregate } from '../../log-worker/src/rollup.ts';
+import { NO_TENANT } from '../../gateway/src/db/schema.ts';
+import type { LogEntry } from '../../gateway/src/requestlog/entry.ts';
 import { testConfig } from '../../gateway/src/test-env.ts';
 import { RANGE_KEYS, overview, windowOf } from './queries.ts';
 
@@ -56,6 +59,27 @@ beforeAll(async () => {
       Math.floor(rand() * 900), Math.floor(rand() * 40), ['hit', 'semantic-hit', 'miss', 'bypass', null][i % 5], lat,
     ]);
   }
+  // Edge cases where the SQL and the worker could disagree: no model at all, a served model missing, every kind of status and
+  // error code, a latency of exactly 1 and 2 ms, just inside and just past the last bucket bound, and no tenant.
+  const edgeAge = 3 * DAY;
+  const edge = (status: number, code: string | null, lat: number, over: Partial<{ tenant: string | null; model: string | null; served: string | null; cache: string | null }> = {}) =>
+    rows.push([
+      randomUUID(), new Date(now.getTime() - edgeAge - rows.length * 1000), 'tenant' in over ? over.tenant : tenantIds[0], 'model' in over ? over.model : 'bf-edge-model',
+      'served' in over ? over.served : 'bf-edge-served', status, code, 7, 11, 13, 17, 'cache' in over ? over.cache : 'miss', lat,
+    ]);
+  edge(200, null, 5, { model: null, served: null });
+  edge(200, null, 5, { served: null });
+  edge(499, 'client_closed', 5);
+  edge(200, 'client_closed', 5);
+  edge(200, 'upstream_stream_broken', 5);
+  edge(500, null, 5);
+  edge(499, null, 5);
+  edge(429, 'rate_limited', 5);
+  edge(404, null, 1);
+  edge(200, null, 2, { tenant: null, cache: 'semantic-hit' });
+  edge(200, null, 120_000);
+  edge(200, null, Math.floor(BOUNDS.at(-1)!));
+  edge(200, null, Math.floor(BOUNDS.at(-1)!) + 1);
   for (let i = 0; i < rows.length; i += 100) {
     const chunk = rows.slice(i, i + 100);
     const values = chunk.map((_, r) => `(${Array.from({ length: 13 }, (_, c) => `$${r * 13 + c + 1}`).join(', ')}, false)`).join(', ');
@@ -131,7 +155,7 @@ describe('rollups migration over an existing log', () => {
 
   it('puts every latency in the bucket the worker would have: the hour histograms equal histograms built from the raw rows', async () => {
     const want = await pool.query(
-      `SELECT date_trunc('hour', created_at, 'UTC') AS b, coalesce(tenant_id, '00000000-0000-0000-0000-000000000000') AS t, coalesce(served_model, model) AS m, array_agg(latency_ms) AS lat
+      `SELECT date_trunc('hour', created_at, 'UTC') AS b, coalesce(tenant_id, '00000000-0000-0000-0000-000000000000') AS t, coalesce(served_model, model, '') AS m, array_agg(latency_ms) AS lat
        FROM request_log WHERE created_at < (SELECT folded_through FROM rollup_state) GROUP BY 1, 2, 3 ORDER BY 1, 2, 3`,
     );
     const got = await pool.query('SELECT bucket AS b, tenant_id AS t, model AS m, latency_hist AS hist FROM rollup_hour ORDER BY 1, 2, 3');
@@ -141,5 +165,38 @@ describe('rollups migration over an existing log', () => {
     const all = got.rows.map((r: { hist: number[] }) => r.hist);
     expect(all.some((h: number[]) => h.length === 242)).toBe(true);
     expect(all.some((h: number[]) => (h[0] ?? 0) > 0)).toBe(true);
+  });
+});
+
+describe('the backfill agrees with the worker', () => {
+  const migration = readFileSync(join(folder, readdirSync(folder).find((f) => f.endsWith('_rollups.sql'))!), 'utf8');
+
+  it('carries the worker latency bounds, the unauthenticated sentinel and the fold delay as literals that match the code', () => {
+    const literal = /width_bucket\(latency_ms::float8 - 1e-9, ARRAY\[([^\]]+)\]::float8\[\]\)/.exec(migration)![1]!;
+    expect(literal.split(',').map(Number)).toEqual([...BOUNDS]);
+    expect(migration).toContain(`'${NO_TENANT}'::uuid`);
+    expect(migration).toContain("interval '90 minutes'");
+    expect(testConfig().rollupFoldAfterMin).toBe(90);
+  });
+
+  it("writes the hour tables the worker's own aggregation would, edge cases included", async () => {
+    const r = await pool.query(
+      `SELECT created_at, tenant_id, model, served_model, status, error_code, cache, prompt_tokens, completion_tokens, cost_micros, saved_micros, latency_ms
+       FROM request_log WHERE created_at < (SELECT folded_through FROM rollup_state)`,
+    );
+    const entries = r.rows.map((x: Record<string, unknown>) => ({
+      startedAt: (x.created_at as Date).getTime(), tenantId: x.tenant_id, model: x.model, servedModel: x.served_model, status: x.status, errorCode: x.error_code, cache: x.cache,
+      promptTokens: x.prompt_tokens, completionTokens: x.completion_tokens, costMicros: Number(x.cost_micros), savedMicros: Number(x.saved_micros), latencyMs: x.latency_ms,
+    })) as unknown as LogEntry[];
+    const want = aggregate(entries, (t) => Math.floor(t / HOUR) * HOUR).map((g) => [g.bucket.toISOString(), g.tenantId, g.model, g.requests, g.errors, g.cacheHits, g.semanticHits, g.costMicros, g.savedMicros, g.promptTokens, g.completionTokens, g.latencyHist]);
+    const got = (await pool.query('SELECT bucket, tenant_id, model, requests, errors, cache_hits, semantic_hits, cost_micros, saved_micros, prompt_tokens, completion_tokens, latency_hist FROM rollup_hour ORDER BY 1, 2, 3')).rows.map(
+      (x: Record<string, unknown>) => [(x.bucket as Date).toISOString(), x.tenant_id, x.model, x.requests, x.errors, x.cache_hits, x.semantic_hits, Number(x.cost_micros), Number(x.saved_micros), Number(x.prompt_tokens), Number(x.completion_tokens), x.latency_hist],
+    );
+    expect(want.length).toBeGreaterThan(100);
+    expect(got).toEqual(want);
+    // The edge cases are in it: an empty model, a null tenant, and each of an error, a client that left and a refusal.
+    expect(got.some((g) => g[2] === '')).toBe(true);
+    expect(got.some((g) => g[1] === NO_TENANT && (g[6] as number) > 0)).toBe(true);
+    expect(entries.filter((e) => e.status === 499 && e.errorCode === 'client_closed')).toHaveLength(1);
   });
 });

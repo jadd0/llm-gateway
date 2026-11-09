@@ -4,6 +4,10 @@ A read-only admin page: p50 and p95 latency, spend by tenant, cache hit rate and
 last 50 failed requests. Ranges: 1 hour, 24 hours, 7 days, 30 days. Diagram: [rollups.html](rollups.html). Screens for sign-off:
 [screens/](screens/) (login and overview, 1280 and 390 wide, light and dark).
 
+Deploy order when the log already has history: **stop the old log worker, run `npm run db:migrate`, start the new worker**. The backfill
+covers the rows in the log when the migration runs; a worker still running the old code would write log rows the new rollups never
+see, and one started before the migration finishes would write rollups the backfill then counts again.
+
 Run it: set `DASHBOARD_TOKEN`, `DASHBOARD_SESSION_SECRET` and `DASHBOARD_DATABASE_URL` (see `.env.example`), run `npm run db:migrate`
 (it creates the read-only login named in the URL), then `npm run dashboard` and open `http://localhost:3200`.
 
@@ -50,7 +54,7 @@ rate is exact plus semantic hits over all requests. A request with no tenant is 
 
 The page connects as a Postgres role that can read the rollup tables, tenant ids and names, and seven columns of `request_log`
 (request id, time, tenant, model, status, error code, latency): not the ledger, keys, holds or any other column. A test asks the database
-for each refusal. `db:migrate` refuses to make a superuser, the migrating user or a role that owns objects into that login. Login is one admin token (`DASHBOARD_TOKEN`, at least 32 characters, compared in constant time) posted in a form body;
+for each refusal. `db:migrate` creates the login, or resets the password of one that already is a pure dashboard login; it refuses (changing nothing) any other existing role: the migrating user, one with a role attribute, memberships, grants or owned objects. The pool is `DASHBOARD_DB_POOL_MAX` connections (default 10; a page load holds three). Login is one admin token (`DASHBOARD_TOKEN`, at least 32 characters, compared in constant time) posted in a form body;
 the cookie holds an HMAC, keyed with `DASHBOARD_SESSION_SECRET`, of its issue time and the token, is HttpOnly and SameSite=Strict
 (Secure in production), and expires after 12 hours. Every route but the login checks it in the proxy and again in the page. Without a
 valid token and secret the server refuses to start. No prompts, responses or keys appear on any screen.

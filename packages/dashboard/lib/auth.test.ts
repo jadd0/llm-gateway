@@ -49,6 +49,11 @@ describe('environment', () => {
       expect(() => loadEnv({ ...ok, ...over })).toThrow(EnvError);
     }
   });
+  it('sizes the pool at 10 unless told otherwise, and refuses a pool too small for a page load', () => {
+    expect(loadEnv(ok).poolMax).toBe(10);
+    expect(loadEnv({ ...ok, DASHBOARD_DB_POOL_MAX: '25' }).poolMax).toBe(25);
+    for (const bad of ['2', '0', '-1', 'ten', '3.5']) expect(() => loadEnv({ ...ok, DASHBOARD_DB_POOL_MAX: bad })).toThrow(/DASHBOARD_DB_POOL_MAX/);
+  });
   it('names the variable and never prints its value', () => {
     expect(() => loadEnv({ ...ok, DASHBOARD_TOKEN: 'short-secret-value' })).toThrow(/DASHBOARD_TOKEN must be at least 32/);
     try {

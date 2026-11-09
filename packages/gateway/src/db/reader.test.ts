@@ -63,14 +63,14 @@ describe('provisionReader refuses a role it must not take over', () => {
     const n = `dashsu_${randomBytes(4).toString('hex')}`;
     made.push(n);
     await owner.query(`CREATE ROLE "${n}" SUPERUSER LOGIN PASSWORD 'first-pw-1234567890'`);
-    expect(await tryProvision(n, 'second-pw-1234567890')).toMatch(/superuser/);
+    expect(await tryProvision(n, 'second-pw-1234567890')).toMatch(/role attribute/);
     expect(await canLogin(n, 'first-pw-1234567890')).toBe(true);
     expect(await canLogin(n, 'second-pw-1234567890')).toBe(false);
   });
 
   it('refuses the user running the migration', async () => {
     const me = ((await owner.query('SELECT current_user AS u')).rows[0] as { u: string }).u;
-    expect(await tryProvision(me, 'whatever-pw-1234567890')).toMatch(/running this migration|superuser/);
+    expect(await tryProvision(me, 'whatever-pw-1234567890')).toMatch(/running this migration|role attribute/);
     expect(await canLogin(me, new URL(testConfig().databaseUrl).password)).toBe(true);
   });
 
@@ -79,12 +79,81 @@ describe('provisionReader refuses a role it must not take over', () => {
     made.push(n);
     await owner.query(`CREATE ROLE "${n}" LOGIN PASSWORD 'first-pw-1234567890'`);
     await owner.query(`CREATE SCHEMA "${n}" AUTHORIZATION "${n}"`);
-    expect(await tryProvision(n, 'second-pw-1234567890')).toMatch(/owns objects/);
+    expect(await tryProvision(n, 'second-pw-1234567890')).toMatch(/owns objects or holds grants/);
     expect(await canLogin(n, 'first-pw-1234567890')).toBe(true);
     expect(await canLogin(n, 'second-pw-1234567890')).toBe(false);
     await owner.query(`DROP SCHEMA "${n}"`);
     // Once it owns nothing it is an ordinary role and is taken over, which proves the refusal above was the ownership and nothing else.
     expect(await tryProvision(n, 'second-pw-1234567890')).toBe('ok');
+    expect(await canLogin(n, 'second-pw-1234567890')).toBe(true);
+  });
+});
+
+describe('provisionReader accepts only a new role or a pure dashboard login', () => {
+  const made: string[] = [];
+  const urlFor = (n: string, pw: string) => {
+    const u = new URL(testConfig().databaseUrl);
+    u.username = n;
+    u.password = pw;
+    return u.toString();
+  };
+  const tryProvision = async (n: string, pw: string) => {
+    const c = await owner.connect();
+    try {
+      return await provisionReader(c, urlFor(n, pw)).then(() => 'ok', (e: Error) => e.message);
+    } finally {
+      c.release();
+    }
+  };
+  const canLogin = async (n: string, pw: string) => {
+    const c = new pg.Client({ connectionString: urlFor(n, pw) });
+    const ok = await c.connect().then(() => true, () => false);
+    if (ok) await c.end();
+    return ok;
+  };
+  const make = async (attrs: string) => {
+    const n = `dashx_${randomBytes(4).toString('hex')}`;
+    made.push(n);
+    await owner.query(`CREATE ROLE "${n}" ${attrs} LOGIN PASSWORD 'first-pw-1234567890'`);
+    return n;
+  };
+  const untouched = async (n: string) => {
+    expect(await tryProvision(n, 'second-pw-1234567890')).not.toBe('ok');
+    expect(await canLogin(n, 'first-pw-1234567890')).toBe(true);
+    expect(await canLogin(n, 'second-pw-1234567890')).toBe(false);
+  };
+  afterAll(async () => {
+    for (const n of made) {
+      await owner.query(`DROP OWNED BY "${n}"`);
+      await owner.query(`DROP ROLE IF EXISTS "${n}"`);
+    }
+  });
+
+  it.each(['CREATEROLE', 'CREATEDB', 'REPLICATION', 'BYPASSRLS'])('refuses a role with %s, password untouched', async (attr) => {
+    await untouched(await make(attr));
+  });
+
+  it('refuses a role that is a member of another role, password untouched', async () => {
+    const n = await make('');
+    await owner.query(`GRANT pg_read_all_data TO "${n}"`);
+    await untouched(n);
+  });
+
+  it('refuses a role that holds a grant, password untouched; accepts it once the grant is gone', async () => {
+    const n = await make('');
+    await owner.query(`GRANT INSERT, UPDATE, DELETE ON tenants TO "${n}"`);
+    await untouched(n);
+    await owner.query(`REVOKE ALL ON tenants FROM "${n}"`);
+    expect(await tryProvision(n, 'second-pw-1234567890')).toBe('ok');
+    expect(await canLogin(n, 'second-pw-1234567890')).toBe(true);
+  });
+
+  it('accepts a pure dashboard login that already exists and sets its password', async () => {
+    const n = `dashx_${randomBytes(4).toString('hex')}`;
+    made.push(n);
+    expect(await tryProvision(n, 'first-pw-1234567890')).toBe('ok');
+    expect(await tryProvision(n, 'second-pw-1234567890')).toBe('ok');
+    expect(await canLogin(n, 'first-pw-1234567890')).toBe(false);
     expect(await canLogin(n, 'second-pw-1234567890')).toBe(true);
   });
 });

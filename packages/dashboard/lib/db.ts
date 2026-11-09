@@ -7,9 +7,10 @@ const g = globalThis as unknown as { __dashboardPool?: pg.Pool };
 
 export function pool(): pg.Pool {
   if (!g.__dashboardPool) {
+    const env = loadEnv();
     const p = new pg.Pool({
-      connectionString: loadEnv().databaseUrl,
-      max: 4,
+      connectionString: env.databaseUrl,
+      max: env.poolMax,
       statement_timeout: 15_000,
       options: '-c default_transaction_read_only=on',
     });

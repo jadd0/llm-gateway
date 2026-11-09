@@ -9,6 +9,7 @@ import { createDb } from '../../gateway/src/db/client.ts';
 import { provisionReader } from '../../gateway/src/db/reader.ts';
 import { toLogFields, toSpendFields, type LogEntry, type SpendEntry } from '../../gateway/src/requestlog/entry.ts';
 import { lockRollupState, testConfig } from '../../gateway/src/test-env.ts';
+import { UNAUTHENTICATED } from './tenants.ts';
 import { RANGES, RANGE_KEYS, lastErrors, overview, windowOf, type Queryable } from './queries.ts';
 
 // Real Postgres, read through the dashboard's own login role, so a query that touches anything the role may not
@@ -198,7 +199,7 @@ describe('lastErrors', () => {
     expect(rows).toHaveLength(50);
     expect(rows.map((r) => r.requestId)).toEqual(failed.slice(0, 50).map((e) => e.requestId));
     expect(rows.every((r) => r.status === 502 && r.errorCode === 'upstream_error')).toBe(true);
-    expect(Object.keys(rows[0]!).sort()).toEqual(['at', 'errorCode', 'latencyMs', 'model', 'requestId', 'status', 'tenant']);
+    expect(Object.keys(rows[0]!).sort()).toEqual(['at', 'errorCode', 'latencyMs', 'model', 'requestId', 'status', 'tenant', 'tenantKind']);
     expect(rows[0]!.tenant).toBe(tenants.find((t) => t.id === failed[0]!.tenantId)!.name);
   });
 });
@@ -210,13 +211,16 @@ describe('windows', () => {
       const { from, to } = windowOf(range, now);
       const { ms, stepMs } = RANGES[range];
       expect(from.getTime() % stepMs).toBe(0);
-      // Never later than the range asked for, and less than one step earlier.
-      expect(now.getTime() - from.getTime()).toBeGreaterThanOrEqual(ms);
-      expect(now.getTime() - from.getTime()).toBeLessThan(ms + stepMs);
+      // Never longer than the range asked for, and short of it by less than one step.
+      expect(now.getTime() - from.getTime()).toBeLessThanOrEqual(ms);
+      expect(now.getTime() - from.getTime()).toBeGreaterThan(ms - stepMs);
       expect(to).toEqual(now);
     }
-    expect(windowOf('24h', now).from.toISOString()).toBe('2032-06-14T12:30:00.000Z');
-    expect(windowOf('30d', now).from.toISOString()).toBe('2032-05-16T12:00:00.000Z');
+    expect(windowOf('24h', now).from.toISOString()).toBe('2032-06-14T12:45:00.000Z');
+    expect(windowOf('30d', now).from.toISOString()).toBe('2032-05-16T18:00:00.000Z');
+    // A time just under a step boundary adds nothing: 30 days at 05:59 is still 30 days, not 30 days and 6 hours.
+    const late = windowOf('30d', new Date('2032-06-15T05:59:00Z'));
+    expect(new Date('2032-06-15T05:59:00Z').getTime() - late.from.getTime()).toBeLessThanOrEqual(RANGES['30d'].ms);
     // And a series built on it has no point before it, and every point is a whole step.
     const o = await overview(watched, '24h', NOW);
     expect(o.series.length).toBeGreaterThan(20);
@@ -250,6 +254,7 @@ describe('tenant names', () => {
   const ghostModel = `ghost-${run}`;
   const ghostIds: string[] = [];
   let deleted = '';
+  let lookalike = '';
 
   const entry = (tenantId: string | null, i: number, status: number): LogEntry => ({
     requestId: randomUUID(), startedAt: GHOST_NOW.getTime() - (i + 1) * 7 * MIN, tenantId, keyId: null, model: ghostModel, servedModel: ghostModel, provider: 'mock',
@@ -260,7 +265,10 @@ describe('tenant names', () => {
   beforeAll(async () => {
     const t = await createTenant(owner.db, `ghost-${run}`);
     deleted = t.id;
-    const es = [...[0, 1, 2, 3].map((i) => entry(t.id, i, i === 0 ? 502 : 200)), ...[4, 5, 6].map((i) => entry(null, i, i === 4 ? 503 : 200)), entry(tenants[0]!.id, 7, 502)];
+    // A real tenant whose own name is the word the sentinel row used to be shown as.
+    await owner.pool.query("DELETE FROM tenants WHERE name = 'Unauthenticated'");
+    lookalike = (await createTenant(owner.db, 'Unauthenticated')).id;
+    const es = [entry(lookalike, 8, 502), entry(lookalike, 9, 200), ...[0, 1, 2, 3].map((i) => entry(t.id, i, i === 0 ? 502 : 200)), ...[4, 5, 6].map((i) => entry(null, i, i === 4 ? 503 : 200)), entry(tenants[0]!.id, 7, 502)];
     ghostIds.push(...es.map((e) => e.requestId));
     const r = await applyBatch(owner.db, es.map((e, i) => ({ id: `${i}-0`, fields: toLogFields(e), stream: 'x' })));
     if (r.failed.length) throw new Error('ghost seed failed');
@@ -272,22 +280,29 @@ describe('tenant names', () => {
     await owner.pool.query("DELETE FROM rollup_total_hour WHERE bucket >= '2030-01-01' AND bucket < '2031-01-01'");
     await owner.pool.query("DELETE FROM rollup_total_minute WHERE bucket >= '2030-01-01' AND bucket < '2031-01-01'");
     await owner.pool.query('DELETE FROM request_log WHERE request_id = ANY($1)', [ghostIds]);
+    await owner.pool.query('DELETE FROM tenants WHERE id = $1', [lookalike]);
   });
 
   it('calls only a request with no tenant unauthenticated; a tenant whose row is gone is a deleted tenant', async () => {
     // 30 days: these rows are far behind the fold mark, so they live in the hour tables only.
     const o = await overview(watched, '30d', GHOST_NOW);
     const names = o.byTenant.map((t) => t.name);
-    expect(o.byTenant.find((t) => t.tenantId === deleted)!.name).toBe(`Deleted tenant ${deleted.slice(0, 8)}`);
-    expect(names.filter((n) => n === 'Unauthenticated')).toHaveLength(1);
-    expect(o.byTenant.find((t) => t.tenantId === tenants[0]!.id)!.name).toBe(tenants[0]!.name);
-    expect(o.byTenant.find((t) => t.name === 'Unauthenticated')!.requests).toBe(3);
+    expect(o.byTenant.find((t) => t.tenantId === deleted)).toMatchObject({ name: `Deleted tenant ${deleted.slice(0, 8)} (removed)`, kind: 'deleted' });
+    expect(o.byTenant.filter((t) => t.kind === 'unauthenticated')).toHaveLength(1);
+    expect(o.byTenant.find((t) => t.kind === 'unauthenticated')).toMatchObject({ name: UNAUTHENTICATED, requests: 3 });
+    expect(o.byTenant.find((t) => t.tenantId === tenants[0]!.id)).toMatchObject({ name: tenants[0]!.name, kind: 'tenant' });
+    // A tenant literally named "Unauthenticated" is a tenant: not the sentinel row, and not shown with its label.
+    expect(o.byTenant.find((t) => t.tenantId === lookalike)).toMatchObject({ name: 'Unauthenticated', kind: 'tenant', requests: 2 });
+    expect(UNAUTHENTICATED).not.toBe('Unauthenticated');
+    expect(names.filter((n) => n === UNAUTHENTICATED)).toHaveLength(1);
 
     const rows = await lastErrors(watched, 1_000_000);
-    const label = (id: string) => rows.find((r) => r.requestId === id)!.tenant;
-    const byId = new Map(ghostIds.map((id, i) => [i, id]));
-    expect(label(byId.get(0)!)).toBe(`Deleted tenant ${deleted.slice(0, 8)}`);
-    expect(label(byId.get(4)!)).toBe('Unauthenticated');
-    expect(label(byId.get(7)!)).toBe(tenants[0]!.name);
+    const row = (id: string) => rows.find((r) => r.requestId === id)!;
+    const at = (n: number) => row(ghostIds[n]!);
+    // ghostIds: 0 the lookalike's failure, 1 its success, 2..5 deleted (first fails), 6..8 unauthenticated (first fails), 9 a live tenant's failure.
+    expect(at(0)).toMatchObject({ tenant: 'Unauthenticated', tenantKind: 'tenant' });
+    expect(at(2)).toMatchObject({ tenant: `Deleted tenant ${deleted.slice(0, 8)} (removed)`, tenantKind: 'deleted' });
+    expect(at(6)).toMatchObject({ tenant: UNAUTHENTICATED, tenantKind: 'unauthenticated' });
+    expect(at(9)).toMatchObject({ tenant: tenants[0]!.name, tenantKind: 'tenant' });
   });
 });

@@ -18,6 +18,8 @@ describe('pool', () => {
     const first = pool();
     for (let i = 0; i < 25; i++) expect(pool()).toBe(first);
     expect(first.listenerCount('error')).toBe(1);
+    // One page load holds three connections at once; the pool is sized above that.
+    expect((first.options as { max: number }).max).toBe(10);
     const lines: string[] = [];
     const orig = console.error;
     console.error = (l: string) => void lines.push(l);

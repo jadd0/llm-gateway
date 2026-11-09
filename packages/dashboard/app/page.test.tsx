@@ -7,6 +7,7 @@ import { createTenant } from '../../gateway/src/cli/keys.ts';
 import { createDb } from '../../gateway/src/db/client.ts';
 import { toLogFields, type LogEntry } from '../../gateway/src/requestlog/entry.ts';
 import { lockRollupState, testConfig } from '../../gateway/src/test-env.ts';
+import { ErrorsTable } from '../components/ErrorsTable.tsx';
 import { OverviewView } from '../components/OverviewView.tsx';
 import { lastErrors, overview } from '../lib/queries.ts';
 
@@ -97,3 +98,14 @@ describe('overview page', () => {
     expect(html).toContain('—');
   });
 });
+
+describe('errors table tenants', () => {
+  it('shows the unauthenticated and deleted-tenant rows apart from a tenant that is named like them', () => {
+    const row = (n: number, tenant: string, tenantKind: 'tenant' | 'unauthenticated' | 'deleted') => ({ requestId: `r${n}`, at: new Date(0), tenant, tenantKind, model: 'm', status: 502, errorCode: 'e', latencyMs: 1 });
+    const html = renderToStaticMarkup(<ErrorsTable rows={[row(1, 'Unauthenticated', 'tenant'), row(2, 'Unauthenticated (no key)', 'unauthenticated'), row(3, 'Deleted tenant ab12cd34 (removed)', 'deleted')]} />);
+    expect(html).toContain('<td>Unauthenticated</td>');
+    expect(html).toContain('<td class="sentinel">Unauthenticated (no key)</td>');
+    expect(html).toContain('<td class="sentinel">Deleted tenant ab12cd34 (removed)</td>');
+  });
+});
+

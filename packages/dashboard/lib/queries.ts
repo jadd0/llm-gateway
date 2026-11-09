@@ -1,5 +1,5 @@
 import { merge, percentile } from './histogram.ts';
-import { tenantLabel } from './tenants.ts';
+import { tenantLabel, type TenantKind } from './tenants.ts';
 
 // Everything the overview page shows. Reads rollup tables only, plus the newest failures from the request log
 // (through the partial index on its error rows). Each function takes a `now`, so a test fixes the clock.
@@ -51,8 +51,9 @@ export interface Totals {
 
 export interface TenantSpend {
   tenantId: string;
-  /** What to show: the tenant's name, "Unauthenticated", or "Deleted tenant <id>" (see tenantLabel). */
+  /** What to show: the tenant's name, or a label for the unauthenticated and deleted-tenant rows (see tenantLabel). */
   name: string;
+  kind: TenantKind;
   requests: number;
   costMicros: number;
 }
@@ -61,6 +62,7 @@ export interface ErrorRow {
   requestId: string;
   at: Date;
   tenant: string;
+  tenantKind: TenantKind;
   model: string | null;
   status: number;
   errorCode: string | null;
@@ -68,13 +70,13 @@ export interface ErrorRow {
 }
 
 /**
- * The window a range covers, ending at `now`. It starts on a boundary of the range's own step (a minute, 15 minutes,
- * an hour, 6 hours, counted from midnight UTC), so the first point of a series covers a whole step instead of a partial one,
- * and no rollup bucket is half-counted.
+ * The window a range covers, ending at `now`. It starts on the first boundary of the range's own step (a minute, 15 minutes,
+ * an hour, 6 hours, counted from midnight UTC) at or after `now - range`, so every point of a series covers a whole step,
+ * no rollup bucket is half-counted, and the window is never longer than its label: it falls short by less than one step.
  */
 export function windowOf(range: RangeKey, now: Date): { from: Date; to: Date } {
   const { ms, stepMs } = RANGES[range];
-  return { from: new Date(Math.floor((now.getTime() - ms) / stepMs) * stepMs), to: now };
+  return { from: new Date(Math.ceil((now.getTime() - ms) / stepMs) * stepMs), to: now };
 }
 
 // The rows a range is summed from. Up to 24 hours: the minute table. Longer: the hour table, plus the minutes
@@ -172,7 +174,7 @@ export async function overview(db: Queryable, range: RangeKey, now: Date): Promi
   totals.p50 = percentile(hist, 0.5);
   totals.p95 = percentile(hist, 0.95);
 
-  const byTenant = tenants.rows.map((r) => ({ tenantId: r.tenant_id, name: tenantLabel(r.tenant_id, r.name), requests: num(r.requests), costMicros: num(r.cost) }));
+  const byTenant = tenants.rows.map((r) => ({ tenantId: r.tenant_id, ...(({ label, kind }) => ({ name: label, kind }))(tenantLabel(r.tenant_id, r.name)), requests: num(r.requests), costMicros: num(r.cost) }));
 
   return { range, from, to, stepMs, series, totals, byTenant };
 }
@@ -187,5 +189,5 @@ export async function lastErrors(db: Queryable, limit = 50): Promise<ErrorRow[]>
      LIMIT $1`,
     [limit],
   );
-  return r.rows.map((x) => ({ requestId: x.request_id, at: new Date(x.created_at), tenant: tenantLabel(x.tenant_id, x.name), model: x.model, status: x.status, errorCode: x.error_code, latencyMs: x.latency_ms }));
+  return r.rows.map((x) => ({ requestId: x.request_id, at: new Date(x.created_at), tenant: tenantLabel(x.tenant_id, x.name).label, tenantKind: tenantLabel(x.tenant_id, x.name).kind, model: x.model, status: x.status, errorCode: x.error_code, latencyMs: x.latency_ms }));
 }
