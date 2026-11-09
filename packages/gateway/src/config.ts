@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { parseUsd } from './pricing/prices.ts';
 
 // A blank value in an env file (`KEY=`) means "not set", so the default applies.
 const blankAsUnset = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? undefined : v);
@@ -24,6 +25,20 @@ const cacheFields = {
   AUTH_TOMBSTONE_TTL_S: int(1200, 1),
 };
 
+// A USD amount written as "10" or "0.01": converted to integer micro-USD with no float in between.
+const usd = (def: string) =>
+  z.preprocess(
+    blankAsUnset,
+    z
+      .string()
+      .default(def)
+      .transform((v, ctx) => {
+        const micros = parseUsd(v);
+        if (micros === undefined) ctx.addIssue({ code: 'custom', message: 'must be a USD amount like 10 or 0.01' });
+        return micros ?? 0;
+      }),
+  );
+
 const schema = z
   .object({
     GATEWAY_HOST: z.preprocess(blankAsUnset, z.string().default('127.0.0.1')),
@@ -44,6 +59,11 @@ const schema = z
     RATE_LIMIT_DEFAULT_TPM: int(200_000, 1),
     RATE_LIMIT_DEFAULT_MAX_TOKENS: int(1024, 1),
     RATE_LIMIT_REDIS_TIMEOUT_MS: int(50, 1),
+    BUDGET_ENABLED: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
+    BUDGET_DEFAULT_MONTHLY_USD: usd('10'),
+    BUDGET_RESERVATION_TTL_S: int(300, 1),
+    BUDGET_REDIS_TIMEOUT_MS: int(50, 1),
+    BUDGET_EPOCH_REFRESH_S: int(5, 1),
   })
   .refine((e) => e.AUTH_CACHE === 'none' || e.REDIS_URL !== undefined, {
     message: 'REDIS_URL is required when AUTH_CACHE=redis',
@@ -51,6 +71,10 @@ const schema = z
   })
   .refine((e) => e.RATE_LIMIT_ENABLED === 'false' || e.REDIS_URL !== undefined, {
     message: 'REDIS_URL is required when RATE_LIMIT_ENABLED=true',
+    path: ['REDIS_URL'],
+  })
+  .refine((e) => e.BUDGET_ENABLED === 'false' || e.REDIS_URL !== undefined, {
+    message: 'REDIS_URL is required when BUDGET_ENABLED=true',
     path: ['REDIS_URL'],
   })
   .refine((e) => e.AUTH_TOMBSTONE_TTL_S > e.AUTH_CACHE_TTL_S, {
@@ -81,6 +105,12 @@ export interface Config {
   /** Output tokens assumed when a request names no max_tokens. */
   rateLimitDefaultMaxTokens: number;
   rateLimitRedisTimeoutMs: number;
+  budgetEnabled: boolean;
+  /** Monthly cap in micro-USD for tenants with none of their own. */
+  budgetDefaultMonthlyMicros: number;
+  budgetReservationTtlS: number;
+  budgetRedisTimeoutMs: number;
+  budgetEpochRefreshS: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -107,6 +137,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     rateLimitDefaultTpm: e.RATE_LIMIT_DEFAULT_TPM,
     rateLimitDefaultMaxTokens: e.RATE_LIMIT_DEFAULT_MAX_TOKENS,
     rateLimitRedisTimeoutMs: e.RATE_LIMIT_REDIS_TIMEOUT_MS,
+    budgetEnabled: e.BUDGET_ENABLED === 'true',
+    budgetDefaultMonthlyMicros: e.BUDGET_DEFAULT_MONTHLY_USD,
+    budgetReservationTtlS: e.BUDGET_RESERVATION_TTL_S,
+    budgetRedisTimeoutMs: e.BUDGET_REDIS_TIMEOUT_MS,
+    budgetEpochRefreshS: e.BUDGET_EPOCH_REFRESH_S,
   };
 }
 
