@@ -163,14 +163,15 @@ export const isError = (status: number, errorCode: string | null): boolean => st
 /** The tenant of a request that never authenticated, so rollup keys need no null. */
 export const NO_TENANT = '00000000-0000-0000-0000-000000000000';
 
-// Pre-aggregated request-log counts per (time bucket, tenant, model), written by the log worker in the same
-// transaction as the log rows they summarise. The dashboard reads only these. `rollup_minute` holds recent
-// minutes, `rollup_hour` all history. Latency is a histogram (counts per fixed log-scale bucket), never a
+// Pre-aggregated request-log counts, written by the log worker in the same transaction as the log rows they
+// summarise. The dashboard reads only these. Latency is a histogram (counts per fixed log-scale bucket), never a
 // percentile, so any range can be merged exactly.
-const rollupColumns = () => ({
-  bucket: timestamp('bucket', { withTimezone: true }).notNull(),
-  tenantId: uuid('tenant_id').notNull(),
-  model: text('model').notNull().default(''),
+//   rollup_minute / rollup_hour             per (time bucket, tenant, model): who spent what, which model
+//   rollup_total_minute / rollup_total_hour per time bucket across everything: the time series and the percentiles.
+//                                           A merged histogram per tenant and model would cost thousands of rows per
+//                                           chart; these have one row per minute or hour.
+// `*_minute` holds recent minutes, `*_hour` all history.
+const measures = () => ({
   requests: integer('requests').notNull(),
   errors: integer('errors').notNull(),
   cacheHits: integer('cache_hits').notNull(),
@@ -181,13 +182,24 @@ const rollupColumns = () => ({
   completionTokens: bigint('completion_tokens', { mode: 'number' }).notNull(),
   latencyHist: integer('latency_hist').array().notNull(),
 });
+const bucketCol = () => timestamp('bucket', { withTimezone: true }).notNull();
+const dimColumns = () => ({
+  bucket: bucketCol(),
+  tenantId: uuid('tenant_id').notNull(),
+  model: text('model').notNull().default(''),
+  ...measures(),
+});
+const totalColumns = () => ({ bucket: bucketCol(), ...measures() });
 
-export const rollupMinute = pgTable('rollup_minute', rollupColumns(), (t) => [primaryKey({ columns: [t.bucket, t.tenantId, t.model] })]);
-export const rollupHour = pgTable('rollup_hour', rollupColumns(), (t) => [primaryKey({ columns: [t.bucket, t.tenantId, t.model] })]);
+export const rollupMinute = pgTable('rollup_minute', dimColumns(), (t) => [primaryKey({ columns: [t.bucket, t.tenantId, t.model] })]);
+export const rollupHour = pgTable('rollup_hour', dimColumns(), (t) => [primaryKey({ columns: [t.bucket, t.tenantId, t.model] })]);
+export const rollupTotalMinute = pgTable('rollup_total_minute', totalColumns(), (t) => [primaryKey({ columns: [t.bucket] })]);
+export const rollupTotalHour = pgTable('rollup_total_hour', totalColumns(), (t) => [primaryKey({ columns: [t.bucket] })]);
 
-// One row. Minutes before `folded_through` are in rollup_hour and no longer written to rollup_minute: a batch
-// holding a row older than the mark adds it to the hour directly. The fold moves the mark forward under a row
-// lock that every batch takes shared, so a minute is counted in exactly one table.
+// One row. Minutes before `folded_through` are in the hour tables. A batch holding a row older than the mark adds
+// it to the hour tables, and to the minute tables too (for the minute-grain views, until retention drops it); the
+// fold only ever reads minutes at or after the mark, so nothing is folded twice. The fold moves the mark forward
+// under a row lock that every batch takes shared, so a request is counted once in the hour tables whatever the order.
 export const rollupState = pgTable(
   'rollup_state',
   {

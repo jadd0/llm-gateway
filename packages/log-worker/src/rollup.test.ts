@@ -23,6 +23,8 @@ let unlock: () => Promise<void>;
 
 // One injected clock for the whole file.
 const NOW = new Date('2031-03-01T12:30:00Z');
+const WINDOW_FROM = '2031-01-01T00:00:00Z';
+const WINDOW_TO = '2031-04-01T00:00:00Z';
 const MIN = 60_000;
 const HOUR = 3_600_000;
 
@@ -74,9 +76,9 @@ interface Group {
 }
 
 // The answer, straight from the request log with a plain GROUP BY (its own copy of what an error is).
-async function groupBy(unit: 'minute' | 'hour'): Promise<Group[]> {
+async function groupBy(unit: 'minute' | 'hour', dims = true): Promise<Group[]> {
   const r = await db.execute<Record<string, string | string[]>>(sql`
-    SELECT date_trunc(${unit}, created_at, 'UTC') AS b, coalesce(tenant_id, ${NO_TENANT}::uuid) AS t, coalesce(served_model, model, '') AS m,
+    SELECT date_trunc(${unit}, created_at, 'UTC') AS b, ${dims ? sql`coalesce(tenant_id, ${NO_TENANT}::uuid)` : sql`''`} AS t, ${dims ? sql`coalesce(served_model, model, '')` : sql`''`} AS m,
            count(*) AS requests,
            count(*) FILTER (WHERE status >= 500 OR error_code = 'upstream_stream_broken') AS errors,
            count(*) FILTER (WHERE cache = 'hit') AS hits, count(*) FILTER (WHERE cache = 'semantic-hit') AS sem,
@@ -91,11 +93,12 @@ async function groupBy(unit: 'minute' | 'hour'): Promise<Group[]> {
   }));
 }
 
-async function rollup(table: 'rollup_minute' | 'rollup_hour', sinceExclusive?: Date): Promise<Group[]> {
+async function rollup(table: 'rollup_minute' | 'rollup_hour' | 'rollup_total_minute' | 'rollup_total_hour', sinceExclusive?: Date): Promise<Group[]> {
+  const total = table.startsWith('rollup_total');
   const r = await db.execute<Record<string, string | string[]>>(sql`
-    SELECT bucket AS b, tenant_id AS t, model AS m, requests, errors, cache_hits AS hits, semantic_hits AS sem, cost_micros AS cost,
+    SELECT bucket AS b, ${total ? sql`''` : sql.raw('tenant_id')} AS t, ${total ? sql`''` : sql.raw('model')} AS m, requests, errors, cache_hits AS hits, semantic_hits AS sem, cost_micros AS cost,
            saved_micros AS saved, prompt_tokens AS prompt, completion_tokens AS completion, latency_hist AS hist
-    FROM ${sql.raw(table)} WHERE model LIKE ${model + '-%'} AND bucket >= ${(sinceExclusive ?? new Date(0)).toISOString()}::timestamptz ORDER BY 1, 2, 3`);
+    FROM ${sql.raw(table)} WHERE ${total ? sql`bucket >= ${WINDOW_FROM}::timestamptz AND bucket < ${WINDOW_TO}::timestamptz` : sql`model LIKE ${model + '-%'}`} AND bucket >= ${(sinceExclusive ?? new Date(0)).toISOString()}::timestamptz ORDER BY 1, 2, 3`);
   return r.rows.map((x) => ({
     bucket: new Date(x.b as string).toISOString(), tenant: x.t as string, model: x.m as string, requests: Number(x.requests), errors: Number(x.errors),
     cacheHits: Number(x.hits), semanticHits: Number(x.sem), cost: Number(x.cost), saved: Number(x.saved), prompt: Number(x.prompt), completion: Number(x.completion),
@@ -109,14 +112,21 @@ beforeAll(async () => {
   unlock = await lockRollupState(testConfig().databaseUrl);
   originalMark = (await mark()).toISOString();
 });
+// Everything the file writes is removed: the rows by their models, the totals by this file's window of 2031.
+const wipe = async () => {
+  await db.execute(sql`DELETE FROM rollup_minute WHERE model LIKE ${`rt-${run}-%`}`);
+  await db.execute(sql`DELETE FROM rollup_hour WHERE model LIKE ${`rt-${run}-%`}`);
+  await db.execute(sql`DELETE FROM rollup_total_minute WHERE bucket >= ${WINDOW_FROM}::timestamptz AND bucket < ${WINDOW_TO}::timestamptz`);
+  await db.execute(sql`DELETE FROM rollup_total_hour WHERE bucket >= ${WINDOW_FROM}::timestamptz AND bucket < ${WINDOW_TO}::timestamptz`);
+  await db.execute(sql`DELETE FROM request_log WHERE coalesce(served_model, model) LIKE ${`rt-${run}-%`}`);
+};
 beforeEach(async () => {
+  await wipe();
   model = `rt-${run}-${++testN}`;
   await db.execute(sql`UPDATE rollup_state SET folded_through = 'epoch' WHERE id = 1`);
 });
 afterAll(async () => {
-  await db.execute(sql`DELETE FROM rollup_minute WHERE model LIKE ${`rt-${run}-%`}`);
-  await db.execute(sql`DELETE FROM rollup_hour WHERE model LIKE ${`rt-${run}-%`}`);
-  await db.execute(sql`DELETE FROM request_log WHERE coalesce(served_model, model) LIKE ${`rt-${run}-%`}`);
+  await wipe();
   await db.execute(sql`UPDATE rollup_state SET folded_through = ${originalMark}::timestamptz WHERE id = 1`);
   await handle.close();
   await unlock();
@@ -136,8 +146,13 @@ describe('batch rollups', () => {
     expect(want.some((g) => g.errors > 0 && g.cacheHits > 0 && g.semanticHits > 0)).toBe(true);
     expect(totalRequests(want)).toBe(600);
     expect(got).toEqual(want);
-    // The hour table is untouched until the fold.
+    // The totals table has one row per minute across all tenants and models.
+    const wantTotals = await groupBy('minute', false);
+    expect(wantTotals.length).toBeGreaterThan(50);
+    expect(await rollup('rollup_total_minute')).toEqual(wantTotals);
+    // The hour tables are untouched until the fold.
     expect(await rollup('rollup_hour')).toEqual([]);
+    expect(await rollup('rollup_total_hour')).toEqual([]);
   });
 
   it('counts a client that left and a refusal as requests but not errors, and a broken stream as an error', async () => {
@@ -195,6 +210,7 @@ describe('fold', () => {
     const hourly = (await groupBy('hour')).filter((g) => new Date(g.bucket) < horizon);
     expect(hourly.length).toBeGreaterThan(10);
     expect(await rollup('rollup_hour')).toEqual(hourly);
+    expect(await rollup('rollup_total_hour')).toEqual((await groupBy('hour', false)).filter((g) => new Date(g.bucket) < horizon));
     // The hours not yet folded are in the minute table only.
     expect(totalRequests(await rollup('rollup_minute', horizon))).toBe(totalRequests((await groupBy('minute')).filter((g) => new Date(g.bucket) >= horizon)));
     // Running it again moves nothing.
@@ -202,19 +218,32 @@ describe('fold', () => {
     expect(await rollup('rollup_hour')).toEqual(hourly);
   });
 
-  it('counts a row that arrives after its hour was folded exactly once', async () => {
+  it('counts a row that arrives after its hour was folded exactly once, in the hour tables and at minute grain', async () => {
     const early = entries(200, new Date(NOW.getTime() - 5 * HOUR), new Date(NOW.getTime() - 3 * HOUR), 9);
     await apply(early);
     await foldRollups(db, NOW, 90);
     const late = entries(40, new Date(NOW.getTime() - 5 * HOUR), new Date(NOW.getTime() - 3 * HOUR), 10);
     await apply(late);
-    // The late rows went straight to the hour table; none were put back in a folded minute.
     const horizon = await mark();
-    expect((await rollup('rollup_minute')).filter((g) => new Date(g.bucket) < horizon).reduce((s, g) => s + g.requests, 0)).toBe(200);
+    // The hour tables hold all 240 once. The minute table holds them too, so a 24 hour view that reads minutes sees them.
     expect(await rollup('rollup_hour')).toEqual((await groupBy('hour')).filter((g) => new Date(g.bucket) < horizon));
-    // And a later fold does not add them again.
+    expect(totalRequests(await rollup('rollup_hour'))).toBe(240);
+    expect(await rollup('rollup_total_hour')).toEqual((await groupBy('hour', false)).filter((g) => new Date(g.bucket) < horizon));
+    expect(await rollup('rollup_minute')).toEqual(await groupBy('minute'));
+    expect(await rollup('rollup_total_minute')).toEqual(await groupBy('minute', false));
+    // A later fold reads only minutes at or after the old mark, so it adds nothing for them a second time.
     await foldRollups(db, new Date(NOW.getTime() + 3 * HOUR), 90);
     expect(await rollup('rollup_hour')).toEqual((await groupBy('hour')).filter((g) => new Date(g.bucket) < NOW));
+    expect(await rollup('rollup_total_hour')).toEqual((await groupBy('hour', false)).filter((g) => new Date(g.bucket) < NOW));
+  });
+
+  it('keeps a row older than the minute views reach only in the hour tables', async () => {
+    await foldRollups(db, NOW, 90);
+    const ancient = entries(30, new Date(NOW.getTime() - 100 * HOUR), new Date(NOW.getTime() - 99 * HOUR), 11);
+    await apply(ancient);
+    expect(totalRequests(await rollup('rollup_hour'))).toBe(30);
+    expect(await rollup('rollup_minute')).toEqual([]);
+    expect(await rollup('rollup_total_minute')).toEqual([]);
   });
 
   it('a fold waits for a batch that is mid-write and counts it', async () => {
@@ -243,6 +272,7 @@ describe('fold', () => {
     // These rows were written to the rollups directly, so the answer is aggregate() by the hour rather than the log.
     const want = aggregate(es, (t) => Math.floor(t / HOUR) * HOUR).map((r) => [r.bucket.toISOString(), r.tenantId, r.model, r.requests, r.latencyHist]);
     expect((await rollup('rollup_hour')).map((g) => [g.bucket, g.tenant, g.model, g.requests, g.hist])).toEqual(want);
+    expect(totalRequests(await rollup('rollup_total_hour'))).toBe(100);
   });
 });
 
@@ -254,6 +284,7 @@ describe('retention', () => {
     // Nothing is folded yet: however old, the old minutes stay.
     expect(await deleteOldMinutes(db, NOW, 48)).toBe(0);
     expect(totalRequests(await rollup('rollup_minute'))).toBe(300);
+    expect(totalRequests(await rollup('rollup_total_minute'))).toBe(300);
 
     await foldRollups(db, NOW, 90);
     const deleted = await deleteOldMinutes(db, NOW, 48);
@@ -262,6 +293,7 @@ describe('retention', () => {
     // The old hours' minutes are gone and their hour rows stay; everything recent is still there.
     expect(left.every((g) => new Date(g.bucket).getTime() >= NOW.getTime() - 48 * HOUR)).toBe(true);
     expect(totalRequests(left)).toBe(150);
+    expect(totalRequests(await rollup('rollup_total_minute'))).toBe(150);
     expect(totalRequests(await rollup('rollup_hour'))).toBe(150 + totalRequests((await groupBy('hour')).filter((g) => new Date(g.bucket) < new Date(Math.floor((NOW.getTime() - 90 * MIN) / HOUR) * HOUR) && new Date(g.bucket).getTime() >= NOW.getTime() - 48 * HOUR)));
   });
 

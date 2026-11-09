@@ -39,6 +39,9 @@ describe('dashboard_reader', () => {
     // Positive controls: a refusal below means something only if the same login can read what it should.
     await expect(reader.query('SELECT count(*) FROM rollup_minute')).resolves.toBeTruthy();
     await expect(reader.query('SELECT count(*) FROM rollup_hour')).resolves.toBeTruthy();
+    await expect(reader.query('SELECT count(*) FROM rollup_total_minute')).resolves.toBeTruthy();
+    await expect(reader.query('SELECT count(*) FROM rollup_total_hour')).resolves.toBeTruthy();
+    await expect(reader.query('SELECT folded_through FROM rollup_state')).resolves.toBeTruthy();
     await expect(reader.query('SELECT id, name FROM tenants LIMIT 1')).resolves.toBeTruthy();
     await expect(reader.query('SELECT request_id, created_at, tenant_id, model, status, error_code, latency_ms FROM request_log LIMIT 1')).resolves.toBeTruthy();
   });

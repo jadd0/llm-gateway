@@ -1,5 +1,5 @@
 {
-  "id": "7713e883-1872-4241-b03e-b7c1136647a8",
+  "id": "cdebb658-3bbd-4630-a76d-b8501010c3ce",
   "prevId": "0af29636-d6e6-4500-8d42-d084896f7616",
   "version": "7",
   "dialect": "postgresql",
@@ -650,6 +650,166 @@
           "value": "\"rollup_state\".\"id\" = 1"
         }
       },
+      "isRLSEnabled": false
+    },
+    "public.rollup_total_hour": {
+      "name": "rollup_total_hour",
+      "schema": "",
+      "columns": {
+        "bucket": {
+          "name": "bucket",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requests": {
+          "name": "requests",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "errors": {
+          "name": "errors",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "cache_hits": {
+          "name": "cache_hits",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "semantic_hits": {
+          "name": "semantic_hits",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "cost_micros": {
+          "name": "cost_micros",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "saved_micros": {
+          "name": "saved_micros",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "prompt_tokens": {
+          "name": "prompt_tokens",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "completion_tokens": {
+          "name": "completion_tokens",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "latency_hist": {
+          "name": "latency_hist",
+          "type": "integer[]",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "rollup_total_hour_bucket_pk": {
+          "name": "rollup_total_hour_bucket_pk",
+          "columns": [
+            "bucket"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.rollup_total_minute": {
+      "name": "rollup_total_minute",
+      "schema": "",
+      "columns": {
+        "bucket": {
+          "name": "bucket",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "requests": {
+          "name": "requests",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "errors": {
+          "name": "errors",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "cache_hits": {
+          "name": "cache_hits",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "semantic_hits": {
+          "name": "semantic_hits",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "cost_micros": {
+          "name": "cost_micros",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "saved_micros": {
+          "name": "saved_micros",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "prompt_tokens": {
+          "name": "prompt_tokens",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "completion_tokens": {
+          "name": "completion_tokens",
+          "type": "bigint",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "latency_hist": {
+          "name": "latency_hist",
+          "type": "integer[]",
+          "primaryKey": false,
+          "notNull": true
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "rollup_total_minute_bucket_pk": {
+          "name": "rollup_total_minute_bucket_pk",
+          "columns": [
+            "bucket"
+          ]
+        }
+      },
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
       "isRLSEnabled": false
     },
     "public.spend_ledger": {

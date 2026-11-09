@@ -78,14 +78,19 @@ export function windowOf(range: RangeKey, now: Date): { from: Date; to: Date } {
 
 // The rows a range is summed from. Up to 24 hours: the minute table. Longer: the hour table, plus the minutes
 // that have not been folded into it yet (at or after the fold mark), so no request is in both or neither.
-function source(range: RangeKey): string {
-  const cols = 'bucket, tenant_id, model, requests, errors, cache_hits, semantic_hits, cost_micros, saved_micros, prompt_tokens, completion_tokens, latency_hist';
+// `total` tables hold one row per bucket across all tenants and models (series and percentiles); the others hold a
+// row per tenant and model (spend by tenant).
+function source(range: RangeKey, kind: 'total' | 'tenant'): string {
+  const [minute, hour] = kind === 'total' ? ['rollup_total_minute', 'rollup_total_hour'] : ['rollup_minute', 'rollup_hour'];
+  const cols = kind === 'total'
+    ? 'bucket, requests, errors, cache_hits, semantic_hits, cost_micros, saved_micros, prompt_tokens, completion_tokens, latency_hist'
+    : 'bucket, tenant_id, requests, cost_micros';
   if (RANGES[range].minute) {
-    return `SELECT ${cols} FROM rollup_minute WHERE bucket >= $1 AND bucket < $2`;
+    return `SELECT ${cols} FROM ${minute} WHERE bucket >= $1 AND bucket < $2`;
   }
-  return `SELECT ${cols} FROM rollup_hour WHERE bucket >= $1 AND bucket < $2
+  return `SELECT ${cols} FROM ${hour} WHERE bucket >= $1 AND bucket < $2
           UNION ALL
-          SELECT ${cols} FROM rollup_minute WHERE bucket >= greatest($1::timestamptz, (SELECT folded_through FROM rollup_state WHERE id = 1)) AND bucket < $2`;
+          SELECT ${cols} FROM ${minute} WHERE bucket >= greatest($1::timestamptz, (SELECT folded_through FROM rollup_state WHERE id = 1)) AND bucket < $2`;
 }
 
 const num = (v: unknown): number => Number(v ?? 0);
@@ -117,11 +122,10 @@ export interface Overview {
 export async function overview(db: Queryable, range: RangeKey, now: Date): Promise<Overview> {
   const { from, to } = windowOf(range, now);
   const stepMs = RANGES[range].stepMs;
-  const src = source(range);
   const params = [from.toISOString(), to.toISOString()];
 
   const steps = await db.query<SeriesRow>(
-    `WITH src AS (${src})
+    `WITH src AS (${source(range, 'total')})
      SELECT to_timestamp(floor(extract(epoch FROM bucket) * 1000 / ${stepMs}) * ${stepMs} / 1000.0) AS t,
             sum(requests) AS requests, sum(errors) AS errors, sum(cache_hits + semantic_hits) AS hits,
             sum(cost_micros) AS cost, sum(saved_micros) AS saved, sum(prompt_tokens) AS prompt, sum(completion_tokens) AS completion,
@@ -157,7 +161,7 @@ export async function overview(db: Queryable, range: RangeKey, now: Date): Promi
   totals.p95 = percentile(hist, 0.95);
 
   const tenants = await db.query<{ tenant_id: string; name: string | null; requests: string; cost: string }>(
-    `WITH src AS (${src})
+    `WITH src AS (${source(range, 'tenant')})
      SELECT s.tenant_id, t.name, s.requests, s.cost
      FROM (SELECT tenant_id, sum(requests) AS requests, sum(cost_micros) AS cost FROM src GROUP BY tenant_id) s
      LEFT JOIN tenants t ON t.id = s.tenant_id

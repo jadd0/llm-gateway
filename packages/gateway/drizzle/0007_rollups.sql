@@ -36,6 +36,34 @@ CREATE TABLE "rollup_state" (
 	CONSTRAINT "rollup_state_single_row" CHECK ("rollup_state"."id" = 1)
 );
 --> statement-breakpoint
+CREATE TABLE "rollup_total_hour" (
+	"bucket" timestamp with time zone NOT NULL,
+	"requests" integer NOT NULL,
+	"errors" integer NOT NULL,
+	"cache_hits" integer NOT NULL,
+	"semantic_hits" integer NOT NULL,
+	"cost_micros" bigint NOT NULL,
+	"saved_micros" bigint NOT NULL,
+	"prompt_tokens" bigint NOT NULL,
+	"completion_tokens" bigint NOT NULL,
+	"latency_hist" integer[] NOT NULL,
+	CONSTRAINT "rollup_total_hour_bucket_pk" PRIMARY KEY("bucket")
+);
+--> statement-breakpoint
+CREATE TABLE "rollup_total_minute" (
+	"bucket" timestamp with time zone NOT NULL,
+	"requests" integer NOT NULL,
+	"errors" integer NOT NULL,
+	"cache_hits" integer NOT NULL,
+	"semantic_hits" integer NOT NULL,
+	"cost_micros" bigint NOT NULL,
+	"saved_micros" bigint NOT NULL,
+	"prompt_tokens" bigint NOT NULL,
+	"completion_tokens" bigint NOT NULL,
+	"latency_hist" integer[] NOT NULL,
+	CONSTRAINT "rollup_total_minute_bucket_pk" PRIMARY KEY("bucket")
+);
+--> statement-breakpoint
 CREATE INDEX "request_log_errors_recent" ON "request_log" USING btree ("created_at" DESC NULLS LAST) WHERE "request_log"."status" >= 500 OR "request_log"."error_code" = 'upstream_stream_broken';
 --> statement-breakpoint
 -- Hand-written (drizzle-kit does not emit functions, roles or grants).
@@ -57,7 +85,7 @@ DO $$ BEGIN
   END IF;
 END $$;
 --> statement-breakpoint
-GRANT SELECT ON "rollup_minute", "rollup_hour", "rollup_state" TO dashboard_reader;
+GRANT SELECT ON "rollup_minute", "rollup_hour", "rollup_total_minute", "rollup_total_hour", "rollup_state" TO dashboard_reader;
 --> statement-breakpoint
 GRANT SELECT ("id", "name") ON "tenants" TO dashboard_reader;
 --> statement-breakpoint

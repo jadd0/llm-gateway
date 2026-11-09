@@ -1,6 +1,6 @@
 import { sql } from 'drizzle-orm';
 import type { Db } from '../../gateway/src/db/client.ts';
-import { NO_TENANT, isError, rollupHour, rollupMinute } from '../../gateway/src/db/schema.ts';
+import { NO_TENANT, isError, rollupHour, rollupMinute, rollupTotalHour, rollupTotalMinute } from '../../gateway/src/db/schema.ts';
 import type { LogEntry } from '../../gateway/src/requestlog/entry.ts';
 import { bucketOf } from './histogram.ts';
 
@@ -31,17 +31,20 @@ const tenantOf = (e: LogEntry) => e.tenantId ?? NO_TENANT;
 const modelOf = (e: LogEntry) => e.servedModel ?? e.model ?? '';
 
 /**
- * Sums entries by (bucket, tenant, model). `bucketMs` maps a request's start to the start of its bucket.
- * Every entry here is a row that was really inserted: the caller never passes a redelivery.
+ * Sums entries by (bucket, tenant, model), or by bucket alone when `dims` is false (then tenantId and model are
+ * empty). `bucketMs` maps a request's start to the start of its bucket. Every entry here is a row that was really
+ * inserted: the caller never passes a redelivery.
  */
-export function aggregate(entries: readonly LogEntry[], bucketMs: (startedAt: number) => number): RollupRow[] {
+export function aggregate(entries: readonly LogEntry[], bucketMs: (startedAt: number) => number, dims = true): RollupRow[] {
   const rows = new Map<string, RollupRow>();
   for (const e of entries) {
     const b = bucketMs(e.startedAt);
-    const key = `${b}|${tenantOf(e)}|${modelOf(e)}`;
+    const tenantId = dims ? tenantOf(e) : '';
+    const model = dims ? modelOf(e) : '';
+    const key = `${b}|${tenantId}|${model}`;
     let r = rows.get(key);
     if (!r) {
-      r = { bucket: new Date(b), tenantId: tenantOf(e), model: modelOf(e), requests: 0, errors: 0, cacheHits: 0, semanticHits: 0, costMicros: 0, savedMicros: 0, promptTokens: 0, completionTokens: 0, latencyHist: [] };
+      r = { bucket: new Date(b), tenantId, model, requests: 0, errors: 0, cacheHits: 0, semanticHits: 0, costMicros: 0, savedMicros: 0, promptTokens: 0, completionTokens: 0, latencyHist: [] };
       rows.set(key, r);
     }
     r.requests++;
@@ -62,46 +65,61 @@ export function aggregate(entries: readonly LogEntry[], bucketMs: (startedAt: nu
 
 const CHUNK = 1000;
 
-// Adds rows to a rollup table: a bucket that exists grows by the new counts (histograms merged bucket by bucket).
-async function upsert(tx: Tx, table: typeof rollupMinute | typeof rollupHour, rows: RollupRow[]): Promise<void> {
+type DimTable = typeof rollupMinute | typeof rollupHour;
+type TotalTable = typeof rollupTotalMinute | typeof rollupTotalHour;
+
+// What adds to an existing bucket: counts grow by the new counts, histograms merge bucket by bucket.
+const grow = (t: DimTable | TotalTable) => ({
+  requests: sql`${t.requests} + excluded.requests`,
+  errors: sql`${t.errors} + excluded.errors`,
+  cacheHits: sql`${t.cacheHits} + excluded.cache_hits`,
+  semanticHits: sql`${t.semanticHits} + excluded.semantic_hits`,
+  costMicros: sql`${t.costMicros} + excluded.cost_micros`,
+  savedMicros: sql`${t.savedMicros} + excluded.saved_micros`,
+  promptTokens: sql`${t.promptTokens} + excluded.prompt_tokens`,
+  completionTokens: sql`${t.completionTokens} + excluded.completion_tokens`,
+  latencyHist: sql`hist_add(${t.latencyHist}, excluded.latency_hist)`,
+});
+
+async function upsertDims(tx: Tx, table: DimTable, rows: RollupRow[]): Promise<void> {
   for (let i = 0; i < rows.length; i += CHUNK) {
-    await tx
-      .insert(table)
-      .values(rows.slice(i, i + CHUNK))
-      .onConflictDoUpdate({
-        target: [table.bucket, table.tenantId, table.model],
-        set: {
-          requests: sql`${table.requests} + excluded.requests`,
-          errors: sql`${table.errors} + excluded.errors`,
-          cacheHits: sql`${table.cacheHits} + excluded.cache_hits`,
-          semanticHits: sql`${table.semanticHits} + excluded.semantic_hits`,
-          costMicros: sql`${table.costMicros} + excluded.cost_micros`,
-          savedMicros: sql`${table.savedMicros} + excluded.saved_micros`,
-          promptTokens: sql`${table.promptTokens} + excluded.prompt_tokens`,
-          completionTokens: sql`${table.completionTokens} + excluded.completion_tokens`,
-          latencyHist: sql`hist_add(${table.latencyHist}, excluded.latency_hist)`,
-        },
-      });
+    await tx.insert(table).values(rows.slice(i, i + CHUNK)).onConflictDoUpdate({ target: [table.bucket, table.tenantId, table.model], set: grow(table) });
   }
 }
+
+async function upsertTotals(tx: Tx, table: TotalTable, rows: RollupRow[]): Promise<void> {
+  for (let i = 0; i < rows.length; i += CHUNK) {
+    const values = rows.slice(i, i + CHUNK).map(({ tenantId: _t, model: _m, ...measures }) => measures);
+    await tx.insert(table).values(values).onConflictDoUpdate({ target: [table.bucket], set: grow(table) });
+  }
+}
+
+// A late row is also kept at minute grain while it falls within the day the minute-grain views reach back over
+// (counted from the fold mark, which trails the clock by 90 minutes or more). Older than this it goes to the hour tables only.
+const LATE_MINUTE_KEEP_MS = 24 * HOUR_MS;
 
 /**
  * Adds a batch's rows to the rollups, inside the transaction that inserted them. The entries must be only the
  * rows that insert actually wrote (a redelivered entry inserted nothing, so it adds nothing here either).
  *
- * A minute older than the fold mark has already been moved to the hour table and is not written to the minute
- * table again: its row goes to the hour directly. The mark is read under a shared lock that the fold's update
- * must wait for, so a request is counted in exactly one table whatever the order.
+ * A minute older than the fold mark has already been moved to the hour tables, so a row for it is added to the
+ * hour tables directly; it is also written to the minute tables when recent enough to be shown there. The fold
+ * reads only minutes at or after the mark, so that copy is never folded again. The mark is read under a shared
+ * lock that the fold's update must wait for, so the hour tables count a request exactly once whatever the order.
  */
 export async function writeRollups(tx: Tx, entries: readonly LogEntry[]): Promise<void> {
   if (entries.length === 0) return;
   const state = await tx.execute<{ mark: number }>(sql`SELECT (extract(epoch FROM folded_through) * 1000)::float8 AS mark FROM rollup_state WHERE id = 1 FOR SHARE`);
   const mark = state.rows[0]?.mark;
   if (mark === undefined) throw new Error('rollup_state has no row');
-  const recent = entries.filter((e) => floorTo(e.startedAt, MINUTE_MS) >= mark);
-  const late = entries.filter((e) => floorTo(e.startedAt, MINUTE_MS) < mark);
-  await upsert(tx, rollupMinute, aggregate(recent, (t) => floorTo(t, MINUTE_MS)));
-  await upsert(tx, rollupHour, aggregate(late, (t) => floorTo(t, HOUR_MS)));
+  const minuteOf = (t: number) => floorTo(t, MINUTE_MS);
+  const hourOf = (t: number) => floorTo(t, HOUR_MS);
+  const late = entries.filter((e) => minuteOf(e.startedAt) < mark);
+  const inMinutes = entries.filter((e) => minuteOf(e.startedAt) >= mark - LATE_MINUTE_KEEP_MS);
+  await upsertDims(tx, rollupMinute, aggregate(inMinutes, minuteOf));
+  await upsertTotals(tx, rollupTotalMinute, aggregate(inMinutes, minuteOf, false));
+  await upsertDims(tx, rollupHour, aggregate(late, hourOf));
+  await upsertTotals(tx, rollupTotalHour, aggregate(late, hourOf, false));
 }
 
 export interface FoldOptions {
@@ -109,6 +127,25 @@ export interface FoldOptions {
   foldAfterMin: number;
   /** Folded minute rows are deleted once they are this old (hours). */
   minuteRetentionH: number;
+}
+
+// Sums the minute rows in [from, to) by hour (and by the dimension columns, if any) and adds them to the hour table.
+// Table and column names are fixed strings from this file, never input.
+async function foldInto(tx: Tx, minute: string, hour: string, dims: string[], from: string, to: string): Promise<void> {
+  const keys = ['bucket', ...dims];
+  const group = keys.map((_, i) => i + 1).join(', ');
+  const cols = [...keys, 'requests', 'errors', 'cache_hits', 'semantic_hits', 'cost_micros', 'saved_micros', 'prompt_tokens', 'completion_tokens', 'latency_hist'];
+  const sums = ['requests', 'errors', 'cache_hits', 'semantic_hits', 'cost_micros', 'saved_micros', 'prompt_tokens', 'completion_tokens'];
+  await tx.execute(sql.raw(`
+    INSERT INTO ${hour} AS h (${cols.join(', ')})
+    SELECT date_trunc('hour', bucket, 'UTC')${dims.map((d) => `, ${d}`).join('')}, ${sums.map((c) => `sum(${c})`).join(', ')}, hist_sum(latency_hist)
+    FROM ${minute}
+    WHERE bucket >= '${from}'::timestamptz AND bucket < '${to}'::timestamptz
+    GROUP BY ${group}
+    ORDER BY ${group}
+    ON CONFLICT (${keys.join(', ')}) DO UPDATE SET
+      ${sums.map((c) => `${c} = h.${c} + excluded.${c}`).join(',\n      ')},
+      latency_hist = hist_add(h.latency_hist, excluded.latency_hist)`));
 }
 
 /**
@@ -125,33 +162,20 @@ export async function foldRollups(db: Db['db'], now: Date, foldAfterMin: number)
     if (horizon <= mark) return new Date(mark);
     const from = new Date(mark).toISOString();
     const to = new Date(horizon).toISOString();
-    await tx.execute(sql`
-      INSERT INTO rollup_hour AS h (bucket, tenant_id, model, requests, errors, cache_hits, semantic_hits, cost_micros, saved_micros,
-                                    prompt_tokens, completion_tokens, latency_hist)
-      SELECT date_trunc('hour', bucket, 'UTC'), tenant_id, model, sum(requests), sum(errors), sum(cache_hits), sum(semantic_hits),
-             sum(cost_micros), sum(saved_micros), sum(prompt_tokens), sum(completion_tokens), hist_sum(latency_hist)
-      FROM rollup_minute
-      WHERE bucket >= ${from}::timestamptz AND bucket < ${to}::timestamptz
-      GROUP BY 1, 2, 3
-      ORDER BY 1, 2, 3
-      ON CONFLICT (bucket, tenant_id, model) DO UPDATE SET
-        requests = h.requests + excluded.requests, errors = h.errors + excluded.errors,
-        cache_hits = h.cache_hits + excluded.cache_hits, semantic_hits = h.semantic_hits + excluded.semantic_hits,
-        cost_micros = h.cost_micros + excluded.cost_micros, saved_micros = h.saved_micros + excluded.saved_micros,
-        prompt_tokens = h.prompt_tokens + excluded.prompt_tokens, completion_tokens = h.completion_tokens + excluded.completion_tokens,
-        latency_hist = hist_add(h.latency_hist, excluded.latency_hist)`);
+    await foldInto(tx, 'rollup_minute', 'rollup_hour', ['tenant_id', 'model'], from, to);
+    await foldInto(tx, 'rollup_total_minute', 'rollup_total_hour', [], from, to);
     await tx.execute(sql`UPDATE rollup_state SET folded_through = ${to}::timestamptz WHERE id = 1`);
     return new Date(horizon);
   });
 }
 
-/** Deletes minute rows older than the retention that have already been folded. Returns how many. */
+/** Deletes minute rows older than the retention that have already been folded. Returns how many (dimension rows). */
 export async function deleteOldMinutes(db: Db['db'], now: Date, minuteRetentionH: number): Promise<number> {
   const cutoff = new Date(floorTo(now.getTime() - minuteRetentionH * HOUR_MS, HOUR_MS)).toISOString();
   // LEAST with the fold mark: an unfolded minute is never deleted, however old, and the mark only moves forward.
-  const r = await db.execute(sql`
-    DELETE FROM rollup_minute
-    WHERE bucket < LEAST(${cutoff}::timestamptz, (SELECT folded_through FROM rollup_state WHERE id = 1))`);
+  const where = sql`bucket < LEAST(${cutoff}::timestamptz, (SELECT folded_through FROM rollup_state WHERE id = 1))`;
+  const r = await db.execute(sql`DELETE FROM rollup_minute WHERE ${where}`);
+  await db.execute(sql`DELETE FROM rollup_total_minute WHERE ${where}`);
   return r.rowCount ?? 0;
 }
 
