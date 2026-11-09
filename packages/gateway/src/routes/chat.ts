@@ -81,7 +81,7 @@ export interface ChatRouteOptions {
   maxDurationMs: number;
   defaultMaxTokens: number;
   /** How long a provider's error body is waited for once its status and headers are in. */
-  errorBodyTimeoutMs: number;
+  errorBodyTimeoutMs?: number;
   cutDrainMs?: number;
 }
 
@@ -101,7 +101,8 @@ type Failure =
 const asText = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
 
 export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts) => {
-  const { upstream, breaker, chains, retry, maxDurationMs, defaultMaxTokens, errorBodyTimeoutMs } = opts;
+  const { upstream, breaker, chains, retry, maxDurationMs, defaultMaxTokens } = opts;
+  const errorBodyTimeoutMs = opts.errorBodyTimeoutMs ?? 2000;
   // After a cut stream's last bytes are written, a client that still hasn't taken them this long is dropped.
   const cutDrainMs = opts.cutDrainMs ?? 5000;
 
