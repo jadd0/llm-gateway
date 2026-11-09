@@ -142,6 +142,8 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
     reply.header('x-budget-remaining-usd', formatUsd(result.remaining));
     if (result.status === 'denied') {
       refundTokens(request);
+      // The cache lookup before this found nothing to serve and the answer is a refusal: no cache event, so none is reported.
+      void reply.removeHeader('x-gateway-cache');
       return reply
         .code(402)
         .send(

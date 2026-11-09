@@ -16,6 +16,7 @@ import { fromStreamFields, streamKey, type LogEntry } from './entry.ts';
 // The upstream picks its behaviour from the model name:
 //   mock-ok     answers 1 prompt + 10 completion tokens          mock-500   answers 500
 //   mock-hang   starts a stream and never ends it
+//   mock-truncated  answers 200 with a body that breaks after a few bytes
 const base = testConfig({ BUDGET_ENABLED: 'true', CACHE_ENABLED: 'true' });
 const prefix = base.redisKeyPrefix;
 let upstream: Server;
@@ -23,6 +24,8 @@ let app: FastifyInstance;
 let handle: Db;
 let redis: Redis;
 let gw = '';
+let cutApp: FastifyInstance;
+let cutGw = '';
 let stopWorker: () => void = () => {};
 const tenantIds: string[] = [];
 
@@ -35,6 +38,11 @@ beforeAll(async () => {
       if (body.model === 'mock-500') {
         res.writeHead(500, { 'content-type': 'application/json' });
         return void res.end('{"error":{"message":"boom"}}');
+      }
+      if (body.model === 'mock-truncated') {
+        res.writeHead(200, { 'content-type': 'application/json', 'content-length': '1000' });
+        res.write('{"id":');
+        return void setTimeout(() => res.socket?.destroy(), 20);
       }
       const usage = { prompt_tokens: 1, completion_tokens: 10, total_tokens: 11 };
       if (body.stream) {
@@ -67,9 +75,25 @@ beforeAll(async () => {
   );
   await app.listen({ port: 0, host: '127.0.0.1' });
   gw = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
+  // A second gateway whose calls are cut after 600 ms.
+  cutApp = buildApp(
+    testConfig({
+      API_KEY_PEPPER: base.apiKeyPepper,
+      REDIS_KEY_PREFIX: prefix,
+      OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}/v1`,
+      BUDGET_ENABLED: 'true',
+      CACHE_ENABLED: 'false',
+      UPSTREAM_MAX_DURATION_MS: '600',
+      BUDGET_REDIS_TIMEOUT_MS: '5000',
+      RATE_LIMIT_REDIS_TIMEOUT_MS: '5000',
+    }),
+  );
+  await cutApp.listen({ port: 0, host: '127.0.0.1' });
+  cutGw = `http://127.0.0.1:${(cutApp.server.address() as AddressInfo).port}`;
 });
 afterAll(async () => {
   stopWorker();
+  await cutApp.close();
   await app.close();
   upstream.closeAllConnections();
   await new Promise((r) => upstream.close(r));
@@ -163,7 +187,7 @@ describe('request log collector', { timeout: 60_000 }, () => {
     expect(broke.status).toBe(402);
     await broke.text();
     const [ec] = await entriesOf(c.tenantId, 1);
-    expect(ec).toMatchObject({ status: 402, errorCode: 'budget_exhausted', model: 'mock-ok', costMicros: 0 });
+    expect(ec).toMatchObject({ status: 402, errorCode: 'budget_exhausted', model: 'mock-ok', costMicros: 0, cache: null }); // the cache looked and found nothing, but a refusal is no cache event
 
     // 5xx from the provider with no fallback: the provider's own 500 goes through.
     const d = await fresh();
@@ -200,6 +224,30 @@ describe('request log collector', { timeout: 60_000 }, () => {
     expect(e!.costMicros).toBeGreaterThan(0);
   });
 
+  it('a stream the gateway cuts at its maximum duration is logged upstream_max_duration, not as a clean 200', async () => {
+    const s = await fresh();
+    const res = await fetch(`${cutGw}/v1/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
+      body: JSON.stringify({ model: 'mock-hang', stream: true, messages: [{ role: 'user', content: 'hi' }], max_tokens: 20 }),
+    });
+    expect(res.status).toBe(200);
+    expect(await res.text()).toContain('upstream_max_duration'); // the cut event the client sees
+    const [e] = await entriesOf(s.tenantId, 1);
+    expect(e).toMatchObject({ status: 200, errorCode: 'upstream_max_duration', stream: true });
+  });
+
+  it('a 2xx whose body breaks is logged upstream_bad_response, not upstream_unreachable', async () => {
+    const s = await fresh();
+    const res = await post(s.key, { model: 'mock-truncated' });
+    expect(res.status).toBe(502);
+    expect(await res.json()).toMatchObject({ error: { code: 'upstream_bad_response' } });
+    const [e] = await entriesOf(s.tenantId, 1);
+    expect(e).toMatchObject({ status: 502, errorCode: 'upstream_bad_response' });
+    // The provider answered 2xx and may have billed: the estimate stays charged.
+    expect(e!.costMicros).toBeGreaterThan(0);
+  });
+
   it('the one place that decides who ended a response', () => {
     expect(classifyClose({ finished: true, upstream: null })).toBe('complete');
     expect(classifyClose({ finished: true, upstream: { failed: true, alive: false } })).toBe('complete');
@@ -207,6 +255,9 @@ describe('request log collector', { timeout: 60_000 }, () => {
     expect(classifyClose({ finished: false, upstream: { failed: false, alive: true } })).toBe('client');
     expect(classifyClose({ finished: false, upstream: { failed: true, alive: true } })).toBe('upstream');
     expect(classifyClose({ finished: false, upstream: { failed: false, alive: false } })).toBe('upstream');
+    // The gateway destroyed the upstream body itself at the maximum duration: not the upstream's doing.
+    expect(classifyClose({ finished: false, upstream: { failed: false, alive: false, cut: true } })).toBe('client');
+    expect(classifyClose({ finished: false, upstream: { failed: true, alive: false, cut: true } })).toBe('client');
   });
 
   it('request ids are uuids and the same id names the spend hold', async () => {

@@ -480,6 +480,24 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     }
   });
 
+  it('a cache hit on a model with no price leaves the log row to the token counts the cache plugin noted, and records its saving only when priced', async () => {
+    const s = await fresh(1_000_000);
+    const usage = { promptTokens: 9, completionTokens: 2, totalTokens: 11 };
+    const hitOn = async (model: string) => {
+      const noted: Array<Record<string, unknown>> = [];
+      const request = { reqlog: { note: (n: Record<string, unknown>) => void noted.push(n) } } as unknown as Parameters<typeof app.recordCacheHit>[0]['request'];
+      await app.recordCacheHit({ request, tenantId: s.tenantId, model, usage });
+      return noted;
+    };
+    // Unpriced: nothing to say about tokens (the cache plugin already noted the real ones) and no saving.
+    expect(await hitOn('unpriced-model')).toEqual([{ savedMicros: 0 }]);
+    // Priced: the saving, and still no token counts of its own.
+    const priced = await hitOn('mock-ok');
+    expect(priced).toHaveLength(1);
+    expect(Object.keys(priced[0]!)).toEqual(['savedMicros']);
+    expect(priced[0]!.savedMicros).toBeGreaterThan(0);
+  });
+
   it('a client that leaves before the request is dispatched upstream gets everything back', async () => {
     const real = createPgLedger(handle.db);
     let holdEntered!: () => void;

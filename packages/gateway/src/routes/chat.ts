@@ -34,16 +34,19 @@ function passthroughHeaders(upstream: Record<string, string | string[] | undefin
   return out;
 }
 
-function upstreamFailure(reply: FastifyReply, err: unknown, refund: UsageSettler | null): FastifyReply {
+function upstreamFailure(reply: FastifyReply, err: unknown, refund: UsageSettler | null, kind: 'unreachable' | 'bad_response' = 'unreachable'): FastifyReply {
   // `refund` is passed only when the provider did no work (no 2xx was received): then everything held up
   // front goes back. A 2xx whose body broke passes null, because the provider did generate it.
   refund?.refund();
   const code = (err as { code?: string }).code ?? '';
-  reply.request.reqlog.note({ errorCode: isTimeout(err) ? 'upstream_timeout' : 'upstream_unreachable' });
+  reply.request.reqlog.note({ errorCode: isTimeout(err) ? 'upstream_timeout' : kind === 'bad_response' ? 'upstream_bad_response' : 'upstream_unreachable' });
   // Log the error class and code only; messages can carry request data.
   reply.log.warn({ errClass: (err as Error).name, code }, 'upstream request failed');
   if (isTimeout(err)) {
     return reply.code(504).send(errorBody('upstream timed out', 'gateway_error'));
+  }
+  if (kind === 'bad_response') {
+    return reply.code(502).send(errorBody('upstream sent a response that could not be read', 'gateway_error', 'upstream_bad_response'));
   }
   return reply.code(502).send(errorBody('upstream unreachable', 'gateway_error'));
 }
@@ -250,7 +253,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     let upstreamDone = false;
     let upstreamStream: Readable | undefined;
     // The request log's collector decides this from the same facts (classifyClose), so the two cannot disagree.
-    const upstreamState = () => ({ failed: upstreamFailed, alive: upstreamStream === undefined || upstreamDone || !upstreamStream.destroyed });
+    const upstreamState = () => ({ failed: upstreamFailed, alive: upstreamStream === undefined || upstreamDone || !upstreamStream.destroyed, cut: deadlineHit });
     request.reqlog.upstreamState = upstreamState;
     reply.raw.on('close', () => {
       if (reply.raw.writableFinished) return;
@@ -273,6 +276,9 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     let relay: PassThrough | undefined;
     state.deadline = setTimeout(() => {
       deadlineHit = true;
+      // The gateway ended the call, whether the answer is cut mid-stream (which finishes cleanly, with an error
+      // event) or refused with a 504: the request log says so rather than leaving a clean-looking row.
+      request.reqlog.note({ errorCode: 'upstream_max_duration' });
       // The provider may have worked and no usage will come: the estimate is charged now, not when the
       // (possibly stuck) response finishes.
       if (billing) settle.keep(state.model);
@@ -552,7 +558,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
       if (abort.signal.aborted) return reply;
       // The provider answered 2xx and the body then broke: it did the work, so the estimate stays (as for a
       // stream that fails after bytes were sent).
-      return upstreamFailure(reply, err, null);
+      return upstreamFailure(reply, err, null, 'bad_response');
     }
     let type2 = type;
     if (translated) {
@@ -563,7 +569,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
         if (metered && answer.usage) settle.used(answer.usage, served.model);
       } catch (err) {
         // The provider answered 2xx and did the work, but its body is not one the adapter can read.
-        return upstreamFailure(reply, err, null);
+        return upstreamFailure(reply, err, null, 'bad_response');
       }
     }
     const received = performance.now();

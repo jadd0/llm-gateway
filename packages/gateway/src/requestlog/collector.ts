@@ -23,6 +23,8 @@ export interface UpstreamState {
   failed: boolean;
   /** The upstream body is still flowing, or finished cleanly. */
   alive: boolean;
+  /** The gateway cut the call at its maximum duration: the upstream body was destroyed on purpose, so it is not to blame. */
+  cut?: boolean;
 }
 
 export interface RequestLogState {
@@ -51,12 +53,13 @@ export type CloseKind = 'complete' | 'client' | 'upstream';
 /**
  * Who ended a response. This is the one place that decides it: a response whose writable side finished is
  * complete; one that did not was ended by the client leaving, unless the upstream body had already failed or was
- * destroyed, in which case it was the upstream. A response with no upstream body (an error the gateway made, a
+ * destroyed, in which case it was the upstream (unless the gateway itself cut the call at its maximum duration,
+ * which destroys the upstream body on purpose). A response with no upstream body (an error the gateway made, a
  * cache replay) that did not finish was the client's doing.
  */
 export function classifyClose(i: { finished: boolean; upstream: UpstreamState | null }): CloseKind {
   if (i.finished) return 'complete';
-  if (i.upstream && (i.upstream.failed || !i.upstream.alive)) return 'upstream';
+  if (i.upstream && !i.upstream.cut && (i.upstream.failed || !i.upstream.alive)) return 'upstream';
   return 'client';
 }
 

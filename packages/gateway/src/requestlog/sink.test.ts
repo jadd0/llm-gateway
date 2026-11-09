@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../app.ts';
 import { cleanup, testConfig } from '../test-env.ts';
 import { createDb, type Db } from '../db/client.ts';
-import { fromStreamFields, streamKey, toLogFields, type LogEntry } from './entry.ts';
+import { fromStreamFields, spendKey, streamKey, toLogFields, toSpendFields, type LogEntry } from './entry.ts';
 import { createStreamSink } from './sink.ts';
 
 const entry = (n: number): LogEntry => ({
@@ -98,6 +98,24 @@ describe('graceful shutdown', () => {
     await cleanup(handle.db, redis, [], base.redisKeyPrefix);
     redis.disconnect();
     await handle.close();
+  });
+
+  it('the request-log stream is capped at LOG_STREAM_MAX and the spend stream beside it is not', async () => {
+    const prefix = `${base.redisKeyPrefix}cap:`;
+    const tenantId = randomUUID();
+    // Money already queued before the flood of log entries.
+    for (let i = 0; i < 5; i++) {
+      await redis.xadd(spendKey(prefix), '*', ...toSpendFields({ kind: 'charge', id: randomUUID(), tenantId, period: '2026-11', model: 'm', promptTokens: 1, completionTokens: 1, costMicros: 10, estimated: false, savedMicros: 0 }));
+    }
+    const sink = createStreamSink({ redis, keyPrefix: prefix, bufferMax: 10, streamMax: 200 });
+    for (let i = 0; i < 2000; i++) await sink.write(entry(i));
+    await sink.close();
+    const len = await redis.xlen(streamKey(prefix));
+    expect(len).toBeLessThan(2000);
+    expect(len).toBeLessThanOrEqual(200 + 100); // `~` trims in whole blocks of up to 100 entries
+    expect(len).toBeGreaterThanOrEqual(200);
+    expect(await redis.xlen(spendKey(prefix))).toBe(5);
+    await redis.del(streamKey(prefix), spendKey(prefix));
   });
 
   it('app.close() sends the entries still buffered before it lets go of Redis', async () => {

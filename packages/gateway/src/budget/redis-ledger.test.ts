@@ -4,7 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { testConfig } from '../test-env.ts';
 import { periodOf } from './period.ts';
 import { fromStreamFields } from '../requestlog/entry.ts';
-import { createRedisLedger, type RedisLedger, type SettleArgs, type Snapshot } from './redis-ledger.ts';
+import { assertNotCluster, createRedisLedger, type RedisLedger, type SettleArgs, type Snapshot } from './redis-ledger.ts';
 
 // A random prefix per run: parallel files and other worktrees never share a key.
 const base = testConfig();
@@ -176,6 +176,15 @@ describe('redis ledger', { timeout: 120_000 }, () => {
     expect(await bal(t)).toMatchObject({ spent: 1000, reserved: 0 });
     // No balance, nothing to catch up.
     expect(await l.apply(1, [{ tenantId: tenant(), period: P, id: randomUUID(), costMicros: 5 }])).toBe('unchanged');
+  });
+
+  it('a Redis Cluster is refused (the settle script spans the balance and the spend stream); a single Redis is not', async () => {
+    const reply = (info: string) => ({ info: async () => info }) as unknown as Redis;
+    await expect(assertNotCluster(reply('# Cluster\r\ncluster_enabled:1\r\n'))).rejects.toThrow(/Cluster is not supported/);
+    await expect(assertNotCluster(reply('# Cluster\r\ncluster_enabled:0\r\n'))).resolves.toBeUndefined();
+    await expect(assertNotCluster(redis)).resolves.toBeUndefined();
+    // A Redis that does not answer is not a reason to refuse to start.
+    await expect(assertNotCluster({ info: () => Promise.reject(new Error('down')) } as unknown as Redis)).resolves.toBeUndefined();
   });
 
   it('a refund releases the hold and charges nothing', async () => {
