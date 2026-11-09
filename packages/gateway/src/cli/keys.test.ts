@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { eq } from 'drizzle-orm';
@@ -9,7 +9,7 @@ import { keyStoreFromConfig } from '../auth/key-store.ts';
 import { hashKey } from '../auth/keys.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { periodOf } from '../budget/period.ts';
-import { apiKeys, tenants, tenantSpend } from '../db/schema.ts';
+import { apiKeys, spendLedger, tenants, tenantSpend } from '../db/schema.ts';
 import { cleanup, testConfig } from '../test-env.ts';
 
 const run = promisify(execFile);
@@ -251,5 +251,41 @@ describe('keys CLI', { timeout: 30_000 }, () => {
     });
     const [row] = await handle.db.select().from(tenants).where(eq(tenants.name, tenant));
     expect(row!.monthlyBudgetMicros).toBeNull(); // nothing was written by the refused calls
+  });
+
+  it('set-cache-sharing toggles the flag and refreshes the key cache', async () => {
+    const tenant = await newTenant();
+    const key = (await cli('create-key', tenant)).stdout.trim();
+    const hash = hashKey(config.apiKeyPepper, key);
+    const store = keyStoreFromConfig(config, handle.db, redis);
+    expect((await store.lookup(hash))!.cacheShared).toBe(false); // cached as private
+
+    expect((await cli('set-cache-sharing', tenant, 'on')).stdout).toContain(`${tenant}: response cache shared`);
+    const [row] = await handle.db.select().from(tenants).where(eq(tenants.name, tenant));
+    expect(row!.cacheShared).toBe(true);
+    expect((await store.lookup(hash))!.cacheShared).toBe(true); // the cached entry was overwritten
+
+    expect((await cli('set-cache-sharing', tenant, 'off')).stdout).toContain('response cache private');
+    expect((await store.lookup(hash))!.cacheShared).toBe(false);
+
+    for (const bad of ['yes', 'ON', '']) {
+      await expect(cli('set-cache-sharing', tenant, bad)).rejects.toMatchObject({ stderr: expect.stringContaining('"on" or "off"') });
+    }
+    await expect(cli('set-cache-sharing', tenant)).rejects.toMatchObject({ stderr: expect.stringContaining('usage:') });
+    await expect(cli('set-cache-sharing', 'no-such-tenant', 'on')).rejects.toMatchObject({ stderr: expect.stringContaining('no tenant named') });
+    expect((await handle.db.select().from(tenants).where(eq(tenants.name, tenant)))[0]!.cacheShared).toBe(false);
+  });
+
+  it('show-spend prints cache hits and what they saved, not counting ordinary rows', async () => {
+    const tenant = await newTenant();
+    const [row] = await handle.db.select().from(tenants).where(eq(tenants.name, tenant));
+    const period = periodOf(Date.now());
+    const base = { tenantId: row!.id, period, model: 'mock-1', promptTokens: 10, completionTokens: 5, estimated: false };
+    await handle.db.insert(spendLedger).values([
+      { ...base, requestId: randomUUID(), costMicros: 400 },
+      { ...base, requestId: randomUUID(), costMicros: 0, cached: true, savedMicros: 400 },
+      { ...base, requestId: randomUUID(), costMicros: 0, cached: true, savedMicros: 350 },
+    ]);
+    expect((await cli('show-spend', tenant)).stdout).toContain('cache hits 2, saved $0.000750');
   });
 });

@@ -10,6 +10,7 @@ One folder per part of the system. Each holds a `README.md` and a diagram drawn 
 - [rate-limiter/](rate-limiter/README.md): per-key requests and tokens per minute in one Redis Lua script, usage reconcile, fail open.
 - [resilience/](resilience/README.md): per-phase timeouts, retries with jitter, a Redis-shared circuit breaker, model fallback chains.
 - [budgets/](budgets/README.md): monthly spend caps per tenant, reserve-then-settle in Redis, Postgres fallback, the epoch.
+- [cache/](cache/README.md): exact-match response cache in Redis, tenant-scoped keys, single-flight, streamed replay, zero-cost hits.
 - [benchmarks/](benchmarks/README.md): how overhead is measured, and why the rig runs natively.
 
 Flow registry for the diagram check: [diagrams/flows.md](diagrams/flows.md). Numbers live in [../BENCHMARKS.md](../BENCHMARKS.md).

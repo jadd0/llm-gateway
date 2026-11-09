@@ -141,6 +141,15 @@ const schema = z
     BUDGET_EPOCH_REFRESH_MS: int(250, 10),
     BUDGET_OUTAGE_FAILURES: int(3, 1),
     BUDGET_SWEEP_INTERVAL_S: int(60, 1),
+    CACHE_ENABLED: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
+    CACHE_TTL_S: int(3600, 1),
+    CACHE_MAX_ENTRY_BYTES: int(262_144, 1),
+    CACHE_ALLOW_NONDETERMINISTIC: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('false')),
+    CACHE_LOCK_MS: int(5_000, 1),
+    CACHE_POLL_MS: int(250, 1),
+    CACHE_WAIT_MS: int(120_000, 1),
+    CACHE_REDIS_TIMEOUT_MS: int(50, 1),
+    CACHE_REPLAY_CHUNK_CHARS: int(64, 1),
   })
   .refine((e) => e.UPSTREAM_TIMEOUT_MS === undefined, {
     message:
@@ -166,6 +175,18 @@ const schema = z
   .refine((e) => e.BUDGET_ENABLED === 'false' || e.REDIS_URL !== undefined, {
     message: 'REDIS_URL is required when BUDGET_ENABLED=true',
     path: ['REDIS_URL'],
+  })
+  .refine((e) => e.CACHE_ENABLED === 'false' || e.REDIS_URL !== undefined, {
+    message: 'REDIS_URL is required when CACHE_ENABLED=true',
+    path: ['REDIS_URL'],
+  })
+  .refine((e) => e.CACHE_ENABLED === 'false' || e.CACHE_WAIT_MS <= e.UPSTREAM_MAX_DURATION_MS, {
+    message: 'CACHE_WAIT_MS must not be longer than UPSTREAM_MAX_DURATION_MS: no call outlasts that, so no one should wait longer for one',
+    path: ['CACHE_WAIT_MS'],
+  })
+  .refine((e) => e.CACHE_ENABLED === 'false' || e.CACHE_WAIT_MS >= e.CACHE_LOCK_MS, {
+    message: 'CACHE_WAIT_MS must not be shorter than CACHE_LOCK_MS: a waiter should outlast one lock lifetime',
+    path: ['CACHE_WAIT_MS'],
   })
   .refine((e) => e.BUDGET_ENABLED === 'false' || e.BUDGET_RESERVATION_TTL_S * 1000 > e.UPSTREAM_MAX_DURATION_MS + 30_000, {
     message:
@@ -231,6 +252,22 @@ export interface Config {
   budgetEpochRefreshMs: number;
   budgetOutageFailures: number;
   budgetSweepIntervalS: number;
+  cacheEnabled: boolean;
+  /** How long a cached answer lives. */
+  cacheTtlS: number;
+  /** The largest answer (as stored JSON) that is cached. */
+  cacheMaxEntryBytes: number;
+  /** Cache requests that do not set temperature 0 too. */
+  cacheAllowNondeterministic: boolean;
+  /** How long the Redis lock of the request that leads an identical-miss burst lasts between renewals; the leader renews it while its request is open, so a dead leader frees it within this. */
+  cacheLockMs: number;
+  /** How often a request waiting on a leader in another process looks for the fill and the lock. */
+  cachePollMs: number;
+  /** The most a request waits for the leader's fill before going upstream itself. */
+  cacheWaitMs: number;
+  cacheRedisTimeoutMs: number;
+  /** Characters (code points) per content chunk when a cached answer is replayed as a stream. */
+  cacheReplayChunkChars: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -287,6 +324,15 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     budgetEpochRefreshMs: e.BUDGET_EPOCH_REFRESH_MS,
     budgetOutageFailures: e.BUDGET_OUTAGE_FAILURES,
     budgetSweepIntervalS: e.BUDGET_SWEEP_INTERVAL_S,
+    cacheEnabled: e.CACHE_ENABLED === 'true',
+    cacheTtlS: e.CACHE_TTL_S,
+    cacheMaxEntryBytes: e.CACHE_MAX_ENTRY_BYTES,
+    cacheAllowNondeterministic: e.CACHE_ALLOW_NONDETERMINISTIC === 'true',
+    cacheLockMs: e.CACHE_LOCK_MS,
+    cachePollMs: e.CACHE_POLL_MS,
+    cacheWaitMs: e.CACHE_WAIT_MS,
+    cacheRedisTimeoutMs: e.CACHE_REDIS_TIMEOUT_MS,
+    cacheReplayChunkChars: e.CACHE_REPLAY_CHUNK_CHARS,
   };
 }
 

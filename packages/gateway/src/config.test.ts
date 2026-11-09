@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { parseEnv } from 'node:util';
 import { describe, expect, it } from 'vitest';
 import { loadConfig } from './config.ts';
 
@@ -97,5 +99,37 @@ describe('resilience settings', () => {
     );
     // A blank value is "not set", as for every other setting.
     expect(loadConfig(env({ UPSTREAM_TIMEOUT_MS: '' })).upstreamIdleTimeoutMs).toBe(30_000);
+  });
+});
+
+describe('response cache settings', () => {
+  it('defaults, and .env.example alone (plus a pepper) loads to the same cache settings', () => {
+    const defaults = {
+      cacheEnabled: true,
+      cacheTtlS: 3600,
+      cacheMaxEntryBytes: 262_144,
+      cacheAllowNondeterministic: false,
+      cacheLockMs: 5_000,
+      cachePollMs: 250,
+      cacheWaitMs: 120_000,
+      cacheRedisTimeoutMs: 50,
+      cacheReplayChunkChars: 64,
+    };
+    expect(loadConfig(env({}))).toMatchObject(defaults);
+    const example = parseEnv(readFileSync(new URL('../../../.env.example', import.meta.url), 'utf8'));
+    for (const name of ['CACHE_ENABLED', 'CACHE_TTL_S', 'CACHE_MAX_ENTRY_BYTES', 'CACHE_ALLOW_NONDETERMINISTIC', 'CACHE_LOCK_MS', 'CACHE_POLL_MS', 'CACHE_WAIT_MS', 'CACHE_REDIS_TIMEOUT_MS', 'CACHE_REPLAY_CHUNK_CHARS']) {
+      expect(example[name], name).toBeDefined();
+    }
+    expect(loadConfig({ ...example, API_KEY_PEPPER: 'x'.repeat(40) })).toMatchObject(defaults);
+  });
+
+  it('needs Redis, and a wait between the lock and the longest upstream call', () => {
+    const noRedis = { DATABASE_URL: 'postgres://u:p@127.0.0.1:1/db', API_KEY_PEPPER: 'x'.repeat(40), AUTH_CACHE: 'none', RATE_LIMIT_ENABLED: 'false', BUDGET_ENABLED: 'false' };
+    expect(() => loadConfig(noRedis)).toThrow(/REDIS_URL is required when CACHE_ENABLED=true/);
+    expect(loadConfig({ ...noRedis, CACHE_ENABLED: 'false' }).cacheEnabled).toBe(false);
+    expect(() => loadConfig(env({ CACHE_LOCK_MS: '5000', CACHE_WAIT_MS: '2000' }))).toThrow(/CACHE_WAIT_MS must not be shorter than CACHE_LOCK_MS/);
+    expect(() => loadConfig(env({ UPSTREAM_MAX_DURATION_MS: '60000', CACHE_WAIT_MS: '120000' }))).toThrow(/CACHE_WAIT_MS must not be longer than UPSTREAM_MAX_DURATION_MS/);
+    // With the cache off its wait is not in play, so a short upstream limit needs no cache setting.
+    expect(loadConfig(env({ CACHE_ENABLED: 'false', UPSTREAM_MAX_DURATION_MS: '300' })).upstreamMaxDurationMs).toBe(300);
   });
 });

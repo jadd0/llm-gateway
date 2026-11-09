@@ -58,3 +58,21 @@ export function waitReady(redis: Redis, timeoutMs: number): Promise<boolean> {
     redis.on('end', onClosed);
   });
 }
+
+// Resolves with the command's reply, or rejects with `onTimeout()` when none came within `ms`. The command is
+// not cancelled; its late reply (or late failure) is dropped. Each caller supplies its own error class.
+export function replyWithin<T>(p: Promise<T>, ms: number, onTimeout: () => Error): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(onTimeout()), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
