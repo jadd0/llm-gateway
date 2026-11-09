@@ -9,6 +9,12 @@ A request is only sent upstream after the gateway has **reserved** its worst-cas
 ends, the reservation is replaced by what was really spent. Over the cap the answer is `402`
 (`insufficient_quota`, code `budget_exhausted`), not 429: OpenAI SDKs retry 429s, and retrying an empty budget is pointless.
 
+## Cache hits
+
+The response cache runs before the budget step, so a hit reserves nothing and is served even when the cap is spent. It
+writes one `spend_ledger` row with `cached = true`, `cost_micros = 0` and `saved_micros`; `tenant_spend` is not touched,
+so the balance is exactly what it was. See [../cache/README.md](../cache/README.md).
+
 ## Reserve, then settle
 
 1. `budget/plugin.ts` runs right after the rate limiter. A body the chat route would reject reserves nothing.

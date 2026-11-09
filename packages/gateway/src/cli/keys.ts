@@ -2,7 +2,7 @@ import { parseArgs } from 'node:util';
 import { and, asc, eq, sql } from 'drizzle-orm';
 import { loadCacheConfig, loadConfig, loadDbConfig, loadPepperConfig } from '../config.ts';
 import { createDb, type Db } from '../db/client.ts';
-import { apiKeys, tenants, tenantSpend } from '../db/schema.ts';
+import { apiKeys, spendLedger, tenants, tenantSpend } from '../db/schema.ts';
 import { isPeriod, periodOf } from '../budget/period.ts';
 import { formatUsd, parseUsd } from '../pricing/prices.ts';
 import { generateKey, hashKey, keyPrefix, KEY_PREFIX_LENGTH } from '../auth/keys.ts';
@@ -138,6 +138,21 @@ export async function setBudget(db: Db['db'], keyStore: KeyStore, tenantName: st
   return { tenant: tenantName, micros, cached: r.cached };
 }
 
+// "on" puts the tenant in the shared response-cache pool, "off" back in its own. Anything else is refused.
+export function parseSharing(raw: string | undefined): boolean {
+  if (raw === 'on') return true;
+  if (raw === 'off') return false;
+  throw new CliError('set-cache-sharing needs "on" or "off"');
+}
+
+// Switches a tenant between its own response-cache scope and the shared pool.
+export async function setCacheSharing(db: Db['db'], keyStore: KeyStore, tenantName: string, shared: boolean) {
+  const [tenant] = await db.select({ id: tenants.id }).from(tenants).where(eq(tenants.name, tenantName));
+  if (!tenant) throw new CliError(`no tenant named "${tenantName}"`);
+  const r = await keyStore.setCacheShared(tenant.id, shared);
+  return { tenant: tenantName, shared, cached: r.cached };
+}
+
 // What a tenant has spent in a UTC month (default: this one), from the settled-spend record.
 export async function showSpend(db: Db['db'], tenantName: string, period = periodOf(Date.now())) {
   if (!isPeriod(period)) throw new CliError('--period must look like 2026-11');
@@ -150,7 +165,19 @@ export async function showSpend(db: Db['db'], tenantName: string, period = perio
     .select({ spent: tenantSpend.spentMicros })
     .from(tenantSpend)
     .where(and(eq(tenantSpend.tenantId, tenant.id), eq(tenantSpend.period, period)));
-  return { tenant: tenantName, period, spentMicros: row?.spent ?? 0, capMicros: tenant.cap };
+  // Cache hits are zero-cost rows in the same ledger; what they saved is what the same usage would have cost.
+  const [hits] = await db
+    .select({ hits: sql<string>`count(*)`, saved: sql<string>`coalesce(sum(${spendLedger.savedMicros}), 0)` })
+    .from(spendLedger)
+    .where(and(eq(spendLedger.tenantId, tenant.id), eq(spendLedger.period, period), eq(spendLedger.cached, true)));
+  return {
+    tenant: tenantName,
+    period,
+    spentMicros: row?.spent ?? 0,
+    capMicros: tenant.cap,
+    cacheHits: Number(hits?.hits ?? 0),
+    savedMicros: Number(hits?.saved ?? 0),
+  };
 }
 
 const USAGE = `usage:
@@ -159,6 +186,7 @@ const USAGE = `usage:
                                        prints the key once; it cannot be shown again
   keys set-limits <prefix> [--rpm <n|default>] [--tpm <n|default>]
   keys set-budget <tenant> --monthly-usd <amount|default>
+  keys set-cache-sharing <tenant> on|off
   keys show-spend <tenant> [--period YYYY-MM]
   keys revoke-key <prefix>
   keys list-keys [tenant]`;
@@ -269,13 +297,33 @@ async function main(argv: string[]) {
       }
       return;
     }
+    case 'set-cache-sharing': {
+      if (!args[0] || args.length !== 2) throw new CliError(USAGE);
+      const tenant = args[0];
+      const shared = parseSharing(args[1]);
+      const config = loadCacheConfig();
+      const redis = config.authCache === 'redis' && config.redisUrl ? createRedis(config.redisUrl) : null;
+      try {
+        const r = await withDb(config.databaseUrl, (db) => setCacheSharing(db, keyStoreFromConfig(config, db, redis), tenant, shared));
+        console.log(`${r.tenant}: response cache ${r.shared ? 'shared' : 'private'}`);
+        if (config.authCache === 'redis' && (config.redisUrl === undefined || (redis !== null && !r.cached))) {
+          // The database has the new setting; a cached copy of a key keeps the old one until it expires.
+          throw new CliError(
+            `warning: the key cache was not refreshed, so the old setting can stay in effect for up to ${config.authCacheTtlS}s (AUTH_CACHE_TTL_S); set REDIS_URL / bring Redis up and run this command again`,
+          );
+        }
+      } finally {
+        redis?.disconnect();
+      }
+      return;
+    }
     case 'show-spend': {
       const { values, positionals } = parseFlags(args);
       if (!positionals[0]) throw new CliError(USAGE);
       const tenant = positionals[0];
       const r = await withDb(loadDbConfig().databaseUrl, (db) => showSpend(db, tenant, values.period));
       const cap = r.capMicros === null ? 'default cap' : 'cap ' + DOLLAR + formatUsd(r.capMicros);
-      console.log(`${r.tenant} ${r.period}: spent ${DOLLAR}${formatUsd(r.spentMicros)} (${cap})`);
+      console.log(`${r.tenant} ${r.period}: spent ${DOLLAR}${formatUsd(r.spentMicros)} (${cap}); cache hits ${r.cacheHits}, saved ${DOLLAR}${formatUsd(r.savedMicros)}`);
       return;
     }
     case 'revoke-key': {

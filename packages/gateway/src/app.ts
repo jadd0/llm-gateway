@@ -7,6 +7,9 @@ import { createDb } from './db/client.ts';
 import type { PgLedger } from './budget/pg-ledger.ts';
 import { budgetGuard } from './budget/plugin.ts';
 import { errorBody } from './errors.ts';
+import { responseCache } from './cache/plugin.ts';
+import { createSingleFlight } from './cache/single-flight.ts';
+import { createCacheStore, type CacheStore } from './cache/store.ts';
 import { createLimiter } from './ratelimit/limiter.ts';
 import { rateLimit } from './ratelimit/plugin.ts';
 import { chatRoutes } from './routes/chat.ts';
@@ -29,6 +32,10 @@ export function buildApp(
     breakerClock?: () => number;
     /** Wraps the circuit breaker. Tests only. */
     wrapBreaker?: (breaker: Breaker) => Breaker;
+    /** Wraps the response cache's store. Tests only. */
+    wrapCacheStore?: (store: CacheStore) => CacheStore;
+    /** Pins the `created` time of a replayed cache hit (ms). Tests only. */
+    cacheClock?: () => number;
     /** How long a client of a deadline-cut stream gets to take the last bytes. Tests only. */
     cutDrainMs?: number;
   } = {},
@@ -50,7 +57,7 @@ export function buildApp(
   const useRedis = config.redisUrl !== undefined;
   const redis = useRedis
     ? createRedis(config.redisUrl!, {
-        commandTimeoutMs: Math.max(500, config.rateLimitRedisTimeoutMs, config.budgetRedisTimeoutMs, config.breakerRedisTimeoutMs),
+        commandTimeoutMs: Math.max(500, config.rateLimitRedisTimeoutMs, config.budgetRedisTimeoutMs, config.breakerRedisTimeoutMs, config.cacheRedisTimeoutMs),
       })
     : null;
   const ipLimiter =
@@ -110,6 +117,39 @@ export function buildApp(
       defaultRpm: config.rateLimitDefaultRpm,
       defaultTpm: config.rateLimitDefaultTpm,
       defaultMaxTokens: config.rateLimitDefaultMaxTokens,
+    });
+  }
+  // After the rate limiter, before the budget: an answer already in the cache costs nothing, so it is served
+  // without a hold, even to a tenant whose budget is spent.
+  if (config.cacheEnabled && redis !== null) {
+    app.register(responseCache, {
+      store: (extra.wrapCacheStore ?? ((s: CacheStore) => s))(
+        createCacheStore({
+          redis,
+          ttlS: config.cacheTtlS,
+          maxEntryBytes: config.cacheMaxEntryBytes,
+          timeoutMs: config.cacheRedisTimeoutMs,
+          log: app.log,
+        }),
+      ),
+      singleFlight: createSingleFlight({
+        redis,
+        lockMs: config.cacheLockMs,
+        waitMs: config.cacheWaitMs,
+        pollMs: config.cachePollMs,
+        timeoutMs: config.cacheRedisTimeoutMs,
+        log: app.log,
+      }),
+      keyPrefix: config.redisKeyPrefix,
+      defaultMaxTokens: config.rateLimitDefaultMaxTokens,
+      allowNondeterministic: config.cacheAllowNondeterministic,
+      maxEntryBytes: config.cacheMaxEntryBytes,
+      replayChunkChars: config.cacheReplayChunkChars,
+      resolve: (model) => {
+        const target = upstream.resolve(model);
+        return target ? { translates: target.adapter.translates } : undefined;
+      },
+      ...(extra.cacheClock ? { clock: extra.cacheClock } : {}),
     });
   }
   // After the rate limiter: a request over its limits is refused before any money is held for it.

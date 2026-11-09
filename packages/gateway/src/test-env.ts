@@ -34,6 +34,8 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
     AUTH_CACHE: 'redis',
     // Off unless a test asks for it, so tests of other parts are not subject to a spend cap.
     BUDGET_ENABLED: 'false',
+    // Likewise the response cache: off unless a test asks, so repeated identical requests reach the upstream.
+    CACHE_ENABLED: 'false',
     // One attempt per model and a breaker that does not open, unless a test asks for retries and breaking, so
     // tests of other parts see one upstream call per request.
     RETRY_MAX_ATTEMPTS_PER_MODEL: '1',

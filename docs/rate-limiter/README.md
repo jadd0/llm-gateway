@@ -185,6 +185,12 @@ The exactness tests pin the limiter's clock (the script's optional fourth argume
 bucket gains a token every 0.6 s: a burst that takes longer than that on a loaded machine would legitimately admit
 one more. A test that reads the real Redis clock checks that refill really comes from `TIME`.
 
+## Cache hits
+
+The response cache runs right after the limiter. A hit still counts as one request against rpm (the limiter protects the
+gateway), but its token estimate is handed back in full, because no provider tokens were used. See
+[../cache/README.md](../cache/README.md).
+
 ## Measured
 
 Pending quiet run: overhead of the check (limiter off vs on, same rate) and the 1 000-request burst against a

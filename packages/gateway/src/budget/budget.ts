@@ -45,11 +45,23 @@ export type SettleOutcome =
   /** `model` is the one that served, when a fallback made it differ from the one the hold was made for. */
   | { kind: 'charge'; costMicros: number; promptTokens: number; completionTokens: number; estimated: boolean; model?: string };
 
+/** A response served from the cache: nothing is held or charged, the ledger just remembers it. */
+export interface CacheHitRecord {
+  tenantId: string;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  /** What the same usage would have cost at `model`, micro-USD. */
+  savedMicros: number;
+}
+
 export interface Budget {
   /** Holds `estimate` against the tenant's month, or says why not. Never throws. */
   reserve(req: ReserveRequest): Promise<ReserveOutcome>;
   /** Ends a hold: Postgres first (hold removed, charge recorded, retried), then the live balance. Never throws. */
   settle(reservation: Reservation, outcome: SettleOutcome): Promise<void>;
+  /** Writes the zero-cost ledger row for a cache hit. Never throws. */
+  recordHit(hit: CacheHitRecord): Promise<void>;
   /** Deletes lapsed holds from Postgres (bounded). Run on a timer; exposed for tests. Returns how many went. */
   sweepExpired(): Promise<number>;
   /** Re-reads the epoch from Postgres and adopts it if newer. Run on a timer; exposed for tests. */
@@ -377,6 +389,15 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
     settle(reservation, outcome) {
       const p = settleNow(reservation, outcome).catch((err: unknown) => {
         log?.error(errInfo(err), 'budget settle failed');
+      });
+      pending.add(p);
+      void p.finally(() => pending.delete(p));
+      return p;
+    },
+
+    recordHit(hit) {
+      const p = withRetries(() => pg.recordHit({ requestId: randomUUID(), period: periodOf(now()), ...hit })).catch((err: unknown) => {
+        log?.error(errInfo(err), 'cache hit could not be written to the ledger');
       });
       pending.add(p);
       void p.finally(() => pending.delete(p));

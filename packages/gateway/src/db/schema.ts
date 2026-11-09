@@ -8,6 +8,8 @@ export const tenants = pgTable('tenants', {
   // Monthly spend cap in micro-USD (1 USD = 1,000,000). Null means the gateway-wide default
   // (BUDGET_DEFAULT_MONTHLY_USD).
   monthlyBudgetMicros: bigint('monthly_budget_micros', { mode: 'number' }),
+  // True when the tenant reads and writes the shared response-cache pool instead of its own (keys set-cache-sharing).
+  cacheShared: boolean('cache_shared').notNull().default(false),
 });
 
 export const apiKeys = pgTable(
@@ -48,20 +50,29 @@ export const tenantSpend = pgTable(
 );
 
 // One row per settled request. The primary key makes recording a settle idempotent.
-export const spendLedger = pgTable('spend_ledger', {
-  requestId: uuid('request_id').primaryKey(),
-  tenantId: uuid('tenant_id')
-    .notNull()
-    .references(() => tenants.id, { onDelete: 'cascade' }),
-  period: char('period', { length: 7 }).notNull(),
-  model: text('model').notNull(),
-  promptTokens: integer('prompt_tokens').notNull(),
-  completionTokens: integer('completion_tokens').notNull(),
-  costMicros: bigint('cost_micros', { mode: 'number' }).notNull(),
-  // True when no usage was seen and the reserved estimate was charged instead.
-  estimated: boolean('estimated').notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+export const spendLedger = pgTable(
+  'spend_ledger',
+  {
+    requestId: uuid('request_id').primaryKey(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
+    period: char('period', { length: 7 }).notNull(),
+    model: text('model').notNull(),
+    promptTokens: integer('prompt_tokens').notNull(),
+    completionTokens: integer('completion_tokens').notNull(),
+    costMicros: bigint('cost_micros', { mode: 'number' }).notNull(),
+    // True when no usage was seen and the reserved estimate was charged instead.
+    estimated: boolean('estimated').notNull(),
+    // True for a response served from the cache: no provider work, cost_micros is 0.
+    cached: boolean('cached').notNull().default(false),
+    // For a cached row, what the same usage would have cost at the model that first served it.
+    savedMicros: bigint('saved_micros', { mode: 'number' }).notNull().default(0),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  // The month's spend and savings are summed per tenant and period.
+  (t) => [index('spend_ledger_tenant_period_idx').on(t.tenantId, t.period)],
+);
 
 // Money held for in-flight requests: every hold, whichever store decided it. The Postgres path counts
 // these, and a rebuilt Redis balance starts from them. An expiry lets a crashed gateway's hold lapse.
