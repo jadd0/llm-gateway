@@ -41,6 +41,12 @@ Format — one entry per decision under its category, newest last, ids never reu
 ## AI & models
 
 ## Integrations & providers
+- **D-020** 2026-11-09 · founder · active — The third provider is Google Gemini, alongside Anthropic and OpenAI. Why: a genuinely different API that proves the adapter design.
+  Src: .product/plans/pr-6.md; founder chose "Google Gemini"
+- **D-021** 2026-11-09 · founder · active — Providers are called with plain HTTP over the gateway's own undici pools; no provider SDKs. Why: one place for timeouts, streaming and measurement; no extra dependencies.
+  Src: founder chose "Plain HTTP" · Code: packages/gateway/src/providers/
+- **D-022** 2026-11-09 · founder · active — One live smoke call per provider, run by hand with the founder's API keys, never in the gate or CI. Why: proves the adapters against real APIs, not only fixtures.
+  Src: founder chose "Yes, I'll add keys" · Code: scripts/smoke-providers.ts
 
 ## UX & copy
 
