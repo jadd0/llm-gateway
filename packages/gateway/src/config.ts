@@ -129,6 +129,17 @@ const schema = z
     ...dbFields,
     ...cacheFields,
     ...pepperField,
+    // Failed authentications one client address may make per minute before it is refused with 429 ahead of
+    // any key lookup. 0 turns the limit off.
+    AUTH_FAIL_LIMIT_PER_MIN: int(30, 0),
+    // Comma-separated addresses or CIDRs whose X-Forwarded-For is believed ('none': trust nobody).
+    TRUSTED_PROXIES: z.preprocess(
+      blankAsUnset,
+      z
+        .string()
+        .default('127.0.0.1')
+        .transform((v) => (v.trim().toLowerCase() === 'none' ? [] : v.split(',').map((x) => x.trim()).filter((x) => x !== ''))),
+    ),
     RATE_LIMIT_ENABLED: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
     RATE_LIMIT_DEFAULT_RPM: int(600, 1),
     RATE_LIMIT_DEFAULT_TPM: int(200_000, 1),
@@ -217,6 +228,8 @@ export interface Config {
   authCacheTtlS: number;
   authNegativeTtlS: number;
   authTombstoneTtlS: number;
+  authFailLimitPerMin: number;
+  trustedProxies: string[];
   rateLimitEnabled: boolean;
   rateLimitDefaultRpm: number;
   rateLimitDefaultTpm: number;
@@ -275,6 +288,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     authCacheTtlS: e.AUTH_CACHE_TTL_S,
     authNegativeTtlS: e.AUTH_NEGATIVE_TTL_S,
     authTombstoneTtlS: e.AUTH_TOMBSTONE_TTL_S,
+    authFailLimitPerMin: e.AUTH_FAIL_LIMIT_PER_MIN,
+    trustedProxies: e.TRUSTED_PROXIES,
     rateLimitEnabled: e.RATE_LIMIT_ENABLED === 'true',
     rateLimitDefaultRpm: e.RATE_LIMIT_DEFAULT_RPM,
     rateLimitDefaultTpm: e.RATE_LIMIT_DEFAULT_TPM,

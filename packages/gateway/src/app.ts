@@ -1,6 +1,7 @@
 import Fastify, { LogController, type FastifyError, type FastifyInstance } from 'fastify';
 import { auth } from './auth/plugin.ts';
 import { keyStoreFromConfig } from './auth/key-store.ts';
+import { createIpLimiter } from './auth/ip-limit.ts';
 import type { Config } from './config.ts';
 import { createDb } from './db/client.ts';
 import type { PgLedger } from './budget/pg-ledger.ts';
@@ -37,6 +38,8 @@ export function buildApp(
     // Nothing logs per request on the hot path.
     logController: new LogController({ disableRequestLogging: true }),
     bodyLimit: 10 * 1024 * 1024,
+    // X-Forwarded-For is believed only when the socket peer is one of these; otherwise request.ip is the peer.
+    trustProxy: config.trustedProxies.length > 0 ? config.trustedProxies : false,
   });
   const upstream = createUpstream(config);
   // The app owns its Postgres pool and Redis client and closes them with itself.
@@ -76,7 +79,18 @@ export function buildApp(
   app.setNotFoundHandler((_request, reply) =>
     reply.code(404).send(errorBody('unknown route', 'invalid_request_error')),
   );
-  app.register(auth, { keyStore, pepper: config.apiKeyPepper });
+  const ipLimiter =
+    redis !== null && config.authFailLimitPerMin > 0
+      ? createIpLimiter({
+          redis,
+          keyPrefix: config.redisKeyPrefix,
+          limitPerMin: config.authFailLimitPerMin,
+          timeoutMs: config.rateLimitRedisTimeoutMs,
+          log: app.log,
+          ...(extra.rateLimitClock ? { clock: extra.rateLimitClock } : {}),
+        })
+      : undefined;
+  app.register(auth, { keyStore, pepper: config.apiKeyPepper, ...(ipLimiter ? { ipLimiter } : {}) });
   if (config.rateLimitEnabled && redis !== null) {
     const limiter = createLimiter({
       redis,
