@@ -34,9 +34,18 @@ const schema = z
     AUTH_CACHE_TTL_S: int(600, 1),
     AUTH_NEGATIVE_TTL_S: int(60, 1),
     AUTH_TOMBSTONE_TTL_S: int(1200, 1),
+    RATE_LIMIT_ENABLED: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
+    RATE_LIMIT_DEFAULT_RPM: int(600, 1),
+    RATE_LIMIT_DEFAULT_TPM: int(200_000, 1),
+    RATE_LIMIT_DEFAULT_MAX_TOKENS: int(1024, 1),
+    RATE_LIMIT_REDIS_TIMEOUT_MS: int(50, 1),
   })
   .refine((e) => e.AUTH_CACHE === 'none' || e.REDIS_URL !== undefined, {
     message: 'REDIS_URL is required when AUTH_CACHE=redis',
+    path: ['REDIS_URL'],
+  })
+  .refine((e) => e.RATE_LIMIT_ENABLED === 'false' || e.REDIS_URL !== undefined, {
+    message: 'REDIS_URL is required when RATE_LIMIT_ENABLED=true',
     path: ['REDIS_URL'],
   })
   .refine((e) => e.AUTH_TOMBSTONE_TTL_S > e.AUTH_CACHE_TTL_S, {
@@ -61,6 +70,12 @@ export interface Config {
   authCacheTtlS: number;
   authNegativeTtlS: number;
   authTombstoneTtlS: number;
+  rateLimitEnabled: boolean;
+  rateLimitDefaultRpm: number;
+  rateLimitDefaultTpm: number;
+  /** Output tokens assumed when a request names no max_tokens. */
+  rateLimitDefaultMaxTokens: number;
+  rateLimitRedisTimeoutMs: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -82,6 +97,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     authCacheTtlS: e.AUTH_CACHE_TTL_S,
     authNegativeTtlS: e.AUTH_NEGATIVE_TTL_S,
     authTombstoneTtlS: e.AUTH_TOMBSTONE_TTL_S,
+    rateLimitEnabled: e.RATE_LIMIT_ENABLED === 'true',
+    rateLimitDefaultRpm: e.RATE_LIMIT_DEFAULT_RPM,
+    rateLimitDefaultTpm: e.RATE_LIMIT_DEFAULT_TPM,
+    rateLimitDefaultMaxTokens: e.RATE_LIMIT_DEFAULT_MAX_TOKENS,
+    rateLimitRedisTimeoutMs: e.RATE_LIMIT_REDIS_TIMEOUT_MS,
   };
 }
 

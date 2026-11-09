@@ -19,6 +19,14 @@ let gate: { held: boolean; open: () => void; wait: Promise<void> } | null = null
 const storeFor = (r: Redis | null, log?: KeyStoreOptions['log']) =>
   keyStoreFromConfig(config, handle.db, r, log);
 
+const caller = (s: { tenantId: string; tenant: string; keyId: string }, limits: { rpm?: number; tpm?: number } = {}) => ({
+  tenantId: s.tenantId,
+  tenantName: s.tenant,
+  keyId: s.keyId,
+  rpmLimit: limits.rpm ?? null,
+  tpmLimit: limits.tpm ?? null,
+});
+
 const seed = async () => {
   const s = await seedKey(handle.db, config);
   tenantIds.push(s.tenantId);
@@ -51,11 +59,40 @@ describe('key store', () => {
     const s = await seed();
     const store = storeFor(redis);
     queries = 0;
-    expect(await store.lookup(s.hash)).toEqual({ tenantId: s.tenantId, tenantName: s.tenant });
+    expect(await store.lookup(s.hash)).toEqual(caller(s));
     expect(queries).toBe(1);
     expect(await redis.get(`${config.redisKeyPrefix}apikey:${s.hash}`)).toContain(s.tenantId);
-    expect(await store.lookup(s.hash)).toEqual({ tenantId: s.tenantId, tenantName: s.tenant });
+    expect(await store.lookup(s.hash)).toEqual(caller(s));
     expect(queries).toBe(1);
+  });
+
+  it('limits are carried in the cached entry and a limit change is visible on the next lookup', async () => {
+    const s = await seedKey(handle.db, config, { rpm: 100, tpm: 50_000 });
+    tenantIds.push(s.tenantId);
+    const store = storeFor(redis);
+    expect(await store.lookup(s.hash)).toEqual(caller(s, { rpm: 100, tpm: 50_000 }));
+    expect(await redis.get(`${config.redisKeyPrefix}apikey:${s.hash}`)).toContain('"rpmLimit":100');
+    expect(await store.setLimits(s.hash, { rpm: 7, tpm: null })).toEqual({ updated: true, cached: true });
+    queries = 0;
+    expect(await store.lookup(s.hash)).toEqual(caller(s, { rpm: 7 }));
+    expect(queries).toBe(0); // served from the overwritten cache entry, not Postgres
+    // A second gateway (its own store, same Redis) sees the change too.
+    expect(await storeFor(redis).lookup(s.hash)).toEqual(caller(s, { rpm: 7 }));
+  });
+
+  it('setLimits never overwrites a tombstone and ignores revoked keys', async () => {
+    const s = await seed();
+    const store = storeFor(redis);
+    expect(await store.lookup(s.hash)).not.toBeNull();
+    await store.revoke(s.hash);
+    expect(await store.setLimits(s.hash, { rpm: 1, tpm: 1 })).toEqual({ updated: false, cached: false });
+    expect(await store.lookup(s.hash)).toBeNull();
+    // The tombstone alone, with an active row (a revoke that lost the race to a limit change): it wins.
+    const t = await seed();
+    const key = `${config.redisKeyPrefix}apikey:${t.hash}`;
+    await redis.set(key, 'revoked', 'EX', 60);
+    expect(await store.setLimits(t.hash, { rpm: 1, tpm: 1 })).toEqual({ updated: true, cached: true });
+    expect(await redis.get(key)).toBe('revoked');
   });
 
   it('unknown key is negatively cached', async () => {
@@ -110,7 +147,7 @@ describe('key store', () => {
     const deadRedis = createRedis('redis://127.0.0.1:1', { startupGraceMs: 0 });
     try {
       const store = storeFor(deadRedis, { warn: () => warns.push({}), info: () => {} });
-      expect(await store.lookup(live.hash)).toEqual({ tenantId: live.tenantId, tenantName: live.tenant });
+      expect(await store.lookup(live.hash)).toEqual(caller(live));
       expect(await store.lookup(live.hash)).not.toBeNull();
       expect(await store.lookup(randomBytes(32).toString('hex'))).toBeNull();
       expect(warns).toHaveLength(1); // three failed reads, one warn
@@ -164,7 +201,7 @@ describe('key store', () => {
     const warns: object[] = [];
     const store = storeFor(redis, { warn: () => warns.push({}), info: () => {} });
     queries = 0;
-    expect(await store.lookup(s.hash)).toEqual({ tenantId: s.tenantId, tenantName: s.tenant });
+    expect(await store.lookup(s.hash)).toEqual(caller(s));
     expect(queries).toBe(1);
     expect(warns).toHaveLength(0);
     expect(await redis.get(key)).toContain(s.tenantId);
@@ -194,7 +231,7 @@ describe('key store', () => {
   it('one warn per outage start: a failed write, then cache hits, then a read outage', async () => {
     const warns: Array<{ op: string }> = [];
     const infos: object[] = [];
-    const tenant = JSON.stringify({ tenantId: 't', tenantName: 'n' });
+    const tenant = JSON.stringify({ tenantId: 't', tenantName: 'n', keyId: 'k', rpmLimit: null, tpmLimit: 7 });
     let mode: 'miss' | 'hit' | 'down' = 'miss';
     const flaky = {
       status: 'ready',
@@ -210,7 +247,7 @@ describe('key store', () => {
     const hash = randomBytes(32).toString('hex');
     await store.lookup(hash); // miss: Postgres, then the fill fails
     mode = 'hit';
-    for (let i = 0; i < 5; i++) expect(await store.lookup(hash)).toEqual({ tenantId: 't', tenantName: 'n' });
+    for (let i = 0; i < 5; i++) expect(await store.lookup(hash)).toEqual({ tenantId: 't', tenantName: 'n', keyId: 'k', rpmLimit: null, tpmLimit: 7 });
     expect(warns.map((w) => w.op)).toEqual(['set']);
     mode = 'down';
     await store.lookup(hash);

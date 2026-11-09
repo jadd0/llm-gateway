@@ -8,6 +8,16 @@ import { apiKeys, tenants } from '../db/schema.ts';
 export interface Tenant {
   tenantId: string;
   tenantName: string;
+  /** The API key's own id: what its rate-limit buckets are named after. */
+  keyId: string;
+  /** Per-minute limits set on this key; null means the gateway-wide default. */
+  rpmLimit: number | null;
+  tpmLimit: number | null;
+}
+
+export interface Limits {
+  rpm: number | null;
+  tpm: number | null;
 }
 
 export interface KeyStore {
@@ -19,6 +29,12 @@ export interface KeyStore {
    * key can keep working until its cache TTL runs out.
    */
   revoke(keyHash: string): Promise<{ revoked: boolean; tombstoned: boolean }>;
+  /**
+   * Writes the limits in Postgres, then overwrites the cached entry so the next request on any
+   * gateway sees them. `updated` is false when no active key had this hash; `cached` is false when
+   * Redis was unreachable, in which case a cached copy keeps the old limits until its TTL runs out.
+   */
+  setLimits(keyHash: string, limits: Limits): Promise<{ updated: boolean; cached: boolean }>;
 }
 
 export interface KeyStoreOptions {
@@ -33,6 +49,10 @@ export interface KeyStoreOptions {
 }
 
 const DEL_IF_EQUAL = "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+// Overwrites a cache entry unless it is a tombstone: a revoke that lands between the Postgres update
+// and this write must still win.
+const SET_UNLESS_REVOKED =
+  "if redis.call('get', KEYS[1]) == ARGV[1] then return 0 end redis.call('set', KEYS[1], ARGV[2], 'EX', ARGV[3]) return 1";
 const REVOKED = 'revoked';
 const UNKNOWN = 'unknown';
 
@@ -63,7 +83,13 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
 
   async function fromPostgres(hash: string): Promise<Tenant | null> {
     const rows = await db
-      .select({ tenantId: tenants.id, tenantName: tenants.name })
+      .select({
+        tenantId: tenants.id,
+        tenantName: tenants.name,
+        keyId: apiKeys.id,
+        rpmLimit: apiKeys.rpmLimit,
+        tpmLimit: apiKeys.tpmLimit,
+      })
       .from(apiKeys)
       .innerJoin(tenants, eq(tenants.id, apiKeys.tenantId))
       .where(and(eq(apiKeys.keyHash, hash), isNull(apiKeys.revokedAt)))
@@ -74,9 +100,14 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
   const parseTenant = (raw: string): Tenant | undefined => {
     try {
       const v = JSON.parse(raw) as Partial<Tenant> | null;
-      return typeof v?.tenantId === 'string' && typeof v.tenantName === 'string'
-        ? { tenantId: v.tenantId, tenantName: v.tenantName }
-        : undefined;
+      const limit = (n: unknown) => (n === null ? null : Number.isInteger(n) ? (n as number) : undefined);
+      if (typeof v?.tenantId !== 'string' || typeof v.tenantName !== 'string' || typeof v.keyId !== 'string') {
+        return undefined;
+      }
+      const rpmLimit = limit(v.rpmLimit);
+      const tpmLimit = limit(v.tpmLimit);
+      if (rpmLimit === undefined || tpmLimit === undefined) return undefined;
+      return { tenantId: v.tenantId, tenantName: v.tenantName, keyId: v.keyId, rpmLimit, tpmLimit };
     } catch {
       return undefined;
     }
@@ -143,6 +174,36 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
         }
       }
       return { revoked: updated.length > 0, tombstoned };
+    },
+
+    async setLimits(hash, limits) {
+      // Postgres first, and the cache is rewritten from the row just written, so a concurrent fill
+      // can only ever carry the new limits or lose to them.
+      const updated = await db
+        .update(apiKeys)
+        .set({ rpmLimit: limits.rpm, tpmLimit: limits.tpm })
+        .where(and(eq(apiKeys.keyHash, hash), isNull(apiKeys.revokedAt)))
+        .returning({ id: apiKeys.id });
+      if (updated.length === 0) return { updated: false, cached: false };
+      let cached = false;
+      if (redis !== null) {
+        const tenant = await fromPostgres(hash);
+        if (tenant !== null) {
+          if (!(await waitReady(redis, 2000))) {
+            redisFailed('set', new Error('redis not ready'));
+          } else {
+            try {
+              // Not NX: it must replace the entry that holds the old limits.
+              await redis.eval(SET_UNLESS_REVOKED, 1, redisKey(hash), REVOKED, JSON.stringify(tenant), opts.cacheTtlS);
+              cached = true;
+              redisOk('set');
+            } catch (err) {
+              redisFailed('set', err);
+            }
+          }
+        }
+      }
+      return { updated: true, cached };
     },
   };
 }

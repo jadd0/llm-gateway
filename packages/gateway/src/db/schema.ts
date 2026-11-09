@@ -1,4 +1,4 @@
-import { index, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
+import { index, integer, pgTable, text, timestamp, uuid } from 'drizzle-orm/pg-core';
 
 export const tenants = pgTable('tenants', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -20,6 +20,9 @@ export const apiKeys = pgTable(
     name: text('name'),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
     revokedAt: timestamp('revoked_at', { withTimezone: true }),
+    // Per-minute limits for this key. Null means the gateway-wide default (RATE_LIMIT_DEFAULT_RPM / _TPM).
+    rpmLimit: integer('rpm_limit'),
+    tpmLimit: integer('tpm_limit'),
   },
   (t) => [index('api_keys_tenant_idx').on(t.tenantId)],
 );

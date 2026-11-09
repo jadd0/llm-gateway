@@ -22,17 +22,28 @@ export async function createTenant(db: Db['db'], name: string) {
 
 // The only place a full key exists outside the caller's memory: it is returned once and the
 // database gets its hash and display prefix.
-export async function createKey(db: Db['db'], pepper: string, tenantName: string, label?: string) {
+export async function createKey(
+  db: Db['db'],
+  pepper: string,
+  tenantName: string,
+  label?: string,
+  limits: { rpm?: number; tpm?: number } = {},
+) {
   const [tenant] = await db.select().from(tenants).where(eq(tenants.name, tenantName));
   if (!tenant) throw new CliError(`no tenant named "${tenantName}"`);
   const key = generateKey();
-  await db.insert(apiKeys).values({
-    tenantId: tenant.id,
-    keyHash: hashKey(pepper, key),
-    prefix: keyPrefix(key),
-    name: label ?? null,
-  });
-  return { key, prefix: keyPrefix(key), tenant: tenant.name };
+  const [row] = await db
+    .insert(apiKeys)
+    .values({
+      tenantId: tenant.id,
+      keyHash: hashKey(pepper, key),
+      prefix: keyPrefix(key),
+      name: label ?? null,
+      rpmLimit: limits.rpm ?? null,
+      tpmLimit: limits.tpm ?? null,
+    })
+    .returning({ id: apiKeys.id });
+  return { key, keyId: row!.id, prefix: keyPrefix(key), tenant: tenant.name };
 }
 
 export async function listKeys(db: Db['db'], tenantName?: string) {
