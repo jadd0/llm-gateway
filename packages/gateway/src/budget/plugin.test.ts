@@ -12,6 +12,7 @@ import { tenants } from '../db/schema.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
 import { periodOf } from './period.ts';
 import { standInWorker } from '../../test/drain.ts';
+import type { CacheHit } from '../cache/plugin.ts';
 import { createPgLedger } from './pg-ledger.ts';
 
 // The upstream picks its behaviour from the model name (every mock-* model is priced):
@@ -485,8 +486,8 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     const usage = { promptTokens: 9, completionTokens: 2, totalTokens: 11 };
     const hitOn = async (model: string) => {
       const noted: Array<Record<string, unknown>> = [];
-      const request = { reqlog: { note: (n: Record<string, unknown>) => void noted.push(n) } } as unknown as Parameters<typeof app.recordCacheHit>[0]['request'];
-      await app.recordCacheHit({ request, tenantId: s.tenantId, model, usage });
+      const request = { reqlog: { note: (n: Record<string, unknown>) => void noted.push(n) } } as unknown as NonNullable<CacheHit['request']>;
+      await app.recordCacheHit!({ request, tenantId: s.tenantId, model, usage });
       return noted;
     };
     // Unpriced: nothing to say about tokens (the cache plugin already noted the real ones) and no saving.
