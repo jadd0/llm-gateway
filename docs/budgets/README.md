@@ -56,8 +56,8 @@ latency is measured in the pending quiet benchmark (`gateway-*-budget-{off,on}`)
 ## When Redis is down
 
 The cap stays hard (D-024). Every hold is in Postgres as well as Redis, so when Redis is declared down the decision
-moves to Postgres (D-018): one short transaction locks the tenant's `tenant_spend` row, adds up all unexpired
-`budget_reservations` (including the holds Redis admitted a moment before it died), checks the cap and inserts a hold.
+moves to Postgres (D-018): one short transaction locks the tenant's `tenant_spend` row, adds up all
+`budget_reservations` (lapsed rows too: a lapsed hold may have a settle queued) (including the holds Redis admitted a moment before it died), checks the cap and inserts a hold.
 The lock is held for the check only, never across the provider call. The rate limiter fails open (D-016); the budget does
 not, because that would uncap spend. If neither store can decide the answer is `503 budget_unavailable`.
 
@@ -68,9 +68,13 @@ Postgres even though Redis answers (the old epoch's balance missed what Postgres
 of every Redis balance key. Declaring an outage bumps it with a compare-and-set from the value seen when the failures
 began, so of three gateways that see the same outage one bumps and the other two adopt the new number. After recovery
 the new epoch's key doesn't exist and the next reserve rebuilds it from Postgres in one snapshot: `spent` and the charge
-count from `tenant_spend`, plus every live hold, so the rebuilt balance equals the record and still counts in-flight
-requests. A reservation also lapses on its own (`BUDGET_RESERVATION_TTL_S`, which must exceed `UPSTREAM_MAX_DURATION_MS` plus 30 s or
-the gateway won't start), so a gateway that crashes mid-request can't hold money forever.
+count from `tenant_spend`, plus every hold row, lapsed ones included, so the rebuilt balance equals the record and still counts
+in-flight requests and settles the worker has not applied yet (a worker down for longer than the TTL cannot make the cap
+leak). **A hold never leaves a Redis balance by time**, only by its settle, by the worker applying a charge, or by the
+reconcile; a hold present in a balance therefore means that balance has not charged that request, which is what keeps a late
+catch-up from counting spend twice. `BUDGET_RESERVATION_TTL_S` (which must exceed `UPSTREAM_MAX_DURATION_MS` plus 30 s or the
+gateway won't start) is when a never-settled hold becomes eligible for the worker's sweeper, which charges its estimate, so a
+gateway that crashes mid-request holds the money until then and then pays for it.
 
 ## Other behaviour worth knowing
 
@@ -88,8 +92,14 @@ the gateway won't start), so a gateway that crashes mid-request can't hold money
   client that does not read what is left within 5 s has its connection destroyed.
 - **A client that leaves before the request is sent upstream gets everything back** (limiter tokens and budget);
   after it was sent the estimate stays, because the provider may bill.
-- **Lapsed holds** are deleted from Postgres by a bounded sweep (1000 rows every `BUDGET_SWEEP_INTERVAL_S`, 60 s, per
-  instance) as well as on the Postgres path; the holds table also goes with its tenant (`on delete cascade`).
+- **Settle goes through the request-log stream.** With Redis up, the settle script (`budget.lua`) appends the spend entry and
+  moves the live balance in one call; the log worker writes the ledger row, adds to `tenant_spend` (only for rows it really
+  inserted, so a redelivery changes nothing) and drops the hold row. Until it has, Postgres still holds the hold, so a balance
+  rebuilt from Postgres counts the estimate and the worker then releases it and adds the real charge. If the script cannot run,
+  or Redis is down, the settle is written to Postgres directly as before. See [../request-log/README.md](../request-log/README.md).
+- **Lapsed holds** are not deleted: the log worker charges each one its estimate (recorded as `estimated`, model `unknown`),
+  on its own timer once the hold has been lapsed for `LOG_SWEEP_GRACE_S`, so a gateway that dies mid-request can never make money vanish. The holds table also goes with its
+  tenant (`on delete cascade`).
 
 - **Why a hold could be left in Redis.** A Redis reserve whose script ran but whose reply was lost leaves a hold that
   nothing else knows of. If the request is then admitted on Postgres its settle releases the hold by id; if it is
@@ -135,3 +145,13 @@ the gateway won't start), so a gateway that crashes mid-request can't hold money
 
 Pending quiet run. See [../../BENCHMARKS.md](../../BENCHMARKS.md); no figure is quoted here until
 `bench/results/pr-5/` is committed (R3).
+
+- **Redis Cluster is not supported.** The settle script writes the spend stream and the tenant's keys in one call; on a
+  cluster that fails with CROSSSLOT. The gateway and the worker refuse to start when `INFO cluster` says `cluster_enabled:1`.
+  Sharding the spend stream per tenant would fix it and is not built: it would make the worker read a stream per tenant.
+- **A refused request's hold row** is dropped straight away; if that delete fails it is retried in the background and
+  marked `refused`, so it counts against no cap and the sweeper deletes it instead of charging its estimate. A row that
+  cannot be reached at all, with its gateway gone, is charged like any lapsed hold once Postgres is back.
+- **Redis holds with no Postgres row** (a rebuild imported the hold of a request Postgres then refused, or a catch-up was
+  lost) are released by the worker's reconcile once `BUDGET_ORPHAN_GRACE_S` past their expiry, and charged what Postgres charged
+  if it has a ledger row. A refused request also releases its hold at the newest epoch straight away.

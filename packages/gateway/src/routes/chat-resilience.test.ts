@@ -11,6 +11,7 @@ import { createDb, type Db } from '../db/client.ts';
 import { tenants } from '../db/schema.ts';
 import { costMicros, priceFor } from '../pricing/prices.ts';
 import { estimateWorstCase } from '../usage/estimate.ts';
+import { standInWorker } from '../../test/drain.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
 import { eq } from 'drizzle-orm';
 
@@ -62,6 +63,7 @@ beforeAll(async () => {
   B = await startMock();
   handle = createDb({ databaseUrl: base.databaseUrl, poolSize: 4 });
   redis = new Redis(base.redisUrl!);
+  stopWorker = standInWorker(handle.db, redis, base.redisKeyPrefix); // the log worker's part: queued settles reach Postgres
 });
 beforeEach(async () => {
   Object.assign(A.settings, newSettings());
@@ -75,7 +77,9 @@ afterEach(async () => {
   for (const app of apps.splice(0)) await app.close();
   for (const close of closers.splice(0)) await close();
 });
+let stopWorker: () => void = () => {};
 afterAll(async () => {
+  stopWorker();
   for (const m of [A, B]) {
     m.server.closeAllConnections();
     await new Promise((r) => m.server.close(r));

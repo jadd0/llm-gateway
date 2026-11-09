@@ -75,7 +75,7 @@ outage mid-test.
 ## Getting started
 
 Needs Node 24+ (26 recommended), npm, Docker (for Redis and Postgres) and [k6](https://k6.io) for benchmarks. Postgres must have the
-[pgvector](https://github.com/pgvector/pgvector) extension (the compose file runs a pinned `pgvector/pgvector` image); migration 0005 creates it.
+[pgvector](https://github.com/pgvector/pgvector) extension (the compose file runs a pinned `pgvector/pgvector` image); migration 0007 creates it.
 
 ```
 npm ci

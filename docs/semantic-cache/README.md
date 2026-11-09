@@ -15,15 +15,14 @@ the answer for order 1235 to a request about order 1234 at similarity 0.982, and
 off for the whole gateway whatever the tenants say.
 
 **Requires Postgres with the pgvector extension** (0.8 or later preferred). `docker-compose.yml` runs the pinned
-`pgvector/pgvector` image. Migration 0005 runs `CREATE EXTENSION vector`; on a Postgres without it `npm run db:migrate` stops
+`pgvector/pgvector` image. Migration 0007 runs `CREATE EXTENSION vector`; on a Postgres without it `npm run db:migrate` stops
 with a message that says so, and the gateway refuses to start with `SEMANTIC_ENABLED=true` until the extension is there.
 The same version check picks the query: from 0.8 the index scan keeps going until a filtered query has its row
 (`hnsw.iterative_scan`); before 0.8 the index is not used for a large scope and context, which are sorted exactly instead.
 
-**Migration.** 0005 is new in this change: it creates the extension, the `semantic_cache` table, the `semantic_nearest`
-function the lookup calls, `spend_ledger.cache_kind` and `tenants.semantic_cache` (default false, so no tenant changes
-behaviour until `keys set-semantic-cache <tenant> on`). Nothing is deployed with an earlier 0005. Another change also
-adds a 0005; whichever merges second renumbers its file and its journal entry.
+**Migration.** 0007 is new in this change (numbered after the request log's 0005 and 0006): it creates the extension, the `semantic_cache` table, the `semantic_nearest`
+function the lookup calls, `spend_ledger.cache_kind` (existing cached rows become `exact`) and `tenants.semantic_cache` (default false, so no tenant changes
+behaviour until `keys set-semantic-cache <tenant> on`). A semantic hit is logged with `request_log.cache = 'semantic-hit'`, and its ledger row, written by the log worker from the spend stream, carries `cache_kind = 'semantic'`.
 
 ## What may differ
 

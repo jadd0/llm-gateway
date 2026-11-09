@@ -28,6 +28,8 @@ export interface CacheFill {
 
 /** A hit, as the ledger needs it. */
 export interface CacheHit {
+  /** The request that was answered from the cache: the ledger row's saving is noted on its log entry. */
+  request?: FastifyRequest;
   tenantId: string;
   /** The model that served the answer the first time. */
   model: string;
@@ -192,8 +194,9 @@ const cachePlugin: FastifyPluginAsync<CachePluginOptions> = async (app, opts) =>
   function hit(request: FastifyRequest, reply: FastifyReply, entry: CachedCompletion, streamed: boolean, includeUsage: boolean, similarity?: number) {
     const kind: CacheHit['kind'] = similarity === undefined ? 'exact' : 'semantic';
     void request.rateLimit?.settle(0);
+    if (entry.usage) request.reqlog.note({ promptTokens: entry.usage.promptTokens, completionTokens: entry.usage.completionTokens });
     if (app.recordCacheHit) {
-      void app.recordCacheHit({ tenantId: request.tenant!.tenantId, model: entry.model, usage: entry.usage, kind }).catch(() => {});
+      void app.recordCacheHit({ request, tenantId: request.tenant!.tenantId, model: entry.model, usage: entry.usage, kind }).catch(() => {});
     }
     const who = { id: `chatcmpl-cache-${randomUUID()}`, created: Math.floor(now() / 1000) };
     reply.header('x-gateway-cache', kind === 'semantic' ? 'semantic-hit' : 'hit').header('x-gateway-model', entry.model).header('x-gateway-attempts', '0');

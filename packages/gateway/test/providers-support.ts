@@ -1,9 +1,9 @@
 import { readFileSync } from 'node:fs';
 import type { Transform } from 'node:stream';
-import type { ChatBody } from '../request-body.ts';
-import type { AdapterClock, BuildInput } from './types.ts';
+import type { ChatBody } from '../src/request-body.ts';
+import type { AdapterClock, BuildInput } from '../src/providers/types.ts';
 
-export const fixture = (name: string): Buffer => readFileSync(new URL(`./fixtures/${name}`, import.meta.url));
+export const fixture = (name: string): Buffer => readFileSync(new URL(`../src/providers/fixtures/${name}`, import.meta.url));
 
 export const clock: AdapterClock = { now: () => 1_700_000_000, newId: () => 'fixed-id' };
 

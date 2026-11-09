@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { createAnthropicAdapter } from '../providers/anthropic.ts';
 import { createGeminiAdapter } from '../providers/gemini.ts';
-import { clock, fixture, run } from '../providers/test-support.ts';
+import { clock, fixture, run } from '../../test/providers-support.ts';
 import { StreamCollector, completionFromBody } from './collect.ts';
 
 const collect = async (text: string | Buffer, size?: number) => {

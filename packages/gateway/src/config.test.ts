@@ -136,7 +136,7 @@ describe('response cache settings', () => {
   it('needs Redis, and a wait between the lock and the longest upstream call', () => {
     const noRedis = { DATABASE_URL: 'postgres://u:p@127.0.0.1:1/db', API_KEY_PEPPER: 'x'.repeat(40), AUTH_CACHE: 'none', RATE_LIMIT_ENABLED: 'false', BUDGET_ENABLED: 'false' };
     expect(() => loadConfig(noRedis)).toThrow(/REDIS_URL is required when CACHE_ENABLED=true/);
-    expect(loadConfig({ ...noRedis, CACHE_ENABLED: 'false' }).cacheEnabled).toBe(false);
+    expect(loadConfig({ ...noRedis, CACHE_ENABLED: 'false', LOG_MODE: 'inline' }).cacheEnabled).toBe(false);
     expect(() => loadConfig(env({ CACHE_LOCK_MS: '5000', CACHE_WAIT_MS: '2000' }))).toThrow(/CACHE_WAIT_MS must not be shorter than CACHE_LOCK_MS/);
     expect(() => loadConfig(env({ UPSTREAM_MAX_DURATION_MS: '60000', CACHE_WAIT_MS: '120000' }))).toThrow(/CACHE_WAIT_MS must not be longer than UPSTREAM_MAX_DURATION_MS/);
     // With the cache off its wait is not in play, so a short upstream limit needs no cache setting.
@@ -183,5 +183,21 @@ describe('semantic cache settings', () => {
     expect(() => loadConfig(env({ SEMANTIC_DIMENSIONS: '512' }))).toThrow(/SEMANTIC_DIMENSIONS must be 1024/);
     expect(() => loadConfig(env({ SEMANTIC_THRESHOLD: '1.5' }))).toThrow();
     expect(loadConfig(env({ VOYAGE_API_KEY: 'k', VOYAGE_BASE_URL: 'http://127.0.0.1:1/v1/' }))).toMatchObject({ voyageApiKey: 'k', voyageBaseUrl: 'http://127.0.0.1:1/v1' });
+  });
+});
+
+describe('request log settings', () => {
+  it('defaults, and the stream needs Redis while inline does not', () => {
+    expect(loadConfig(env({}))).toMatchObject({
+      logMode: 'stream', logGroup: 'log-writers', logBatchSize: 500, logBatchWaitMs: 1000,
+      logClaimIdleMs: 30_000, logMaxDeliveries: 5, logBufferMax: 10_000, logSweepS: 60,
+      logSweepGraceS: 60, logStreamMax: 1_000_000, budgetOrphanGraceS: 600,
+    });
+    expect(loadConfig(env({})).workerConsumer).toMatch(/-\d+$/);
+    expect(loadConfig(env({ WORKER_CONSUMER: 'w1' })).workerConsumer).toBe('w1');
+    const noRedis = { DATABASE_URL: 'postgres://u:p@127.0.0.1:1/db', API_KEY_PEPPER: 'x'.repeat(40), AUTH_CACHE: 'none', RATE_LIMIT_ENABLED: 'false', BUDGET_ENABLED: 'false', CACHE_ENABLED: 'false' };
+    expect(() => loadConfig(noRedis)).toThrow(/LOG_MODE=stream/);
+    expect(loadConfig({ ...noRedis, LOG_MODE: 'inline' }).logMode).toBe('inline');
+    expect(() => loadConfig(env({ LOG_MODE: 'file' }))).toThrow();
   });
 });

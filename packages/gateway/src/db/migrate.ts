@@ -11,7 +11,7 @@ try {
   await migrate(handle.db, { migrationsFolder: fileURLToPath(new URL('../../drizzle', import.meta.url)) });
   console.log('migrations applied');
 } catch (err) {
-  // Migration 0005 runs CREATE EXTENSION vector: on a Postgres without pgvector it fails with a message that
+  // Migration 0007 runs CREATE EXTENSION vector: on a Postgres without pgvector it fails with a message that
   // names a missing control file, which does not say what to do.
   if (isMissingPgvector(err)) {
     console.error(`migration failed: Postgres does not have the pgvector extension. ${PGVECTOR_HELP}`);

@@ -12,6 +12,7 @@ import { KEY_VERSION } from '../cache/key.ts';
 import type { CacheFill } from '../cache/plugin.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { spendLedger, tenants, tenantSpend } from '../db/schema.ts';
+import { standInWorker } from '../../test/drain.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
 
 // The upstream stands in for the provider and counts the calls it gets. Its answer says which call made it, so a
@@ -88,6 +89,7 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
   handle = createDb({ databaseUrl: base.databaseUrl, poolSize: 8 });
   redis = new Redis(base.redisUrl!);
+  stopWorker = standInWorker(handle.db, redis, base.redisKeyPrefix); // the log worker's part: queued settles reach Postgres
   app = buildApp(
     testConfig({
       API_KEY_PEPPER: base.apiKeyPepper,
@@ -133,7 +135,9 @@ beforeAll(async () => {
   gw = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 });
 
+let stopWorker: () => void = () => {};
 afterAll(async () => {
+  stopWorker();
   await app.close();
   upstream.closeAllConnections();
   await new Promise((resolve) => upstream.close(resolve));
@@ -514,7 +518,10 @@ describe('response cache on POST /v1/chat/completions', () => {
       usage: { promptTokens: 7, completionTokens: 5, totalTokens: 12 },
       kind: 'exact',
     });
-    const [row] = await handle.db.select().from(spendLedger).where(eq(spendLedger.tenantId, t.tenantId));
+    // The row is written by the log worker (the stand-in here) after the hit is queued.
+    const rowsOf = () => handle.db.select().from(spendLedger).where(eq(spendLedger.tenantId, t.tenantId));
+    expect(await until(async () => (await rowsOf()).length === 1)).toBe(true);
+    const [row] = await rowsOf();
     expect(row).toMatchObject({ cached: true, model: 'model-without-a-price', promptTokens: 7, completionTokens: 5, costMicros: 0, savedMicros: 0, cacheKind: 'exact' });
   });
 

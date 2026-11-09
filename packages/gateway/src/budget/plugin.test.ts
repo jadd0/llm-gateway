@@ -5,12 +5,14 @@ import type { AddressInfo } from 'node:net';
 import type { FastifyInstance } from 'fastify';
 import { eq, sql } from 'drizzle-orm';
 import { Redis } from 'ioredis';
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { buildApp } from '../app.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { tenants } from '../db/schema.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
 import { periodOf } from './period.ts';
+import { standInWorker } from '../../test/drain.ts';
+import type { CacheHit } from '../cache/plugin.ts';
 import { createPgLedger } from './pg-ledger.ts';
 
 // The upstream picks its behaviour from the model name (every mock-* model is priced):
@@ -106,8 +108,12 @@ beforeAll(async () => {
     { rateLimitClock: () => T0 },
   );
   await app.listen({ port: 0, host: '127.0.0.1' });
+  stopWorker = standInWorker(handle.db, redis, prefix);
   app.server.on('connection', (sk: Socket) => serverSockets.push(sk));
 });
+
+// Stands in for the log worker: applies what the gateway queued to Postgres a few times a second.
+let stopWorker: () => void = () => {};
 
 afterEach(() => {
   gate.open();
@@ -116,6 +122,7 @@ afterEach(() => {
 });
 
 afterAll(async () => {
+  stopWorker();
   upstream.closeAllConnections();
   await app.close();
   await new Promise((resolve) => upstream.close(resolve));
@@ -231,7 +238,7 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     expect(hits).toBe(before);
     expect(await balanceKey(s.tenantId)).toBeUndefined(); // nothing was reserved
     expect(await redis.exists(`${prefix}rl:{${s.keyId}}:req`)).toBe(1); // the request itself was counted...
-    expect(await tokensLeft(s.keyId)).toBe(TPM); // ...but its tokens went back
+    await vi.waitFor(async () => expect(await tokensLeft(s.keyId)).toBe(TPM)); // ...but its tokens went back
   });
 
   it('a body the route rejects reserves nothing', async () => {
@@ -301,7 +308,8 @@ describe('budget plugin', { timeout: 60_000 }, () => {
       expect(res.statusCode).toBe(503);
       expect(res.json().error).toMatchObject({ type: 'gateway_error', code: 'budget_unavailable' });
       expect(hits).toBe(before);
-      expect(await tokensLeft(s.keyId)).toBe(TPM); // the limiter's tokens went back
+      // the limiter's tokens go back by a fire-and-forget correction: wait for it rather than race it
+      await vi.waitFor(async () => expect(await tokensLeft(s.keyId)).toBe(TPM));
       await failing.close(); // waits for the Redis hold to be released
       expect(await balance(s.tenantId)).toEqual({ spent: 0, reserved: 0 });
     } finally {
@@ -339,7 +347,7 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     expect(res.statusCode).toBe(500);
     await settledAt(s.tenantId, 0);
     expect(await ledgerRows(s.tenantId)).toEqual([]);
-    expect(await tokensLeft(s.keyId)).toBe(TPM);
+    await vi.waitFor(async () => expect(await tokensLeft(s.keyId)).toBe(TPM));
   });
 
   it('a 2xx with no usage keeps the estimate, like the rate limiter', async () => {
@@ -474,14 +482,32 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     }
   });
 
+  it('a cache hit on a model with no price leaves the log row to the token counts the cache plugin noted, and records its saving only when priced', async () => {
+    const s = await fresh(1_000_000);
+    const usage = { promptTokens: 9, completionTokens: 2, totalTokens: 11 };
+    const hitOn = async (model: string) => {
+      const noted: Array<Record<string, unknown>> = [];
+      const request = { reqlog: { note: (n: Record<string, unknown>) => void noted.push(n) } } as unknown as NonNullable<CacheHit['request']>;
+      await app.recordCacheHit!({ request, tenantId: s.tenantId, model, usage, kind: 'exact' });
+      return noted;
+    };
+    // Unpriced: nothing to say about tokens (the cache plugin already noted the real ones) and no saving.
+    expect(await hitOn('unpriced-model')).toEqual([{ savedMicros: 0 }]);
+    // Priced: the saving, and still no token counts of its own.
+    const priced = await hitOn('mock-ok');
+    expect(priced).toHaveLength(1);
+    expect(Object.keys(priced[0]!)).toEqual(['savedMicros']);
+    expect(priced[0]!.savedMicros).toBeGreaterThan(0);
+  });
+
   it('a client that leaves before the request is dispatched upstream gets everything back', async () => {
     const real = createPgLedger(handle.db);
     let holdEntered!: () => void;
     const entered = new Promise<void>((r) => (holdEntered = r));
     let openHold!: () => void;
     const holdGate = new Promise<void>((r) => (openHold = r));
-    let settledNow!: () => void;
-    const settled = new Promise<void>((r) => (settledNow = r));
+    let holdWritten!: () => void;
+    const written = new Promise<void>((r) => (holdWritten = r));
     const sockets: Socket[] = [];
     const gated = capped({}, {
       budgetPgLedger: {
@@ -489,12 +515,8 @@ describe('budget plugin', { timeout: 60_000 }, () => {
         hold: async (a: Parameters<typeof real.hold>[0]) => {
           holdEntered();
           await holdGate;
-          return real.hold(a);
-        },
-        settle: async (id: string, e: Parameters<typeof real.settle>[1]) => {
-          const r = await real.settle(id, e);
-          settledNow();
-          return r;
+          await real.hold(a);
+          holdWritten();
         },
       },
     });
@@ -509,11 +531,12 @@ describe('budget plugin', { timeout: 60_000 }, () => {
       r.req.destroy();
       if (!sk.destroyed) await once(sk, 'close');
       openHold();
-      await settled; // the route ran and ended the request
+      await written; // the hold exists now, so a balance of zero held means the refund has been applied to it
+      await settledAt(s.tenantId, 0); // the route ran and ended the request: its refund reached Postgres and dropped the hold
       expect(hits).toBe(before);
       expect(await ledgerRows(s.tenantId)).toEqual([]);
       expect(await balance(s.tenantId)).toEqual({ spent: 0, reserved: 0 });
-      expect(await tokensLeft(s.keyId)).toBe(TPM); // the limiter's tokens are back too
+      await vi.waitFor(async () => expect(await tokensLeft(s.keyId)).toBe(TPM)); // the limiter's tokens are back too
     } finally {
       openHold();
       await gated.close();

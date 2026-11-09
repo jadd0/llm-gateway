@@ -5,7 +5,8 @@ import { createTenant } from '../cli/keys.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { cleanup, testConfig } from '../test-env.ts';
 import { periodOf } from './period.ts';
-import { createPgLedger, type PgLedger, type SpendEntry } from './pg-ledger.ts';
+import type { SpendEntry as QueuedSpend } from '../requestlog/entry.ts';
+import { applySpendBatch, chargeExpiredHolds, createPgLedger, type PgLedger, type SpendEntry } from './pg-ledger.ts';
 
 const base = testConfig();
 const P = periodOf(Date.now());
@@ -94,9 +95,9 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
     expect(await heldRows(t)).toBe(1);
   });
 
-  it('the snapshot has spend, charge count and only the live holds, with their time left', async () => {
+  it('the snapshot has spend, charge count and every hold, a lapsed one with negative time left', async () => {
     const t = await newTenant();
-    expect(await ledger.snapshot(t, P)).toEqual({ spent: 0, charges: 0, holds: [] });
+    expect(await ledger.snapshot(t, P)).toEqual({ spent: 0, charges: 0, holds: [], estimated: [] });
     const live = reserveArgs(t, 700, 10_000, { ttlMs: 120_000 });
     await ledger.hold(live);
     await ledger.hold(reserveArgs(t, 900, 10_000, { ttlMs: -5000 })); // already lapsed
@@ -104,10 +105,13 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
     await ledger.settle(randomUUID(), entry(t, 250));
     const snap = await ledger.snapshot(t, P);
     expect(snap).toMatchObject({ spent: 350, charges: 2 });
-    expect(snap.holds).toHaveLength(1);
-    expect(snap.holds[0]).toMatchObject({ id: live.id, amount: 700 });
-    expect(snap.holds[0]!.ttlMs).toBeGreaterThan(100_000);
-    expect(snap.holds[0]!.ttlMs).toBeLessThanOrEqual(120_000);
+    expect(snap.holds).toHaveLength(2);
+    const liveHold = snap.holds.find((h) => h.id === live.id)!;
+    expect(liveHold).toMatchObject({ amount: 700 });
+    expect(liveHold.ttlMs).toBeGreaterThan(100_000);
+    expect(liveHold.ttlMs).toBeLessThanOrEqual(120_000);
+    expect(snap.holds.find((h) => h.id !== live.id)).toMatchObject({ amount: 900 });
+    expect(snap.holds.find((h) => h.id !== live.id)!.ttlMs).toBeLessThan(0);
   });
 
   it('charges are numbered in order under concurrency, each carrying the running total', async () => {
@@ -146,30 +150,150 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
     expect(Number(rows.rows[0]!.n)).toBe(2);
   });
 
-  it('holds go with their tenant, and the sweep deletes only lapsed ones, at most `limit` per call', async () => {
+  const queued = (tenantId: string, costMicros: number, extra: Partial<QueuedSpend> = {}): QueuedSpend => ({
+    kind: 'charge', id: randomUUID(), tenantId, period: P, model: 'mock-model', promptTokens: 10, completionTokens: 20,
+    costMicros, estimated: false, savedMicros: 0, ...extra,
+  });
+  const apply = (entries: QueuedSpend[]) => handle.db.transaction((tx) => applySpendBatch(tx, entries));
+  const ledgerRows = async (tenantId: string) =>
+    Number((await handle.db.execute(sql`select count(*) as n from spend_ledger where tenant_id = ${tenantId}`)).rows[0]!.n);
+
+  it('holds go with their tenant', async () => {
     const gone = await newTenant();
     await ledger.hold(reserveArgs(gone, 100, 1000));
     expect(await heldRows(gone)).toBe(1);
     await handle.db.execute(sql`delete from tenants where id = ${gone}`);
     expect(await heldRows(gone)).toBe(0); // on delete cascade
+  });
 
+  it('a queued batch is applied exactly once: a redelivered entry inserts nothing and changes no total', async () => {
+    const t = await newTenant();
+    const holds = [reserveArgs(t, 1000, 100_000), reserveArgs(t, 1000, 100_000), reserveArgs(t, 1000, 100_000)];
+    for (const h of holds) await ledger.hold(h);
+    const entries = [
+      queued(t, 300, { id: holds[0]!.id }),
+      queued(t, 200, { id: holds[1]!.id, estimated: true }),
+      queued(t, 0, { kind: 'refund', id: holds[2]!.id }),
+      queued(t, 0, { kind: 'hit', savedMicros: 55 }),
+    ];
+    expect((await apply(entries)).inserted).toBe(3); // two charges and the hit
+    expect(await ledger.spent(t, P)).toBe(500);
+    expect(await ledger.snapshot(t, P)).toMatchObject({ spent: 500, charges: 2, holds: [] });
+    // The same batch again, with a copy of one entry inside it too.
+    expect((await apply([...entries, entries[0]!])).inserted).toBe(0);
+    expect(await ledger.snapshot(t, P)).toMatchObject({ spent: 500, charges: 2 });
+    expect(await ledgerRows(t)).toBe(3);
+    const rows = await handle.db.execute(sql`select cost_micros, estimated, cached, saved_micros from spend_ledger where tenant_id = ${t} order by cached, cost_micros`);
+    expect(rows.rows.map((r) => [Number(r.cost_micros), r.estimated, r.cached, Number(r.saved_micros)])).toEqual([
+      [200, true, false, 0],
+      [300, false, false, 0],
+      [0, false, true, 55],
+    ]);
+  });
+
+  it('a charge already written by the direct path is not charged again when its queued entry arrives', async () => {
+    const t = await newTenant();
+    const e = entry(t, 400);
+    await ledger.hold({ id: e.requestId, tenantId: t, period: P, estimate: 1000, ttlMs: 300_000 });
+    await ledger.settle(e.requestId, e);
+    const r = await apply([queued(t, 400, { id: e.requestId })]);
+    expect(r.inserted).toBe(0);
+    expect(r.settled).toEqual([{ tenantId: t, period: P, id: e.requestId, costMicros: 400, estimated: false }]);
+    expect(await ledger.spent(t, P)).toBe(400);
+  });
+
+  it('a real charge whose request the sweeper already charged at the estimate replaces it: spend, tokens and flag follow, once', async () => {
+    const t = await newTenant();
+    const h = reserveArgs(t, 401, 100_000, { ttlMs: -60_000 });
+    await ledger.hold(h);
+    while ((await heldRows(t)) > 0) await chargeExpiredHolds(handle.db, 100, 0, t);
+    expect(await ledger.snapshot(t, P)).toMatchObject({ spent: 401, charges: 1, estimated: [{ id: h.id, cost: 401 }] });
+    const r = await apply([queued(t, 9, { id: h.id, model: 'real-model', promptTokens: 3, completionTokens: 4 })]);
+    expect(r.inserted).toBe(0);
+    expect(r.settled).toEqual([{ tenantId: t, period: P, id: h.id, costMicros: 9, estimated: false }]);
+    expect(await ledger.snapshot(t, P)).toMatchObject({ spent: 9, charges: 1, estimated: [] });
+    const row = (await handle.db.execute(sql`select cost_micros, estimated, model, prompt_tokens, completion_tokens from spend_ledger where request_id = ${h.id}`)).rows[0]!;
+    expect([Number(row.cost_micros), row.estimated, row.model, row.prompt_tokens, row.completion_tokens]).toEqual([9, false, 'real-model', 3, 4]);
+    // Delivered again: nothing moves.
+    await apply([queued(t, 9, { id: h.id, model: 'real-model' })]);
+    expect(await ledger.snapshot(t, P)).toMatchObject({ spent: 9, charges: 1 });
+  });
+
+  it('a refund whose request the sweeper already charged takes the charge back', async () => {
+    const t = await newTenant();
+    const h = reserveArgs(t, 250, 100_000, { ttlMs: -60_000 });
+    await ledger.hold(h);
+    while ((await heldRows(t)) > 0) await chargeExpiredHolds(handle.db, 100, 0, t);
+    expect(await ledger.spent(t, P)).toBe(250);
+    await apply([queued(t, 0, { kind: 'refund', id: h.id })]);
+    expect(await ledger.snapshot(t, P)).toMatchObject({ spent: 0, charges: 0, estimated: [] });
+    expect(await ledgerRows(t)).toBe(0);
+  });
+
+  it('the direct path also replaces a charge the sweeper made at the estimate', async () => {
+    const t = await newTenant();
+    const h = reserveArgs(t, 300, 100_000, { ttlMs: -60_000 });
+    await ledger.hold(h);
+    while ((await heldRows(t)) > 0) await chargeExpiredHolds(handle.db, 100, 0, t);
+    await ledger.settle(h.id, entry(t, 20, { requestId: h.id }));
+    expect(await ledger.snapshot(t, P)).toMatchObject({ spent: 20, charges: 1, estimated: [] });
+  });
+
+  it('a hold marked refused counts against no cap and is deleted, not charged, by the sweeper', async () => {
+    const t = await newTenant();
+    const h = reserveArgs(t, 900, 1000);
+    await ledger.hold(h);
+    expect((await ledger.reserve(reserveArgs(t, 200, 1000))).allowed).toBe(false); // 900 held
+    await ledger.markRefused(h.id);
+    expect((await ledger.snapshot(t, P)).holds).toEqual([]);
+    expect((await ledger.reserve(reserveArgs(t, 200, 1000))).allowed).toBe(true);
+    expect((await chargeExpiredHolds(handle.db, 100, 0, t)).filter((c) => c.tenantId === t)).toEqual([]);
+    expect(await ledger.spent(t, P)).toBe(0);
+    expect(await heldRows(t)).toBe(1); // the refused row is gone; the admitted one stays
+  });
+
+  it('an expired unsettled hold is charged its estimate, once, a bounded number at a time; a live hold is left alone', async () => {
     const t = await newTenant();
     const live = reserveArgs(t, 100, 1000);
     await ledger.hold(live);
-    for (let i = 0; i < 3; i++) await ledger.hold(reserveArgs(t, 10, 1000, { ttlMs: -60_000 }));
-    expect(await ledger.sweepExpired(0)).toBe(0);
-    let removed = 0;
-    while ((await heldRows(t)) > 1) removed += await ledger.sweepExpired(1);
-    expect(removed).toBeGreaterThanOrEqual(3);
+    const lapsed = [0, 1, 2].map(() => reserveArgs(t, 10, 1000, { ttlMs: -60_000 }));
+    for (const h of lapsed) await ledger.hold(h);
+    // Other test files' lapsed rows are in the table too, so the loop runs until this tenant's are gone.
+    const charged = [];
+    while ((await heldRows(t)) > 1) charged.push(...(await chargeExpiredHolds(handle.db, 2, 0, t)));
+    expect(charged.filter((c) => c.tenantId === t)).toHaveLength(3);
+    expect(await ledger.spent(t, P)).toBe(30);
+    expect(await ledgerRows(t)).toBe(3);
+    const rows = await handle.db.execute(sql`select estimated, model from spend_ledger where tenant_id = ${t}`);
+    expect(rows.rows.every((r) => r.estimated === true && r.model === 'unknown')).toBe(true);
     expect(await heldRows(t)).toBe(1); // the live one survived
+    expect((await chargeExpiredHolds(handle.db, 2, 0, t)).filter((c) => c.tenantId === t)).toEqual([]);
+    expect(await ledger.spent(t, P)).toBe(30);
+    expect(await chargeExpiredHolds(handle.db, 0, 0, t)).toEqual([]);
   });
 
-  it('an expired hold does not count against the cap', async () => {
+  it('a hold lapsed less than the grace ago is not swept: its settle may still be queued', async () => {
     const t = await newTenant();
-    expect((await ledger.reserve(reserveArgs(t, 900, 1000, { ttlMs: -1000 }))).allowed).toBe(true);
-    // The first hold lapsed already, so the full cap is free again.
-    expect((await ledger.reserve(reserveArgs(t, 1000, 1000))).allowed).toBe(true);
+    const h = reserveArgs(t, 50, 1000, { ttlMs: -5_000 });
+    await ledger.hold(h);
+    expect((await chargeExpiredHolds(handle.db, 1000, 60_000, t)).filter((c) => c.tenantId === t)).toEqual([]);
     expect(await heldRows(t)).toBe(1);
+    expect((await chargeExpiredHolds(handle.db, 1000, 1_000, t)).filter((c) => c.tenantId === t)).toHaveLength(1);
+    expect(await heldRows(t)).toBe(0);
+  });
+
+  it('a lapsed hold still counts against the cap until it is charged, and a reserve does not delete it', async () => {
+    const t = await newTenant();
+    const lapsed = reserveArgs(t, 900, 1000, { ttlMs: -1000 });
+    expect((await ledger.reserve(lapsed)).allowed).toBe(true);
+    // Its settle may be queued, so the 900 is still money in flight: only 100 is free.
+    expect((await ledger.reserve(reserveArgs(t, 1000, 1000))).allowed).toBe(false);
+    expect((await ledger.reserve(reserveArgs(t, 100, 1000))).allowed).toBe(true);
+    expect(await heldRows(t)).toBe(2);
+    await chargeExpiredHolds(handle.db, 100, 0, t);
+    expect(await heldRows(t)).toBe(1);
+    expect(await ledger.spent(t, P)).toBe(900);
+    expect((await ledger.reserve(reserveArgs(t, 100, 1000))).allowed).toBe(false); // 900 spent + 100 held
   });
 
   it('refreshing the epoch is a plain select: no statement that writes', async () => {

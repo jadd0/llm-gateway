@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { SseParser, type SseEvent } from './sse.ts';
-import { fixture } from './test-support.ts';
+import { fixture } from '../../test/providers-support.ts';
 
 function parseAll(bytes: Buffer, size: number): SseEvent[] {
   const p = new SseParser();

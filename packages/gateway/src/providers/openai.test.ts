@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { createOpenAiAdapter } from './openai.ts';
-import { chatBody, fixture, input } from './test-support.ts';
+import { chatBody, fixture, input } from '../../test/providers-support.ts';
 
 const adapter = createOpenAiAdapter();
 

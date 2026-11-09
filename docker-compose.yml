@@ -1,11 +1,14 @@
 name: llm-gateway
 # Stateful dependencies only. The gateway, mock provider and k6 run natively
 # so the Docker-on-macOS network hop (Colima here) doesn't pollute latency numbers (ADR 0002).
+# Redis keeps an append-only file (fsync every second): the request-log stream carries settled spend, which
+# must survive a Redis restart. At most about a second of entries can be lost, and the log worker's hold
+# sweeper charges the estimate of any settle that never arrived.
 services:
   redis:
     image: redis:7.4-alpine
     ports: ["127.0.0.1:6379:6379"]
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    command: ["redis-server", "--save", "", "--appendonly", "yes", "--appendfsync", "everysec"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s

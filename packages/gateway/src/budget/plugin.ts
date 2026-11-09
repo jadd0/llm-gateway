@@ -5,6 +5,7 @@ import { chatRequest } from '../request-body.ts';
 import { splitRequest } from '../usage/estimate.ts';
 import type { Usage } from '../usage/sse-usage.ts';
 import type { CacheHit } from '../cache/plugin.ts';
+import { assertNotCluster } from './redis-ledger.ts';
 import { createBudget, type Budget, type BudgetOptions, type Reservation } from './budget.ts';
 
 /** How a request ended, as the budget needs to know. */
@@ -70,6 +71,7 @@ export function costOfUsage(price: Price, usage: Usage): { prompt: number; compl
 const refundTokens = (request: FastifyRequest) => void request.rateLimit?.settle(0);
 
 const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) => {
+  await assertNotCluster(opts.budget.redis); // the settle script spans the balance and the spend stream
   const budget: Budget = await createBudget({ ...opts.budget, log: app.log });
   app.decorateRequest('budget', null);
   app.addHook('onClose', () => budget.close());
@@ -78,6 +80,8 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
     const price = priceFor(hit.model);
     const u = hit.usage === null ? undefined : hit.usage;
     const cost = price !== undefined && u !== undefined ? costOfUsage(price, u) : undefined;
+    // The token counts of the log row are the cache plugin's, noted from the stored usage; only the saving needs a price.
+    hit.request?.reqlog.note({ savedMicros: cost?.cost ?? 0 });
     await budget.recordHit({
       tenantId: hit.tenantId,
       model: hit.model,
@@ -128,7 +132,7 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
     const holdOnModelMax = models.some(uncapped);
     const cap = request.tenant.monthlyBudgetMicros ?? opts.defaultCapMicros;
     const result = await budget.reserve({
-      tenantId: request.tenant.tenantId, model, estimate, cap, promptTokens: prompt, completionTokens: output,
+      id: request.id, tenantId: request.tenant.tenantId, model, estimate, cap, promptTokens: prompt, completionTokens: output,
     });
 
     if (result.status === 'unavailable') {
@@ -139,6 +143,9 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
     reply.header('x-budget-remaining-usd', formatUsd(result.remaining));
     if (result.status === 'denied') {
       refundTokens(request);
+      // The cache looked first and found nothing to serve, and the answer is a refusal: the log row has no cache outcome
+      // (the response header still says what the lookup found).
+      request.reqlog.note({ cache: null });
       return reply
         .code(402)
         .send(
@@ -161,17 +168,22 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
         if (settled) return;
         settled = true;
         if (outcome.kind === 'refund') return budget.settle(held, { kind: 'refund' });
+        // The log row records what was charged; `charged` below is the one place that knows it.
+        const charged = (cost: number, p: number, c: number) => request.reqlog.note({ costMicros: cost, promptTokens: p, completionTokens: c });
         if (outcome.kind === 'keep') {
           const served = outcome.model === undefined ? undefined : priceFor(outcome.model);
+          const kept = served === undefined ? held.amount : Math.min(held.amount, costMicros(served, held.promptTokens, held.completionTokens));
+          charged(kept, held.promptTokens, held.completionTokens);
           return budget.settle(held, {
             kind: 'charge',
-            costMicros: served === undefined ? held.amount : Math.min(held.amount, costMicros(served, held.promptTokens, held.completionTokens)),
+            costMicros: kept,
             promptTokens: held.promptTokens,
             completionTokens: held.completionTokens, estimated: true,
             ...(outcome.model !== undefined ? { model: outcome.model } : {}),
           });
         }
         const u = costOfUsage((outcome.model === undefined ? undefined : priceFor(outcome.model)) ?? price, outcome.usage);
+        charged(u.cost, u.prompt, u.completion);
         return budget.settle(held, {
           kind: 'charge', costMicros: u.cost, promptTokens: u.prompt, completionTokens: u.completion, estimated: false,
           ...(outcome.model !== undefined ? { model: outcome.model } : {}),

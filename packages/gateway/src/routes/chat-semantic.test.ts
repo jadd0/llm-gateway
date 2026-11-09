@@ -9,6 +9,7 @@ import { buildApp } from '../app.ts';
 import { KEY_VERSION } from '../cache/key.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { semanticCache, spendLedger, tenants } from '../db/schema.ts';
+import { standInWorker } from '../../test/drain.ts';
 import { angle, stubEmbedder } from '../semantic/test-support.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
 
@@ -25,6 +26,7 @@ let app: FastifyInstance;
 let handle: Db;
 let redis: Redis;
 let gw = '';
+let stopWorker: () => void = () => {};
 let calls = 0;
 const table: Record<string, number[]> = {};
 const stub = stubEmbedder(table);
@@ -74,12 +76,14 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => upstream.listen(0, '127.0.0.1', resolve));
   handle = createDb({ databaseUrl: base.databaseUrl, poolSize: 8 });
   redis = new Redis(base.redisUrl!);
+  stopWorker = standInWorker(handle.db, redis, base.redisKeyPrefix); // the log worker's part: queued ledger rows reach Postgres
   app = buildApp(appConfig(), { rateLimitClock: () => T0, cacheClock: () => T0, semanticEmbedder: stub.embedder });
   await app.listen({ port: 0, host: '127.0.0.1' });
   gw = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 });
 
 afterAll(async () => {
+  stopWorker();
   await app.close();
   upstream.closeAllConnections();
   await new Promise((resolve) => upstream.close(resolve));

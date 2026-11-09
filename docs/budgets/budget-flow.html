@@ -5161,11 +5161,11 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <!-- Connection paths (before components for correct z-order) -->
         <path data-edge-from="plugin" data-edge-to="budget" data-edge-label="dearest model, long-context tier, model max output if uncapped" data-edge-key="0" data-edge-id="reserve" data-composition-points="190,155;290,155" d="M 190 155 L 290 155" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="budget" data-edge-to="redis" data-edge-label="Lua reserve" data-edge-key="1" data-edge-id="to-redis" data-composition-points="440,162;540,162" d="M 440 162 L 540 162" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="budget" data-edge-to="pgl" data-edge-label="hold first" data-edge-key="2" data-edge-id="to-pg" data-composition-points="372,194;372,218;516,218;516,362;540,362" d="M 372 194 L 372 210 Q 372 218 380 218 L 508 218 Q 516 218 516 226 L 516 354 Q 516 362 524 362 L 540 362" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="budget" data-edge-to="pgl" data-edge-label="hold first, kept until settled (a refused request's row is dropped or marked refused)" data-edge-key="2" data-edge-id="to-pg" data-composition-points="372,194;372,218;516,218;516,362;540,362" d="M 372 194 L 372 210 Q 372 218 380 218 L 508 218 Q 516 218 516 226 L 516 354 Q 516 362 524 362 L 540 362" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="plugin" data-edge-to="route" data-edge-label="admitted" data-edge-key="3" data-edge-id="call" data-composition-points="115,194;115,330" d="M 115 194 L 115 330" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="route" data-edge-to="provider" data-edge-label="call" data-edge-key="4" data-edge-id="upstream" data-composition-points="115,394;115,500" d="M 115 394 L 115 500" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="route" data-edge-to="budget" data-edge-label="settle at serving model" data-edge-key="5" data-edge-id="settle" data-composition-points="190,362;240,362;240,169;290,169" d="M 190 362 L 232 362 Q 240 362 240 354 L 240 177 Q 240 169 248 169 L 290 169" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="budget" data-edge-to="record" data-edge-label="settle tx" data-edge-key="6" data-edge-id="write" data-composition-points="358,194;358,500" d="M 358 194 L 358 500" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="budget" data-edge-to="record" data-edge-label="queued; hold kept until applied, replacing any estimate charged first" data-edge-key="6" data-edge-id="write" data-composition-points="358,194;358,500" d="M 358 194 L 358 500" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
 
         <!-- Components -->
         <g id="node-plugin" data-node-id="plugin" data-node-label="Budget hook" tabindex="0" role="button" aria-label="Focus Budget hook, budget/plugin.ts, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="budget/plugin.ts" data-node-tag="402 / 400 / 503" data-node-context="Architecture component">
@@ -5191,8 +5191,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="context" x="365" y="176" class="t-muted" font-size="9" text-anchor="middle">budget.ts, epoch</text>
         </g>
 
-        <g id="node-redis" data-node-id="redis" data-node-label="Redis ledger" tabindex="0" role="button" aria-label="Focus Redis ledger, budget.lua, live balance, Architecture component" aria-pressed="false" data-node-kind="database" data-node-sublabel="budget.lua, live balance" data-node-context="Architecture component">
-          <title>Redis ledger · budget.lua, live balance · Architecture component</title>
+        <g id="node-redis" data-node-id="redis" data-node-label="Redis ledger" tabindex="0" role="button" aria-label="Focus Redis ledger, budget.lua, balance + XADD, Architecture component" aria-pressed="false" data-node-kind="database" data-node-sublabel="budget.lua, balance + XADD" data-node-context="Architecture component">
+          <title>Redis ledger · budget.lua, balance + XADD · Architecture component</title>
           <rect x="540" y="130" width="150" height="64" rx="6" class="c-mask"/>
           <rect x="540" y="130" width="150" height="64" rx="6" class="c-database" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="database" class="semantic-sigil s-database" transform="translate(546 136) scale(0.6875)">
@@ -5200,7 +5200,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="615" y="160" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Redis ledger</text>
-        <text data-detail="context" x="615" y="176" class="t-muted" font-size="9" text-anchor="middle">budget.lua, live balance</text>
+        <text data-detail="context" x="615" y="176" class="t-muted" font-size="9" text-anchor="middle">budget.lua, balance + XADD</text>
         </g>
 
         <g id="node-pgl" data-node-id="pgl" data-node-label="Postgres" tabindex="0" role="button" aria-label="Focus Postgres, holds, spend, epoch, Architecture component" aria-pressed="false" data-node-kind="database" data-node-sublabel="holds, spend, epoch" data-node-context="Architecture component">
@@ -5247,7 +5247,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <path d="M3 4v8c0 1.1 2.2 2 5 2s5-.9 5-2V4M3 8c0 1.1 2.2 2 5 2s5-.9 5-2"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="365" y="530" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Spend record</text>
-        <text data-detail="context" x="365" y="546" class="t-muted" font-size="9" text-anchor="middle">ledger + hit rows (exact or semantic)</text>
+        <text data-detail="context" x="365" y="546" class="t-muted" font-size="9" text-anchor="middle">worker: ledger + hit rows (exact, semantic)</text>
         </g>
 
         <!-- Connection labels -->
@@ -5259,9 +5259,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="458.6" y="142" width="62.8" height="14" rx="3" class="c-mask"/>
           <text x="490" y="152" class="t-muted" font-size="8" text-anchor="middle">Lua reserve</text>
         </g>
-        <g data-detail="context" data-edge-from="budget" data-edge-to="pgl" data-edge-label="hold first" data-edge-key="2" data-edge-id="to-pg">
+        <g data-detail="context" data-edge-from="budget" data-edge-to="pgl" data-edge-label="hold first, kept until settled (a refused request's row is dropped or marked refused)" data-edge-key="2" data-edge-id="to-pg">
           <rect x="415" y="198" width="58" height="14" rx="3" class="c-mask"/>
-          <text x="444" y="208" class="t-backend" font-size="8" text-anchor="middle">hold first</text>
+          <text x="444" y="208" class="t-backend" font-size="8" text-anchor="middle">hold first, kept until settled (a refused request's row is dropped or marked refused)</text>
         </g>
         <g data-detail="context" data-edge-from="plugin" data-edge-to="route" data-edge-label="admitted" data-edge-key="3" data-edge-id="call">
           <rect x="90.8" y="232" width="48.4" height="14" rx="3" class="c-mask"/>
@@ -5275,9 +5275,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="179.8" y="245.5" width="120.39999999999999" height="14" rx="3" class="c-mask"/>
           <text x="240" y="255.5" class="t-backend" font-size="8" text-anchor="middle">settle at serving model</text>
         </g>
-        <g data-detail="context" data-edge-from="budget" data-edge-to="record" data-edge-label="settle tx" data-edge-key="6" data-edge-id="write">
+        <g data-detail="context" data-edge-from="budget" data-edge-to="record" data-edge-label="queued; hold kept until applied, replacing any estimate charged first" data-edge-key="6" data-edge-id="write">
           <rect x="331.4" y="232" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
-          <text x="358" y="242" class="t-backend" font-size="8" text-anchor="middle">settle tx</text>
+          <text x="358" y="242" class="t-backend" font-size="8" text-anchor="middle">queued; hold kept until applied, replacing any estimate charged first</text>
         </g>
 
         <!-- Boundary labels (foreground masks keep routes out of titles) -->

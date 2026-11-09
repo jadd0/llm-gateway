@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import Fastify, { LogController, type FastifyError, type FastifyInstance } from 'fastify';
 import { auth } from './auth/plugin.ts';
 import { keyStoreFromConfig } from './auth/key-store.ts';
@@ -22,6 +23,9 @@ import { createSemanticPools } from './semantic/pools.ts';
 import { checkPgvector, createSemanticStore, sweepExpired, type SemanticStoreOptions } from './semantic/store.ts';
 import { createBreaker, probeLockTtlMs, type Breaker } from './resilience/breaker.ts';
 import { chainFor } from './resilience/fallback.ts';
+import { requestLogCollector } from './requestlog/collector.ts';
+import { createInlineSink } from './requestlog/inline-sink.ts';
+import { createStreamSink, nullSink } from './requestlog/sink.ts';
 import { createUpstream } from './upstream.ts';
 
 export function buildApp(
@@ -55,6 +59,8 @@ export function buildApp(
     // Nothing logs per request on the hot path.
     logController: new LogController({ disableRequestLogging: true }),
     bodyLimit: 10 * 1024 * 1024,
+    // A uuid per request: the primary key of its log row and the id of its budget hold.
+    genReqId: () => randomUUID(),
     // X-Forwarded-For is believed only when the socket peer is one of these; otherwise request.ip is the peer.
     trustProxy: config.trustedProxies.length > 0 ? config.trustedProxies : false,
   });
@@ -88,7 +94,19 @@ export function buildApp(
     app.log,
     ipLimiter ? (ip) => ipLimiter.take(ip) : undefined,
   );
+  // Request-log entries go to the Redis stream, or (the benchmark's "before") straight to Postgres.
+  const logSink =
+    config.logMode === 'inline'
+      ? createInlineSink(handle.db, app.log)
+      : redis !== null
+        ? createStreamSink({ redis, keyPrefix: config.redisKeyPrefix, bufferMax: config.logBufferMax, streamMax: config.logStreamMax, log: app.log })
+        : nullSink;
   app.addHook('onClose', async () => {
+    // Entries still being built, in flight or buffered are sent before Redis is let go.
+    await app.requestLogIdle().catch(() => {});
+    await logSink.close().catch((err: unknown) => {
+      app.log.error({ errClass: (err as Error)?.name, code: (err as { code?: string })?.code }, 'request log close failed');
+    });
     // Close everything even if one close fails.
     redis?.disconnect();
     const closed = await Promise.allSettled([upstream.close(), handle.close()]);
@@ -113,6 +131,8 @@ export function buildApp(
   app.setNotFoundHandler((_request, reply) =>
     reply.code(404).send(errorBody('unknown route', 'invalid_request_error')),
   );
+  // First, so that every request, a refused one included, is logged.
+  app.register(requestLogCollector, { sink: logSink, mode: config.logMode });
   app.register(auth, { keyStore, pepper: config.apiKeyPepper, ...(ipLimiter ? { ipLimiter } : {}) });
   if (config.rateLimitEnabled && redis !== null) {
     const limiter = createLimiter({
@@ -255,7 +275,6 @@ export function buildApp(
         redisTimeoutMs: config.budgetRedisTimeoutMs,
         epochRefreshMs: config.budgetEpochRefreshMs,
         outageFailures: config.budgetOutageFailures,
-        sweepIntervalS: config.budgetSweepIntervalS,
         ...(extra.budgetClock ? { clock: extra.budgetClock } : {}),
         ...(extra.budgetPgLedger ? { pgLedger: extra.budgetPgLedger } : {}),
       },

@@ -3,11 +3,13 @@ import { Redis } from 'ioredis';
 import { sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { createTenant } from '../cli/keys.ts';
+import { drainSpend } from '../../test/drain.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { cleanup, testConfig } from '../test-env.ts';
 import { createBudget, type Budget, type ReserveRequest, type Reservation, type ReserveOutcome } from './budget.ts';
 import { periodOf } from './period.ts';
-import { createPgLedger, type PgLedger } from './pg-ledger.ts';
+import { chargeExpiredHolds, createPgLedger, type PgLedger } from './pg-ledger.ts';
+import { applySettled } from './redis-ledger.ts';
 
 const base = testConfig();
 const prefix = base.redisKeyPrefix;
@@ -15,8 +17,8 @@ const P = periodOf(Date.now());
 let handle: Db;
 let redis: Redis;
 let pgl: PgLedger;
-type Faults = { down: boolean; failSettle: number; beforeReserve: (() => Promise<void>) | null; reserveRunsThenFails: boolean };
-const newFaults = (): Faults => ({ down: false, failSettle: 0, beforeReserve: null, reserveRunsThenFails: false });
+type Faults = { down: boolean; failSettle: number; failApply: number; beforeReserve: (() => Promise<void>) | null; reserveRunsThenFails: boolean };
+const newFaults = (): Faults => ({ down: false, failSettle: 0, failApply: 0, beforeReserve: null, reserveRunsThenFails: false });
 const faults = newFaults();
 const faultsA = newFaults(); // a second "network path" to Redis, so one instance can lose it while another keeps it
 const tenantIds: string[] = [];
@@ -30,11 +32,17 @@ const proxyFor = (f: Faults) =>
     get(_t, prop) {
       const v = Reflect.get(redis, prop, redis);
       const gone = () => Promise.reject(Object.assign(new Error('Connection is closed.'), { code: 'ECONNRESET' }));
-      if (typeof prop === 'string' && (prop.startsWith('bud') || prop === 'ping')) {
+      if (typeof prop === 'string' && (prop.startsWith('bud') || prop === 'ping' || prop === 'xadd')) {
         if (f.down) return gone;
         if (prop === 'budSettle' && f.failSettle > 0) {
           return () => {
             f.failSettle--;
+            return gone();
+          };
+        }
+        if (prop === 'budApply' && f.failApply > 0) {
+          return () => {
+            f.failApply--;
             return gone();
           };
         }
@@ -92,10 +100,12 @@ const allowed = (o: ReserveOutcome): Reservation => {
 };
 const charge = (costMicros: number, estimated = false) =>
   ({ kind: 'charge', costMicros, promptTokens: 10, completionTokens: 20, estimated }) as const;
+// The log worker's part: writes every queued settle to Postgres and catches the live balances up.
+const drain = () => drainSpend(handle.db, redis, prefix);
 const pgSpent = (t: string) => pgl.spent(t, P);
 const redisBal = async (t: string, epoch: number) => {
   const h = await redis.hgetall(`${prefix}bud:{${t}}:${P}:${epoch}`);
-  return { spent: Number(h.spent), reserved: Number(h.reserved), ver: Number(h.ver) };
+  return { spent: Number(h.spent), reserved: Number(h.reserved) };
 };
 const count = async (table: 'spend_ledger' | 'budget_reservations', t: string) =>
   Number((await handle.db.execute(sql.raw(`select count(*) as n from ${table} where tenant_id = '${t}'`))).rows[0]!.n);
@@ -122,6 +132,7 @@ async function outage() {
   const h4 = allowed(await b2.reserve(req(t, 500, 10_000))); // in flight at recovery
   expect(h4.path).toBe('postgres');
   faults.down = false;
+  await drain(); // the worker applies h1's queued settle
   return { t, b1, b2, h1, h2, h3, h4, e0 };
 }
 
@@ -147,6 +158,7 @@ describe('budget', { timeout: 120_000 }, () => {
     // Everything settles at the worst case. Settled spend is exactly the 7 holds and within the cap.
     const all = [...inFlight, ...floodHolds];
     await Promise.all(all.map((h, i) => budgets[i % 3]!.settle(h, charge(1000))));
+    await drain();
     expect(await pgSpent(t)).toBe(7000);
     expect(await pgSpent(t)).toBeLessThanOrEqual(7500);
     expect(await count('budget_reservations', t)).toBe(0);
@@ -179,6 +191,7 @@ describe('budget', { timeout: 120_000 }, () => {
     expect(h2.epoch).toBeLessThan(epoch); // h2 was held under the old epoch
     const before = await redisBal(t, epoch);
     await b2.settle(h2, charge(1200));
+    await drain();
     const after = await redisBal(t, epoch);
     expect(after.spent).toBe(before.spent + 1200);
     expect(after.reserved).toBe(before.reserved - 1500);
@@ -237,12 +250,14 @@ describe('budget', { timeout: 120_000 }, () => {
     const t = await newTenant();
     const b = await newBudget({ outageFailures: 3 });
     const e0 = b.epoch();
-    const h = allowed(await b.reserve(req(t, 1000, 10_000)));
-    faults.failSettle = 1000; // every settle fails, PING works
-    await b.settle(h, charge(600));
+    const holds = [];
+    for (let i = 0; i < 3; i++) holds.push(allowed(await b.reserve(req(t, 1000, 10_000))));
+    faults.failSettle = 1000; // every settle fails, and so does catching the balance up; PING works
+    faults.failApply = 1000;
+    for (const h of holds) await b.settle(h, charge(600)); // each is written straight to Postgres instead
     expect(b.mode()).toBe('postgres');
     expect(b.epoch()).toBe(e0 + 1);
-    expect(await pgSpent(t)).toBe(600);
+    expect(await pgSpent(t)).toBe(1800);
   });
 
   it('every settle lands in spend_ledger and tenant_spend exactly once', async () => {
@@ -259,6 +274,7 @@ describe('budget', { timeout: 120_000 }, () => {
       }),
     );
     const expected = costs.slice(1).reduce((a, b) => a + b, 0);
+    await drain();
     expect(await count('spend_ledger', t)).toBe(29);
     expect(await pgSpent(t)).toBe(expected);
     expect(await count('budget_reservations', t)).toBe(0);
@@ -272,6 +288,7 @@ describe('budget', { timeout: 120_000 }, () => {
     const budget = await newBudget();
     const h = allowed(await budget.reserve(req(t, 300, 1000)));
     await budget.settle(h, charge(300, true));
+    await drain();
     const rows = await handle.db.execute(sql`select cost_micros, estimated from spend_ledger where tenant_id = ${t}`);
     expect(rows.rows.map((r) => [Number(r.cost_micros), r.estimated])).toEqual([[300, true]]);
   });
@@ -288,6 +305,7 @@ describe('budget', { timeout: 120_000 }, () => {
     };
     const budget = await newBudget({ pgLedger });
     const h = allowed(await budget.reserve(req(t, 100, 1000)));
+    faults.failSettle = 1; // the queue script fails once, so the ledger is written here
     await budget.settle(h, charge(80));
     expect(failures).toBe(-1);
     expect(await count('spend_ledger', t)).toBe(1);
@@ -308,6 +326,7 @@ describe('budget', { timeout: 120_000 }, () => {
     const log = { warn() {}, info() {}, error: (o: object, m: string) => void errors.push([o, m]) };
     const budget = await newBudget({ pgLedger, log });
     const h = allowed(await budget.reserve(req(t, 100, 1000)));
+    faults.failSettle = 1; // the queue script fails once, so the ledger is written here
     await budget.settle(h, charge(80));
     expect(attempts).toBe(4); // the first try and 3 retries
     expect(errors).toEqual([[{ errClass: 'Error', code: 'ECONNRESET' }, 'budget settle could not be written to postgres']]);
@@ -315,6 +334,46 @@ describe('budget', { timeout: 120_000 }, () => {
     // Nothing was written, so nothing was released: the money stays held in both stores.
     expect(await count('budget_reservations', t)).toBe(1);
     expect((await redisBal(t, h.epoch)).reserved).toBe(100);
+  });
+
+  describe('a refusal whose hold row cannot be dropped', () => {
+    const lapse = () => new Promise((r) => setTimeout(r, 1200)); // past a 1 s reservation TTL
+    const refusedRows = async (t: string) =>
+      Number((await handle.db.execute(sql`select count(*) as n from budget_reservations where tenant_id = ${t} and refused`)).rows[0]!.n);
+    const waitFor = async (check: () => Promise<boolean>) => {
+      const until = Date.now() + 5000;
+      while (!(await check()) && Date.now() < until) await new Promise((r) => setTimeout(r, 5));
+    };
+
+    it('the drop is retried in the background and the row goes', async () => {
+      const t = await newTenant();
+      let failures = 2;
+      const release: PgLedger['release'] = (id) => (failures-- > 0 ? Promise.reject(new Error('connection reset')) : pgl.release(id));
+      const b = await newBudget({ pgLedger: { ...pgl, release }, retryDelaysMs: [5, 5, 5] });
+      allowed(await b.reserve(req(t, 1000, 1000)));
+      const refusedId = randomUUID();
+      expect((await b.reserve({ ...req(t, 500, 1000), id: refusedId })).status).toBe('denied');
+      await waitFor(async () => (await count('budget_reservations', t)) === 1);
+      expect(failures).toBeLessThan(0);
+      expect(await count('budget_reservations', t)).toBe(1); // only the admitted request's hold
+    });
+
+    it('a row that cannot be deleted is marked refused: it counts against no cap and the sweeper never bills it', async () => {
+      const t = await newTenant();
+      const b = await newBudget({ pgLedger: { ...pgl, release: () => Promise.reject(new Error('connection reset')) }, retryDelaysMs: [1, 1, 1], reservationTtlS: 1 });
+      const live = allowed(await b.reserve(req(t, 600, 1000)));
+      const refusedId = randomUUID();
+      expect((await b.reserve({ ...req(t, 500, 1000), id: refusedId })).status).toBe('denied');
+      await waitFor(async () => (await refusedRows(t)) === 1);
+      expect(await refusedRows(t)).toBe(1);
+      expect((await pgl.snapshot(t, P)).holds.map((h) => h.id)).toEqual([live.id]); // the refused row is not a hold
+      await lapse();
+      const swept = (await chargeExpiredHolds(handle.db, 1000, 0, t)).filter((c) => c.tenantId === t);
+      expect(swept.map((c) => c.id)).toEqual([live.id]); // the live one lapsed too; the refused one was not charged
+      expect(await count('spend_ledger', t)).toBe(1);
+      expect(await count('budget_reservations', t)).toBe(0);
+      expect(await pgSpent(t)).toBe(600);
+    });
   });
 
   it('a failed Postgres hold insert refuses the request before Redis is asked, so nothing is held anywhere', async () => {
@@ -423,11 +482,12 @@ describe('budget', { timeout: 120_000 }, () => {
     };
     const budget = await newBudget({ pgLedger });
     const h = allowed(await budget.reserve(req(t, 1000, 10_000)));
+    faults.failSettle = 1; // the queue script fails once, so the ledger is written here
     await budget.settle(h, charge(700));
     expect(calls).toBe(2);
     expect(await count('spend_ledger', t)).toBe(1);
     expect(await pgSpent(t)).toBe(700);
-    expect(await redisBal(t, budget.epoch())).toMatchObject({ spent: 700, reserved: 0, ver: 1 });
+    expect(await redisBal(t, budget.epoch())).toMatchObject({ spent: 700, reserved: 0 });
   });
 
   it('a Redis reserve that times out but still runs leaves no phantom hold once the request settles', async () => {
@@ -435,6 +495,7 @@ describe('budget', { timeout: 120_000 }, () => {
     const budget = await newBudget({ outageFailures: 10 }); // one timeout is not an outage
     const e = budget.epoch();
     await budget.settle(allowed(await budget.reserve(req(t, 10, 10_000))), { kind: 'refund' }); // the balance exists
+    await drain();
     faults.reserveRunsThenFails = true;
     const h = allowed(await budget.reserve(req(t, 1000, 10_000)));
     faults.reserveRunsThenFails = false;
@@ -443,39 +504,138 @@ describe('budget', { timeout: 120_000 }, () => {
     expect((await redisBal(t, e)).reserved).toBe(1000); // the script did run: a hold nothing else knows of
     await budget.settle(h, charge(400));
     expect(await redisBal(t, e)).toMatchObject({ spent: 400, reserved: 0 });
+    await drain();
     expect(await pgSpent(t)).toBe(400);
-  });
-
-  it('lapsed holds are deleted from Postgres while Redis is healthy, a bounded number at a time', async () => {
-    const t = await newTenant();
-    const budget = await newBudget({ sweepLimit: 2 });
-    const live = allowed(await budget.reserve(req(t, 100, 100_000)));
-    for (let i = 0; i < 5; i++) await pgl.hold({ id: randomUUID(), tenantId: t, period: P, estimate: 10, ttlMs: -60_000 });
-    expect(await count('budget_reservations', t)).toBe(6);
-    expect(budget.mode()).toBe('redis');
-    // Other test files' lapsed rows count too, so only this tenant's are checked.
-    let removed = 0;
-    while ((await count('budget_reservations', t)) > 1) removed += await budget.sweepExpired();
-    expect(removed).toBeGreaterThanOrEqual(5);
-    expect(await count('budget_reservations', t)).toBe(1);
-    expect(await budget.sweepExpired()).toBeLessThanOrEqual(2); // never more than the limit
-    await budget.settle(live, charge(50));
-    expect(await count('budget_reservations', t)).toBe(0);
-  });
-
-  it('the sweep runs on its timer', async () => {
-    const t = await newTenant();
-    await newBudget({ sweepIntervalS: 0.02 });
-    await pgl.hold({ id: randomUUID(), tenantId: t, period: P, estimate: 10, ttlMs: -60_000 });
-    const end = Date.now() + 20_000;
-    while ((await count('budget_reservations', t)) > 0 && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
-    expect(await count('budget_reservations', t)).toBe(0);
+    expect(await redisBal(t, e)).toMatchObject({ spent: 400, reserved: 0 }); // the worker's catch-up changed nothing
   });
 
   const flush = async (t: string) => {
     const keys = await redis.keys(`${prefix}bud:{${t}}:*`);
     if (keys.length) await redis.del(...keys);
   };
+
+  it('a rebuild with settles still queued counts their estimate; once the worker has applied them the balance is exact', async () => {
+    const t = await newTenant();
+    const b = await newBudget();
+    const e0 = b.epoch();
+    const h = allowed(await b.reserve(req(t, 1000, 1500)));
+    await b.settle(h, charge(700)); // queued; Postgres has neither the charge nor the release yet
+    expect(await count('spend_ledger', t)).toBe(0);
+    expect(await count('budget_reservations', t)).toBe(1);
+    await flush(t); // Redis restarted empty
+    await b.reserve(req(t, 1, 1500)).then(async (r) => void (r.status === 'allowed' && (await b.settle(r.reservation, { kind: 'refund' })))); // notices the loss, moves the epoch
+    const until = Date.now() + 10_000;
+    while ((await pgl.readEpoch()) === e0 && Date.now() < until) await new Promise((r) => setTimeout(r, 5));
+    await b.refreshEpoch();
+    expect(b.epoch()).toBeGreaterThan(e0);
+    // The balance is rebuilt from Postgres, which still holds the 1000 estimate and not the 700 charge:
+    // 1000 + 600 does not fit under 1500 although 700 + 600 would. The estimate is the safe side.
+    expect((await b.reserve(req(t, 600, 1500))).status).toBe('denied');
+    expect(await redisBal(t, b.epoch())).toMatchObject({ spent: 0, reserved: 1001 }); // plus the 1 held by the request that noticed
+    // The worker applies the queued settle (and the refund): the rebuilt balance releases the estimate and takes the charge once.
+    await drain();
+    expect(await pgSpent(t)).toBe(700);
+    expect(await liveHoldSum(t)).toBe(0);
+    expect(await redisBal(t, b.epoch())).toMatchObject({ spent: 700, reserved: 0 });
+    // Applying again changes nothing, in Postgres or Redis.
+    await drain();
+    expect(await pgSpent(t)).toBe(700);
+    expect(await redisBal(t, b.epoch())).toMatchObject({ spent: 700, reserved: 0 });
+    expect((await b.reserve(req(t, 800, 1500))).status).toBe('allowed');
+    expect((await b.reserve(req(t, 1, 1500))).status).toBe('denied');
+  });
+
+  // Notices the loss of a flushed balance (moving the epoch) and waits until this instance has adopted the new one.
+  const rebuildAfterFlush = async (t: string, b: Budget, cap: number) => {
+    const e0 = b.epoch();
+    await flush(t);
+    const r = await b.reserve(req(t, 1, cap));
+    if (r.status === 'allowed') await b.settle(r.reservation, { kind: 'refund' });
+    const until = Date.now() + 10_000;
+    while ((await pgl.readEpoch()) === e0 && Date.now() < until) await new Promise((x) => setTimeout(x, 5));
+    await b.refreshEpoch();
+    expect(b.epoch()).toBeGreaterThan(e0);
+  };
+  const lapse = () => new Promise((r) => setTimeout(r, 1200)); // past a 1 s reservation TTL
+
+  it('the worker down for longer than the TTL with settles queued: a rebuild still counts them, the cap holds, and after the drain the balance is exact', async () => {
+    const t = await newTenant();
+    const b = await newBudget({ reservationTtlS: 1 });
+    const h = allowed(await b.reserve(req(t, 1000, 1500)));
+    await b.settle(h, charge(700)); // queued; the worker is "down"
+    await lapse(); // the hold row is past its expiry and its settle is still queued
+    expect(await count('budget_reservations', t)).toBe(1);
+    await rebuildAfterFlush(t, b, 1500);
+    // The rebuilt balance has the lapsed hold's 1000 (the estimate), not 0: 1000 + 600 does not fit under 1500.
+    expect((await b.reserve(req(t, 600, 1500))).status).toBe('denied');
+    expect(await redisBal(t, b.epoch())).toMatchObject({ spent: 0, reserved: 1001 }); // plus the 1 held by the request that noticed the loss
+    await drain();
+    expect(await pgSpent(t)).toBe(700);
+    expect(await count('budget_reservations', t)).toBe(0);
+    expect(await redisBal(t, b.epoch())).toMatchObject({ spent: 700, reserved: 0 });
+    expect((await b.reserve(req(t, 800, 1500))).status).toBe('allowed');
+    expect((await b.reserve(req(t, 1, 1500))).status).toBe('denied');
+  });
+
+  it('a hold swept at its estimate, then a rebuild, then the worker catching Redis up: the estimate is counted once', async () => {
+    const t = await newTenant();
+    const b = await newBudget({ reservationTtlS: 1 });
+    allowed(await b.reserve(req(t, 1000, 10_000))); // the gateway dies: never settled
+    await lapse();
+    const charged = (await chargeExpiredHolds(handle.db, 1000, 0, t)).filter((c) => c.tenantId === t);
+    expect(charged).toHaveLength(1);
+    expect(await pgSpent(t)).toBe(1000);
+    await rebuildAfterFlush(t, b, 10_000);
+    await drain();
+    const r = allowed(await b.reserve(req(t, 1, 10_000))); // the balance at the new epoch is built from Postgres here
+    await b.settle(r, { kind: 'refund' });
+    await drain();
+    // Spent already has the sweeper's estimate and no hold is left for it.
+    expect(await redisBal(t, b.epoch())).toMatchObject({ spent: 1000, reserved: 0 });
+    await applySettled(redis, prefix, b.epoch(), charged, 5000); // the sweeper's catch-up arrives late
+    expect(await redisBal(t, b.epoch())).toMatchObject({ spent: 1000, reserved: 0 });
+  });
+
+  it('a settle whose entry was dead-lettered: Redis kept the real cost, and the sweeper charging the estimate adds nothing to it', async () => {
+    const t = await newTenant();
+    const b = await newBudget({ reservationTtlS: 1 });
+    const e = b.epoch();
+    const h = allowed(await b.reserve(req(t, 1000, 10_000)));
+    await b.settle(h, charge(400));
+    expect(await redisBal(t, e)).toMatchObject({ spent: 400, reserved: 0 });
+    const spendKey = `${prefix}requestlog:spend`;
+    const queued = (await redis.xrange(spendKey, '-', '+')).filter(([, f]) => f.includes(h.id));
+    expect(queued).toHaveLength(1);
+    await redis.xdel(spendKey, queued[0]![0]); // the entry is dead-lettered: Postgres never gets the charge
+    await lapse();
+    const charged = (await chargeExpiredHolds(handle.db, 1000, 0, t)).filter((c) => c.tenantId === t);
+    expect(charged).toEqual([{ tenantId: t, period: P, id: h.id, costMicros: 1000, estimated: true }]);
+    await applySettled(redis, prefix, e, charged, 5000);
+    expect(await redisBal(t, e)).toMatchObject({ spent: 400, reserved: 0 }); // not 1400
+  });
+
+  it('a hold a rebuild imported at a newer epoch is released there when the request is then refused on Postgres', async () => {
+    const t = await newTenant();
+    const b = await newBudget({ outageFailures: 10 });
+    const other = await newBudget({ redis }); // a second instance with its own, unfaulted, path to Redis
+    const e = b.epoch();
+    await b.settle(allowed(await b.reserve(req(t, 10, 1500))), { kind: 'refund' }); // the balance exists
+    await drain();
+    await pgl.hold({ id: randomUUID(), tenantId: t, period: P, estimate: 600, ttlMs: 300_000 }); // makes Postgres refuse 1000
+    faults.beforeReserve = async () => {
+      // Between this request's Postgres hold and its Redis reserve another instance moves the epoch and rebuilds
+      // the tenant's balance, importing this request's hold row.
+      faults.beforeReserve = null;
+      await pgl.bumpEpoch(e);
+      await other.refreshEpoch();
+      await other.reserve(req(t, 1, 1500));
+    };
+    faults.reserveRunsThenFails = true;
+    expect((await b.reserve(req(t, 1000, 1500))).status).toBe('denied');
+    faults.reserveRunsThenFails = false;
+    expect(await redisBal(t, e + 1)).toMatchObject({ spent: 0, reserved: 600 }); // only the other hold: no phantom for the refused request
+    expect(await count('budget_reservations', t)).toBe(1);
+  });
 
   it('a balance Redis lost moves the epoch once however many instances notice; a new tenant does not', async () => {
     const t = await newTenant();
@@ -503,6 +663,7 @@ describe('budget', { timeout: 120_000 }, () => {
     const b = await newBudget();
     const e0 = b.epoch();
     await b.settle(allowed(await b.reserve(req(t, 100, 2500))), { kind: 'refund' }); // B has used the balance
+    await drain();
     await flush(t); // Redis restarted empty
     expect(allowed(await b.reserve(req(t, 500, 2500))).path).toBe('redis'); // B rebuilds at e0 and admits 500
     // The rebuild moved the epoch on (in the background).
@@ -526,6 +687,7 @@ describe('budget', { timeout: 120_000 }, () => {
     const other = await newBudget();
     const e0 = b.epoch();
     await b.settle(allowed(await b.reserve(req(t, 100, 2500))), { kind: 'refund' });
+    await drain();
     // Another instance moves the epoch on and holds 2000 that B's balance never saw.
     expect((await pgl.bumpEpoch(e0)).bumped).toBe(true);
     await other.refreshEpoch();
@@ -543,6 +705,7 @@ describe('budget', { timeout: 120_000 }, () => {
     const budget = await newBudget({ outageFailures: 10 });
     const e = budget.epoch();
     await budget.settle(allowed(await budget.reserve(req(t, 10, 1500))), { kind: 'refund' }); // the balance exists
+    await drain();
     // A hold Redis doesn't know of makes Postgres refuse what Redis admitted.
     await pgl.hold({ id: randomUUID(), tenantId: t, period: P, estimate: 600, ttlMs: 300_000 });
     faults.reserveRunsThenFails = true;
@@ -609,6 +772,7 @@ describe('budget', { timeout: 120_000 }, () => {
     const pgLedger: PgLedger = { ...pgl, settle: (id, e) => (settleCalls++, pgl.settle(id, e)) };
     const budget = await newBudget({ pgLedger });
     const h = allowed(await budget.reserve(req(t, 1000, 10_000)));
+    faults.failSettle = 1; // the queue script fails once, so the ledger is written here
     // Only the select of the epoch fails, once: the one right after the settle transaction commits.
     const query = handle.pool.query.bind(handle.pool) as (...a: unknown[]) => Promise<unknown>;
     let failed = false;
@@ -630,7 +794,7 @@ describe('budget', { timeout: 120_000 }, () => {
     expect(await pgSpent(t)).toBe(700);
     expect(await count('spend_ledger', t)).toBe(1);
     // Redis was still corrected, at the instance's own epoch.
-    expect(await redisBal(t, budget.epoch())).toMatchObject({ spent: 700, reserved: 0, ver: 1 });
+    expect(await redisBal(t, budget.epoch())).toMatchObject({ spent: 700, reserved: 0 });
   });
 
   it('reserve reports unavailable when neither Redis nor Postgres can decide', async () => {
