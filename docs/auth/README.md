@@ -20,7 +20,10 @@ only; there is no user login and no admin UI.
 2. Hash the key with `HMAC-SHA256(API_KEY_PEPPER, key)` and look the hash up: Redis `GET apikey:<hash>`.
 3. A cached tenant passes. `"revoked"` and `"unknown"` markers mean 401. A miss reads Postgres
    (`key_hash = $1 and revoked_at is null`) and fills Redis with `SET ... EX ... NX`.
-4. Missing, malformed, unknown and revoked keys all get the same OpenAI-shaped 401
+4. Unknown hashes are negatively cached for `AUTH_NEGATIVE_TTL_S`. That protects Postgres from a
+   misconfigured client repeating one bad key; it does not protect against a flood of distinct random keys, and
+   per-IP limiting is out of scope here (residual R9).
+5. Missing, malformed, unknown and revoked keys all get the same OpenAI-shaped 401
    (`code: invalid_api_key`), so the response never says which keys exist.
 
 The key is shown once by `create-key`. Only the hash and the first 12 characters are stored.
@@ -33,6 +36,12 @@ tombstone (TTL longer than the cache TTL). Cache fills use `NX`, so a request th
 revoke cannot write the key back as valid after the tombstone exists. A test holds a lookup between its
 Postgres read and its fill, revokes, releases it, and checks the tombstone survived. If Redis is unreachable at
 revoke time the CLI exits non-zero and says a cached copy can live for up to `AUTH_CACHE_TTL_S`.
+
+## Removing a tenant
+
+There is no delete-tenant command. To remove a tenant, revoke its keys first (`revoke-key`, one per key).
+Deleting the rows with raw SQL alone leaves cached copies of its keys working for up to `AUTH_CACHE_TTL_S`
+(600 s by default), because nothing writes a tombstone.
 
 ## If Redis dies
 
