@@ -8,7 +8,7 @@
 # Needs: Postgres and Redis up (docker compose up -d --wait; the semantic scenarios also want ollama), `npm run db:migrate`
 # applied, k6 and nginx on PATH (brew install k6 nginx), power connected, nothing else of ours running, the laptop left alone.
 #
-# ESTIMATED RUN TIME (full suite, a machine that stays quiet): about 2 h 45 min plus whatever bench/quiet.sh waits. Sum of:
+# ESTIMATED RUN TIME (full suite, a machine that stays quiet): about 3 h plus whatever bench/quiet.sh waits. Sum of:
 #   overhead     20 min   3 repeats x (2 profiles x 3 runs x 60 s + startup)
 #   cluster      44 min   ramp 1 and 3 instances 3 repeats x 4.2 min, steady 6 x 1.5 min, spike 6 x 1.7 min
 #   correctness  20 min   10 runs x (rate-limit burst + budget flood + budget flood with a Redis restart)
@@ -17,7 +17,7 @@
 #   chaos        10 min   3 repeats x 3.5 min
 #   logging       9 min   run-logging.sh's own 3 repeats
 #   profile       4 min   one ramp on one instance under --cpu-prof
-#   dashboard     2 min   only where `npm run bench:dashboard` exists
+#   dashboard    15 min   `npm run bench:dashboard` up to 5M rows (not measured); needs a *bench* database or TEST_DATABASE
 # After the first full run, replace this estimate with the measured total (see elapsed.txt in the results folder).
 #
 # Scenarios (names for --only), numbered as in the plan:
@@ -30,7 +30,7 @@
 #   chaos        7  provider outage, fallback on and off, through nginx                        bench/run-chaos.sh
 #   logging      8  inline vs stream request log                                               bench/run-logging.sh
 #   profile      9  one ramp on one instance with node --cpu-prof, for naming the breaking point's cause
-#   dashboard       the PR 11 dashboard benchmark, where `npm run bench:dashboard` exists
+#   dashboard       the dashboard query benchmark (`npm run bench:dashboard`), where it exists
 # Mock latency: the ramp, steady and overhead-instant runs use an instant mock so the gateway, nginx and k6 are what is measured
 # (their ceilings are bound by this one machine, load generator included); spike and the other scenarios use the mock settings
 # of their own script (realistic latency).
@@ -268,15 +268,20 @@ if want logging; then
     || { tail -5 "$FINAL/logging.log" >&2; echo "run-all: logging failed" >&2; exit 1; }
 fi
 
-# ---- dashboard (PR 11), where it exists ---------------------------------------------------------------------------
+# ---- dashboard, where it exists -----------------------------------------------------------------------------------
+# The dashboard benchmark TRUNCATES request_log and the rollup tables, so it refuses any database that is not the
+# worktree's TEST_DATABASE or named *bench* (set BENCH_DATABASE_URL to one). A refusal is recorded, not hidden.
 if want dashboard; then
   if node -e 'process.exit(require("./package.json").scripts?.["bench:dashboard"] ? 0 : 1)' 2>/dev/null; then
     quiet_gate dashboard; log "dashboard"
     mkdir -p "$FINAL/dashboard"
-    OUT="$FINAL/dashboard" npm --prefix "$ROOT" run --silent bench:dashboard >"$FINAL/dashboard/output.txt" 2>&1 \
-      || { tail -5 "$FINAL/dashboard/output.txt" >&2; echo "run-all: dashboard failed" >&2; exit 1; }
+    if [ "$SMOKE" = 1 ]; then DASH_SIZES=1000,2000; else DASH_SIZES=10000,100000,1000000,5000000; fi
+    if ! npm --prefix "$ROOT" run --silent bench:dashboard -- --sizes "$DASH_SIZES" --out "$FINAL/dashboard" >"$FINAL/dashboard.log" 2>&1; then
+      echo "dashboard: bench:dashboard failed or refused the database; see dashboard.log ($(tail -1 "$FINAL/dashboard.log" | cut -c1-120))" >>"$FINAL/skipped.txt"
+      log "dashboard failed or refused; recorded in skipped.txt"
+    fi
   else
-    echo "dashboard: no bench:dashboard script on this base (the dashboard has not been merged); not run" >>"$FINAL/skipped.txt"
+    echo "dashboard: no bench:dashboard script on this base; not run" >>"$FINAL/skipped.txt"
     log "dashboard skipped: no bench:dashboard script on this base"
   fi
 fi
