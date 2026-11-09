@@ -5256,8 +5256,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <text data-detail="context" x="467.2" y="255" class="t-muted" font-size="8" text-anchor="middle">per tenant or shared</text>
         </g>
 
-        <g id="node-flight" data-node-id="flight" data-node-label="Single-flight" tabindex="0" role="button" aria-label="Focus Single-flight, lock + notify, Redis" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="lock + notify" data-node-context="Redis">
-          <title>Single-flight · lock + notify · Redis</title>
+        <g id="node-flight" data-node-id="flight" data-node-label="Single-flight" tabindex="0" role="button" aria-label="Focus Single-flight, renewed lock + poll, Redis" aria-pressed="false" data-node-kind="messagebus" data-node-sublabel="renewed lock + poll" data-node-context="Redis">
+          <title>Single-flight · renewed lock + poll · Redis</title>
           <rect x="541.2" y="217" width="132" height="52" rx="6" class="c-mask"/>
           <rect x="541.2" y="217" width="132" height="52" rx="6" class="c-messagebus" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="messagebus" class="semantic-sigil s-messagebus" transform="translate(547.2 223) scale(0.6875)">
@@ -5267,7 +5267,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <circle cx="7" cy="11.5" r="1" class="sigil-fill"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="607.2" y="238" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Single-flight</text>
-          <text data-detail="context" x="607.2" y="255" class="t-muted" font-size="8" text-anchor="middle">lock + notify</text>
+          <text data-detail="context" x="607.2" y="255" class="t-muted" font-size="8" text-anchor="middle">renewed lock + poll</text>
         </g>
 
         <g id="node-route" data-node-id="route" data-node-label="Budget + attempts" tabindex="0" role="button" aria-label="Focus Budget + attempts, retry, breaker, fallback, Route and provider" aria-pressed="false" data-node-kind="cloud" data-node-sublabel="retry, breaker, fallback" data-node-context="Route and provider">
@@ -5560,7 +5560,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <h3>Never stored</h3>
         </div>
         <ul>
-          <li>&bull; Errors, truncated streams, tool calls</li>
+          <li>&bull; Errors, tool calls, refusals, fallback answers</li>
           <li>&bull; no-store skips both read and write</li>
         </ul>
       </div>
