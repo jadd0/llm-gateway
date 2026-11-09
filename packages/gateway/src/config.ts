@@ -7,6 +7,7 @@ const int = (def: number, min = 0) =>
   z.preprocess(blankAsUnset, z.coerce.number().int().min(min).default(def));
 
 const schema = z.object({
+  GATEWAY_HOST: z.preprocess(blankAsUnset, z.string().default('127.0.0.1')),
   GATEWAY_PORT: int(8080, 0),
   OPENAI_BASE_URL: z.preprocess(blankAsUnset, z.url().default('http://127.0.0.1:9000')),
   OPENAI_API_KEY: z.preprocess(blankAsUnset, z.string().optional()),
@@ -19,6 +20,7 @@ const schema = z.object({
 });
 
 export interface Config {
+  host: string;
   port: number;
   upstreamBaseUrl: string;
   upstreamApiKey: string | undefined;
@@ -30,6 +32,7 @@ export interface Config {
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   const e = schema.parse(env);
   return {
+    host: e.GATEWAY_HOST,
     port: e.GATEWAY_PORT,
     upstreamBaseUrl: e.OPENAI_BASE_URL,
     upstreamApiKey: e.OPENAI_API_KEY,

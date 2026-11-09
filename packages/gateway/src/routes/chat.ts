@@ -1,4 +1,4 @@
-import type { FastifyError, FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { FastifyPluginAsync, FastifyReply } from 'fastify';
 import { pipeline } from 'node:stream/promises';
 import { z } from 'zod';
 import type { Upstream } from '../upstream.ts';
@@ -20,6 +20,17 @@ const errorBody = (message: string, type: string) => ({ error: { message, type }
 
 const ms = (n: number) => n.toFixed(3);
 
+// Upstream headers a client needs to react to (back-off, correlation, rate-limit state).
+const PASSTHROUGH = /^(retry-after|x-request-id|openai-processing-ms|x-ratelimit-.+)$/;
+
+function passthroughHeaders(upstream: Record<string, string | string[] | undefined>) {
+  const out: Record<string, string | string[]> = {};
+  for (const [name, value] of Object.entries(upstream)) {
+    if (value !== undefined && PASSTHROUGH.test(name)) out[name] = value;
+  }
+  return out;
+}
+
 function upstreamFailure(reply: FastifyReply, err: unknown): FastifyReply {
   const code = (err as { code?: string }).code ?? '';
   // Log the error class and code only; messages can carry request data.
@@ -32,18 +43,6 @@ function upstreamFailure(reply: FastifyReply, err: unknown): FastifyReply {
 
 export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app, opts) => {
   const { upstream } = opts;
-
-  // Fastify's own request errors (unsupported content-type, oversized body) use the OpenAI shape too.
-  app.setErrorHandler((err: FastifyError, _request, reply) => {
-    const status = typeof err.statusCode === 'number' ? err.statusCode : 500;
-    reply.log.warn({ errClass: err.name, code: err.code }, 'request error');
-    if (status >= 400 && status < 500) {
-      const message =
-        status === 415 ? 'content-type must be application/json' : 'request could not be processed';
-      return reply.code(status).send(errorBody(message, 'invalid_request_error'));
-    }
-    return reply.code(500).send(errorBody('internal error', 'gateway_error'));
-  });
 
   // Keep the original bytes so the upstream receives exactly what the client sent.
   app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) =>
@@ -67,9 +66,15 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
     }
 
     const abort = new AbortController();
-    // 'close' on the response fires on client disconnect as well as on normal completion.
+    // 'close' on the response fires on client disconnect, on normal completion, and when a failed
+    // upstream makes pipeline() destroy the response. `upstreamError` is set first in that last
+    // case, so only a close with no upstream error counts as the client leaving.
+    let clientGone = false;
+    let upstreamError: Error | undefined;
     reply.raw.on('close', () => {
-      if (!reply.raw.writableFinished) abort.abort();
+      if (reply.raw.writableFinished) return;
+      if (!upstreamError) clientGone = true;
+      abort.abort();
     });
 
     const dispatched = performance.now();
@@ -87,6 +92,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
       return upstreamFailure(reply, err);
     }
 
+    const extraHeaders = passthroughHeaders(res.headers);
     const contentType = res.headers['content-type'];
     const type = Array.isArray(contentType) ? contentType[0] : contentType;
 
@@ -94,7 +100,11 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
       // Hijack so Fastify neither buffers nor serialises: bytes go from the upstream socket
       // to the client socket as they arrive.
       reply.hijack();
+      res.body.once('error', (err) => {
+        if (!clientGone) upstreamError = err;
+      });
       reply.raw.writeHead(res.statusCode, {
+        ...extraHeaders,
         ...(type ? { 'content-type': type } : {}),
         'cache-control': 'no-cache',
         'x-accel-buffering': 'no',
@@ -105,7 +115,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
         await pipeline(res.body, reply.raw);
       } catch (err) {
         // Upstream died or the client left mid-stream; pipeline already destroyed both ends.
-        if (!abort.signal.aborted) {
+        if (!clientGone) {
           reply.log.warn(
             { errClass: (err as Error).name, code: (err as { code?: string }).code },
             'stream terminated',
@@ -124,12 +134,13 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
     }
     const received = performance.now();
     const upstreamMs = received - dispatched;
-    const gwMs = performance.now() - started - upstreamMs;
+    const preDispatchMs = dispatched - started;
 
     return reply
       .code(res.statusCode)
+      .headers(extraHeaders)
       .header('content-type', type ?? 'application/json')
-      .header('server-timing', `gw;dur=${ms(gwMs)}, upstream;dur=${ms(upstreamMs)}`)
+      .header('server-timing', `gw-pre;dur=${ms(preDispatchMs)}, upstream;dur=${ms(upstreamMs)}`)
       .send(payload);
   });
 };

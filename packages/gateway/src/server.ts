@@ -17,5 +17,5 @@ const shutdown = (signal: string) => {
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
-await app.listen({ port: config.port, host: '0.0.0.0' });
-console.log(`gateway on http://0.0.0.0:${config.port} -> ${config.upstreamBaseUrl}`);
+await app.listen({ port: config.port, host: config.host });
+console.log(`gateway on http://${config.host}:${config.port} -> ${config.upstreamBaseUrl}`);
