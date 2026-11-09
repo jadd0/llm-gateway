@@ -59,6 +59,11 @@ describe('stream collector', () => {
     expect((await collect(chunk({ tool_calls: [{ index: 0 }] }) + chunk({}, 'stop') + 'data: [DONE]\n\n')).result).toBeUndefined();
     expect((await collect(chunk({ content: 'a' }) + chunk({ content: 'b' }, null, 1) + chunk({}, 'stop') + 'data: [DONE]\n\n')).result).toBeUndefined();
     expect((await collect('data: not json\n\n' + ok)).result).toBeUndefined();
+    // A refusal, or nothing at all, is not an answer worth keeping.
+    expect((await collect(chunk({ refusal: 'I cannot help with that.' }) + chunk({}, 'stop') + 'data: [DONE]\n\n')).result).toBeUndefined();
+    expect((await collect(chunk({ content: 'hi', refusal: 'no' }) + chunk({}, 'stop') + 'data: [DONE]\n\n')).result).toBeUndefined();
+    expect((await collect(chunk({ role: 'assistant', content: '' }) + chunk({}, 'stop') + 'data: [DONE]\n\n')).result).toBeUndefined();
+    expect((await collect(chunk({ content: 'hi', refusal: null }) + chunk({}, 'stop') + 'data: [DONE]\n\n')).result).toMatchObject({ content: 'hi' });
     const small = new StreamCollector(3);
     await run(small, Buffer.from(chunk({ content: 'ab' }) + chunk({ content: 'cd' }) + chunk({}, 'stop') + 'data: [DONE]\n\n'));
     expect(small.complete()).toBeUndefined();
@@ -87,6 +92,10 @@ describe('completion from a non-streamed body', () => {
     expect(completionFromBody(body(choice({ role: 'assistant', content: 'x', tool_calls: [{}] })))).toBeUndefined();
     expect(completionFromBody(body(choice({ role: 'assistant', content: 'x' }, 'content_filter')))).toBeUndefined();
     expect(completionFromBody(body(choice({ role: 'assistant', content: 'x' }, null)))).toBeUndefined();
+    expect(completionFromBody(body(choice({ role: 'assistant', content: null, refusal: 'I cannot help with that.' })))).toBeUndefined();
+    expect(completionFromBody(body(choice({ role: 'assistant', content: 'x', refusal: 'no' })))).toBeUndefined();
+    expect(completionFromBody(body(choice({ role: 'assistant', content: '' })))).toBeUndefined();
+    expect(completionFromBody(body(choice({ role: 'assistant', content: 'x', refusal: null })))).toMatchObject({ content: 'x' });
     expect(completionFromBody(body({ choices: [] }))).toBeUndefined();
     const two = { index: 0, message: { role: 'assistant', content: 'x' }, finish_reason: 'stop' };
     expect(completionFromBody(body({ choices: [two, two] }))).toBeUndefined();

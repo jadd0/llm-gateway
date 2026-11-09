@@ -209,7 +209,8 @@ describe('POST /v1/chat/completions', () => {
     const timing = res.headers.get('server-timing') ?? '';
     const m = /^gw-pre;dur=([\d.]+), gw-post;dur=([\d.]+), upstream;dur=([\d.]+)$/.exec(timing);
     expect(m).not.toBeNull();
-    expect(Number(m![3])).toBeGreaterThanOrEqual(100);
+    // A 100 ms timer can fire a fraction of a millisecond early against performance.now().
+    expect(Number(m![3])).toBeGreaterThanOrEqual(99);
     expect(Number(m![1])).toBeGreaterThanOrEqual(0);
     expect(Number(m![2])).toBeGreaterThanOrEqual(0);
   });

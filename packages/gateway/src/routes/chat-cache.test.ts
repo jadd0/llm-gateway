@@ -8,6 +8,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../app.ts';
 import { keyStoreFromConfig } from '../auth/key-store.ts';
 import { periodOf } from '../budget/period.ts';
+import { KEY_VERSION } from '../cache/key.ts';
+import type { CacheFill } from '../cache/plugin.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { spendLedger, tenants, tenantSpend } from '../db/schema.ts';
 import { standInWorker } from '../../test/drain.ts';
@@ -40,6 +42,7 @@ let handle: Db;
 let redis: Redis;
 let gw = '';
 const calls: Record<string, number> = {};
+const abandons: Record<string, number> = {};
 const total = () => Object.values(calls).reduce((a, b) => a + b, 0);
 const tenantIds: string[] = [];
 let cacheDown = false;
@@ -110,6 +113,24 @@ beforeAll(async () => {
       }),
     },
   );
+  // Counts `abandon` calls per prompt: the fill is wrapped as the cache plugin assigns it to the request.
+  app.addHook('onRequest', async (request) => {
+    let fill: CacheFill | null = null;
+    Object.defineProperty(request, 'cacheFill', {
+      get: () => fill,
+      set: (f: CacheFill | null) => {
+        const content = (JSON.parse((request.body as Buffer).toString('utf8')) as { messages: Array<{ content?: string }> }).messages[0]?.content;
+        if (f && typeof content === 'string') {
+          const abandon = f.abandon.bind(f);
+          f.abandon = () => {
+            abandons[content] = (abandons[content] ?? 0) + 1;
+            abandon();
+          };
+        }
+        fill = f;
+      },
+    });
+  });
   await app.listen({ port: 0, host: '127.0.0.1' });
   gw = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 });
@@ -146,7 +167,7 @@ const until = async (cond: () => Promise<boolean> | boolean, timeoutMs = 3000) =
   return cond();
 };
 // The cache entries (not locks) a scope holds.
-const entries = async (scope: string) => (await redis.keys(`${prefix}cache:v1:${scope}:*`)).filter((k) => !k.endsWith(':lock'));
+const entries = async (scope: string) => (await redis.keys(`${prefix}cache:${KEY_VERSION}:${scope}:*`)).filter((k) => !k.endsWith(':lock'));
 const sse = (text: string) =>
   text
     .split('\n\n')
@@ -334,8 +355,10 @@ describe('response cache on POST /v1/chat/completions', () => {
   it('hit refunds the token estimate and counts one request', async () => {
     const t = await tenant();
     // The token bucket's Redis key expires on the real clock while the limiter's clock is pinned, and a nearly
-    // full bucket expires within milliseconds. A provider that reports 100000 tokens used keeps it half empty.
-    const body = req('mock-big', uniq());
+    // full bucket expires within milliseconds: a correction arriving after that finds no bucket and starts from
+    // a full one. A large max_tokens makes the estimate take enough of the bucket to outlast the upstream call,
+    // and a provider that reports 100000 tokens used then keeps it half empty.
+    const body = req('mock-big', uniq(), { max_tokens: 5000 });
     const remaining = (res: Response, kind: 'requests' | 'tokens') => Number(res.headers.get(`x-ratelimit-remaining-${kind}`));
     // The bucket as Redis holds it. Corrections to it are sent without the request waiting for them, so each
     // step waits until the bucket shows what it should.
@@ -435,25 +458,67 @@ describe('response cache on POST /v1/chat/completions', () => {
     expect(await entries(t.tenantId)).toHaveLength(1);
   });
 
-  it('a request is cached under the model asked for; the entry says which model served it', async () => {
+  it('an answer from a fallback model is served but not cached', async () => {
     const t = await tenant();
     const body = req('mock-fb-a', uniq());
-    const first = await post(t.key, body);
-    expect(first.status).toBe(200);
-    expect(first.headers.get('x-gateway-model')).toBe('mock-b'); // mock-fb-a failed over to mock-b
-    expect(first.headers.get('x-gateway-attempts')).toBe('2');
-    const made = await json(first);
-    const nb = calls['mock-b'];
-    const hit = await post(t.key, body);
-    expect(hit.headers.get('x-gateway-cache')).toBe('hit');
-    expect(hit.headers.get('x-gateway-model')).toBe('mock-b');
-    expect(hit.headers.get('x-gateway-attempts')).toBe('0');
-    expect((await json(hit)).choices[0].message.content).toBe(made.choices[0].message.content);
-    expect(calls['mock-b']).toBe(nb); // not even the failing first model was tried
-    // The same prompt asked of the serving model itself is a different key.
-    const direct = await post(t.key, { ...body, model: 'mock-b' });
-    expect(direct.headers.get('x-gateway-cache')).toBe('miss');
-    await direct.text();
+    const nb = calls['mock-b'] ?? 0;
+    for (let i = 1; i <= 2; i++) {
+      const res = await post(t.key, body);
+      expect(res.status).toBe(200);
+      expect(res.headers.get('x-gateway-cache')).toBe('miss');
+      expect(res.headers.get('x-gateway-model')).toBe('mock-b'); // mock-fb-a failed over to mock-b
+      expect(res.headers.get('x-gateway-attempts')).toBe('2');
+      await res.text();
+      expect(calls['mock-b']).toBe(nb + i); // the second request had to go upstream again
+    }
+    const streamed = await post(t.key, { ...body, stream: true });
+    expect(streamed.headers.get('x-gateway-model')).toBe('mock-b');
+    await streamed.text();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(await entries(t.tenantId)).toHaveLength(0);
+    // A streamed request served by a fallback model stores nothing and lets go of its fill, once, as the non-streamed path does.
+    const sbody = req('mock-fb-a', uniq(), { stream: true });
+    await (await post(t.key, sbody)).text();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(abandons[sbody.messages[0]!.content]).toBe(1);
+    // The serving model asked for by name is an ordinary request and is cached under its own name.
+    const direct = { ...body, model: 'mock-b' };
+    await (await post(t.key, direct)).text();
+    const again = await post(t.key, direct);
+    expect(again.headers.get('x-gateway-cache')).toBe('hit');
+    expect(again.headers.get('x-gateway-model')).toBe('mock-b');
+    await again.text();
+  });
+
+  it('a request with no output limit and one capped at the gateway default are different requests', async () => {
+    const t = await tenant();
+    const prompt = uniq();
+    const uncapped = { model: 'mock-a', temperature: 0, messages: [{ role: 'user', content: prompt }] };
+    const capped = { ...uncapped, max_tokens: base.rateLimitDefaultMaxTokens };
+    const n0 = calls['mock-a'] ?? 0;
+    for (const body of [uncapped, capped]) {
+      const res = await post(t.key, body);
+      expect(res.headers.get('x-gateway-cache')).toBe('miss');
+      await res.text();
+    }
+    expect(calls['mock-a']).toBe(n0 + 2);
+    for (const body of [uncapped, capped]) {
+      const res = await post(t.key, body);
+      expect(res.headers.get('x-gateway-cache')).toBe('hit');
+      await res.text();
+    }
+    expect(await entries(t.tenantId)).toHaveLength(2);
+  });
+
+  it('a hit on a model with no price still records its tokens, with nothing saved', async () => {
+    const t = await tenant();
+    await app.recordCacheHit!({
+      tenantId: t.tenantId,
+      model: 'model-without-a-price',
+      usage: { promptTokens: 7, completionTokens: 5, totalTokens: 12 },
+    });
+    const [row] = await handle.db.select().from(spendLedger).where(eq(spendLedger.tenantId, t.tenantId));
+    expect(row).toMatchObject({ cached: true, model: 'model-without-a-price', promptTokens: 7, completionTokens: 5, costMicros: 0, savedMicros: 0 });
   });
 
   it('identical concurrent misses make one upstream call', async () => {

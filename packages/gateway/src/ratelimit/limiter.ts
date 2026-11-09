@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import type { Redis } from 'ioredis';
-import { isStarting } from '../redis.ts';
+import { isStarting, replyWithin } from '../redis.ts';
 
 const TAKE_LUA = readFileSync(new URL('./token-bucket.lua', import.meta.url), 'utf8');
 const ADJUST_LUA = readFileSync(new URL('./token-bucket-adjust.lua', import.meta.url), 'utf8');
@@ -83,20 +83,7 @@ export function createLimiter(opts: LimiterOptions): Limiter {
   // prompted it already did.
   let refundFailing = false;
 
-  const withTimeout = <T>(p: Promise<T>): Promise<T> =>
-    new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new RedisTimeout('no reply in time')), timeoutMs);
-      p.then(
-        (v) => {
-          clearTimeout(timer);
-          resolve(v);
-        },
-        (e: unknown) => {
-          clearTimeout(timer);
-          reject(e);
-        },
-      );
-    });
+  const withTimeout = <T>(p: Promise<T>): Promise<T> => replyWithin(p, timeoutMs, () => new RedisTimeout('no reply in time'));
 
   return {
     async take(keyId, rpm, tpm, cost) {

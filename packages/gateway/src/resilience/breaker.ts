@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import type { Redis } from 'ioredis';
+import { replyWithin } from '../redis.ts';
 
 const BREAKER_LUA = readFileSync(new URL('./breaker.lua', import.meta.url), 'utf8');
 
@@ -171,20 +172,7 @@ export function createBreaker(opts: BreakerOptions): Breaker {
   let skipUntil = 0;
   let trial = false;
 
-  const withTimeout = <T>(p: Promise<T>): Promise<T> =>
-    new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new RedisTimeout('no reply in time')), redisTimeoutMs);
-      p.then(
-        (v) => {
-          clearTimeout(timer);
-          resolve(v);
-        },
-        (e: unknown) => {
-          clearTimeout(timer);
-          reject(e);
-        },
-      );
-    });
+  const withTimeout = <T>(p: Promise<T>): Promise<T> => replyWithin(p, redisTimeoutMs, () => new RedisTimeout('no reply in time'));
 
   // `reply` is undefined when Redis was not used or did not answer; `ambiguous` is true only for a client-side
   // timeout, where the script may still have run. Any other error is a definite "Redis did not do it".

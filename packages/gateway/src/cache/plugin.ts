@@ -20,7 +20,7 @@ export interface CacheFill {
 /** A hit, as the ledger needs it. */
 export interface CacheHit {
   /** The request that was answered from the cache: the ledger row's saving is noted on its log entry. */
-  request: FastifyRequest;
+  request?: FastifyRequest;
   tenantId: string;
   /** The model that served the answer the first time. */
   model: string;
@@ -47,13 +47,13 @@ export interface CachePluginOptions {
   singleFlight: SingleFlight;
   /** Redis key prefix. */
   keyPrefix: string;
-  /** What a request with no output limit is asked for: part of the key. */
+  /** The output limit a translating provider (Anthropic, Gemini) is given when the request names none: part of the key for those. */
   defaultMaxTokens: number;
   allowNondeterministic: boolean;
   maxEntryBytes: number;
   replayChunkChars: number;
-  /** Whether a model name is served at all; an unroutable name is the route's 400, not a cache question. */
-  isRoutable(model: string): boolean;
+  /** The provider a model name is served by, or undefined when none is: an unroutable name is the route's 400, not a cache question. */
+  resolve(model: string): { translates: boolean } | undefined;
   /** Unix ms. Pins `created` of a replayed reply. Tests only. */
   clock?: () => number;
 }
@@ -69,7 +69,8 @@ const cachePlugin: FastifyPluginAsync<CachePluginOptions> = async (app, opts) =>
     if (!request.routeOptions.config.cached || request.tenant === null) return;
     const tenant = request.tenant;
     const checked = chatRequest(request);
-    if (!checked.ok || !opts.isRoutable(checked.value.model)) return void reply.header('x-gateway-cache', 'uncacheable');
+    const provider = checked.ok ? opts.resolve(checked.value.model) : undefined;
+    if (!checked.ok || !provider) return void reply.header('x-gateway-cache', 'uncacheable');
     const body = checked.value as Record<string, unknown>;
 
     // Opt-outs are the client's: no-store neither reads nor writes, no-cache skips the read and refreshes the entry.
@@ -84,18 +85,16 @@ const cachePlugin: FastifyPluginAsync<CachePluginOptions> = async (app, opts) =>
       return void reply.header('x-gateway-cache', 'uncacheable');
     }
 
-    const key = cacheKey(opts.keyPrefix, scopeOf(tenant), normalise(body, opts.defaultMaxTokens));
-    const lookup = async () => {
-      const found = await opts.store.get(key);
-      return found.status === 'hit' ? found.entry : undefined;
-    };
+    const key = cacheKey(opts.keyPrefix, scopeOf(tenant), normalise(body, provider.translates ? opts.defaultMaxTokens : null));
+    const lookup = () => opts.store.get(key);
     const refresh = directives.has('no-cache');
     const streamed = body.stream === true;
+    const includeUsage = (body.stream_options as { include_usage?: unknown } | null | undefined)?.include_usage === true;
 
     if (!refresh) {
-      const found = await opts.store.get(key);
+      const found = await lookup();
       if (found.status === 'unavailable') return void reply.header('x-gateway-cache', 'unavailable');
-      if (found.status === 'hit') return hit(request, reply, found.entry);
+      if (found.status === 'hit') return hit(request, reply, found.entry, streamed, includeUsage);
     }
 
     // A miss. The first of several identical non-streamed misses leads; the rest wait for its fill. A stream
@@ -105,7 +104,7 @@ const cachePlugin: FastifyPluginAsync<CachePluginOptions> = async (app, opts) =>
       const role = await opts.singleFlight.acquire(key);
       if (role.role === 'follower') {
         const entry = await role.wait(lookup);
-        if (entry) return hit(request, reply, entry);
+        if (entry) return hit(request, reply, entry, streamed, includeUsage);
       } else if (role.role === 'leader') {
         leader = role;
       }
@@ -133,13 +132,19 @@ const cachePlugin: FastifyPluginAsync<CachePluginOptions> = async (app, opts) =>
       },
     };
     request.cacheFill = fill;
-    // However the request ends (a refusal by a later hook, a client that left, an error) a leader is let go.
-    if (leader) reply.raw.once('close', () => fill.abandon());
+    // However the request ends (a refusal by a later hook, a client that left, an error) a leader is let go: its
+    // fill is abandoned, and if that cannot be (a write is in flight) its lock stops being renewed.
+    if (leader) {
+      reply.raw.once('close', () => {
+        fill.abandon();
+        leader.closed();
+      });
+    }
   });
 
   // A hit: no provider, no budget hold. It counts as one request against the key's rpm and gives the token
   // estimate back; the ledger gets a zero-cost row with what it saved.
-  function hit(request: FastifyRequest, reply: FastifyReply, entry: CachedCompletion) {
+  function hit(request: FastifyRequest, reply: FastifyReply, entry: CachedCompletion, streamed: boolean, includeUsage: boolean) {
     void request.rateLimit?.settle(0);
     if (entry.usage) request.reqlog.note({ promptTokens: entry.usage.promptTokens, completionTokens: entry.usage.completionTokens });
     if (app.recordCacheHit) {
@@ -147,9 +152,7 @@ const cachePlugin: FastifyPluginAsync<CachePluginOptions> = async (app, opts) =>
     }
     const who = { id: `chatcmpl-cache-${randomUUID()}`, created: Math.floor(now() / 1000) };
     reply.header('x-gateway-cache', 'hit').header('x-gateway-model', entry.model).header('x-gateway-attempts', '0');
-    const body = chatRequest(request);
-    if (body.ok && body.value.stream === true) {
-      const includeUsage = (body.value.stream_options as { include_usage?: unknown } | null | undefined)?.include_usage === true;
+    if (streamed) {
       return reply
         .code(200)
         .header('content-type', 'text/event-stream')

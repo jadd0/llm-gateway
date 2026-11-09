@@ -1,5 +1,5 @@
 {
-  "id": "a19ac684-1462-454d-935b-3dec6270c31d",
+  "id": "ba9a6a10-3c60-4342-b5df-4c15298c9483",
   "prevId": "eb6aba72-aae1-4063-aa65-c396a3e823a8",
   "version": "7",
   "dialect": "postgresql",
@@ -235,180 +235,6 @@
       "checkConstraints": {},
       "isRLSEnabled": false
     },
-    "public.request_log": {
-      "name": "request_log",
-      "schema": "",
-      "columns": {
-        "request_id": {
-          "name": "request_id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "tenant_id": {
-          "name": "tenant_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "key_id": {
-          "name": "key_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "model": {
-          "name": "model",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "served_model": {
-          "name": "served_model",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "provider": {
-          "name": "provider",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "status": {
-          "name": "status",
-          "type": "smallint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "error_code": {
-          "name": "error_code",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "stream": {
-          "name": "stream",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "prompt_tokens": {
-          "name": "prompt_tokens",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "completion_tokens": {
-          "name": "completion_tokens",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "cost_micros": {
-          "name": "cost_micros",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "saved_micros": {
-          "name": "saved_micros",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "cache": {
-          "name": "cache",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "attempts": {
-          "name": "attempts",
-          "type": "smallint",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "fallback_used": {
-          "name": "fallback_used",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": true,
-          "default": false
-        },
-        "latency_ms": {
-          "name": "latency_ms",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "ttfb_ms": {
-          "name": "ttfb_ms",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "upstream_ms": {
-          "name": "upstream_ms",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false
-        }
-      },
-      "indexes": {
-        "request_log_created_brin": {
-          "name": "request_log_created_brin",
-          "columns": [
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "brin",
-          "with": {}
-        },
-        "request_log_tenant_time": {
-          "name": "request_log_tenant_time",
-          "columns": [
-            {
-              "expression": "tenant_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
     "public.spend_ledger": {
       "name": "spend_ledger",
       "schema": "",
@@ -483,7 +309,29 @@
           "default": "now()"
         }
       },
-      "indexes": {},
+      "indexes": {
+        "spend_ledger_tenant_period_idx": {
+          "name": "spend_ledger_tenant_period_idx",
+          "columns": [
+            {
+              "expression": "tenant_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "period",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "spend_ledger_tenant_id_tenants_id_fk": {
           "name": "spend_ledger_tenant_id_tenants_id_fk",

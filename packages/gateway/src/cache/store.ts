@@ -1,8 +1,9 @@
 import type { Redis } from 'ioredis';
-import { isStarting } from '../redis.ts';
+import { isStarting, replyWithin } from '../redis.ts';
 import type { CachedCompletion } from './replay.ts';
 
-export type Lookup = { status: 'hit'; entry: CachedCompletion } | { status: 'miss' } | { status: 'unavailable' };
+/** What a read of the cache found: the entry, a plain miss, or a Redis that could not answer. */
+export type Lookup<T = CachedCompletion> = { status: 'hit'; entry: T } | { status: 'miss' } | { status: 'unavailable' };
 export type Written = 'stored' | 'too-large' | 'unavailable';
 
 export interface CacheStore {
@@ -24,15 +25,8 @@ class Slow extends Error {
   override name = 'CacheRedisTimeout';
 }
 
-/** Resolves with the promise, or rejects `Slow` after `ms`. The late reply of a slow command is dropped. */
-export function within<T>(p: Promise<T>, ms: number): Promise<T> {
-  let timer: NodeJS.Timeout;
-  const late = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Slow()), ms);
-  });
-  p.catch(() => {}); // a command that fails after the timeout has nobody left to tell
-  return Promise.race([p, late]).finally(() => clearTimeout(timer));
-}
+/** Resolves with the promise, or rejects `Slow` after `ms`. */
+export const within = <T>(p: Promise<T>, ms: number): Promise<T> => replyWithin(p, ms, () => new Slow());
 
 const parse = (raw: string): CachedCompletion | undefined => {
   try {

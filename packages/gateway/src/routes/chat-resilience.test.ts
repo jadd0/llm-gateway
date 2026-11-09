@@ -362,8 +362,10 @@ describe('retries, fallback and breaker through the chat route', { timeout: 60_0
     for (let i = 0; i < 2; i++) expect((await send(gw, s.key)).status).toBe(200);
     expect(A.hits).toBe(2);
     // A recovers (slowly, so the probe is still in flight while the others arrive); the cooldown ends.
+    // The probe must outlast the dispatch of all 50: once it succeeds the breaker closes and late
+    // arrivals rightly go to A. 300 ms was shorter than a slow CI runner takes to dispatch them.
     A.settings.outage = 'off';
-    A.settings.latencyMs = 300;
+    A.settings.latencyMs = 3_000;
     now += 15_000;
     const results = await Promise.all(Array.from({ length: 50 }, () => send(gw, s.key)));
     expect(results.map((r) => r.status)).toEqual(Array.from({ length: 50 }, () => 200));

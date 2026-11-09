@@ -58,6 +58,7 @@ export class StreamCollector extends Transform {
         }
         const delta = choice.delta ?? {};
         if (delta.tool_calls !== undefined || delta.function_call !== undefined) this.#spoiled = true;
+        if (hasRefusal(delta.refusal)) this.#spoiled = true;
         if (typeof delta.content === 'string' && !this.#spoiled) {
           this.#chars += delta.content.length;
           if (this.#chars > this.#maxChars) this.#spoiled = true;
@@ -72,17 +73,22 @@ export class StreamCollector extends Transform {
   complete(): Omit<CachedCompletion, 'model'> | undefined {
     if (!this.#done || this.#spoiled) return undefined;
     if (this.#finish !== 'stop' && this.#finish !== 'length') return undefined;
+    const content = this.#parts.join('');
+    if (content === '') return undefined; // nothing was said: an empty answer is not worth keeping
     return {
-      content: this.#parts.join(''),
+      content,
       finishReason: this.#finish,
       usage: this.#usage ?? null,
     };
   }
 }
 
+// A refusal is the model declining, not an answer; any non-empty value means one.
+const hasRefusal = (v: unknown): boolean => v !== undefined && v !== null && v !== '';
+
 /**
  * The answer in a non-streamed OpenAI-format body, or undefined when it is not one to keep: more than one
- * choice, no text (a tool call, a refusal), or a finish reason other than stop or length (content_filter).
+ * choice, no text (a tool call), a refusal, or a finish reason other than stop or length (content_filter).
  */
 export function completionFromBody(body: Buffer): Omit<CachedCompletion, 'model'> | undefined {
   let json: { choices?: { index?: number; message?: Record<string, unknown>; finish_reason?: unknown }[]; usage?: unknown };
@@ -94,7 +100,8 @@ export function completionFromBody(body: Buffer): Omit<CachedCompletion, 'model'
   if (!Array.isArray(json?.choices) || json.choices.length !== 1) return undefined;
   const choice = json.choices[0]!;
   const message = choice.message;
-  if (typeof message?.content !== 'string') return undefined;
+  if (typeof message?.content !== 'string' || message.content === '') return undefined;
+  if (hasRefusal(message.refusal)) return undefined;
   if (message.tool_calls !== undefined || message.function_call !== undefined) return undefined;
   if (choice.finish_reason !== 'stop' && choice.finish_reason !== 'length') return undefined;
   return { content: message.content, finishReason: choice.finish_reason, usage: parseUsage(json.usage) ?? null };

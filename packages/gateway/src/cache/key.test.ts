@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { cacheKey, isCacheable, normalise, scopeOf } from './key.ts';
+import { KEY_VERSION, cacheKey, isCacheable, normalise, scopeOf } from './key.ts';
 
 const MAX = 1024;
 const base = { model: 'mock-1', temperature: 0, messages: [{ role: 'user', content: 'hello' }] };
-const keyOf = (body: Record<string, unknown>, scope = 'tenant-a') => cacheKey('p:', scope, normalise(body, MAX));
+// MAX stands for a provider that injects its default limit (Anthropic, Gemini); null for OpenAI-format pass-through.
+const keyOf = (body: Record<string, unknown>, scope = 'tenant-a', injected: number | null = MAX) => cacheKey('p:', scope, normalise(body, injected));
 
 describe('cache key', () => {
   it('string and single text part give the same key', () => {
@@ -12,6 +13,11 @@ describe('cache key', () => {
     // Two parts are not one string: the provider may treat them differently.
     const two = { ...base, messages: [{ role: 'user', content: [{ type: 'text', text: 'hel' }, { type: 'text', text: 'lo' }] }] };
     expect(keyOf(two)).not.toBe(keyOf(base));
+  });
+
+  it('the key carries the version of the rules that made it', () => {
+    expect(KEY_VERSION).toBe('v2');
+    expect(keyOf(base)).toContain(':cache:v2:');
   });
 
   it('field order does not change the key', () => {
@@ -59,6 +65,20 @@ describe('cache key', () => {
     expect(keyOf(JSON.parse('{"model":"mock-1","temperature":0.0,"messages":[{"role":"user","content":"hello"}]}'))).toBe(keyOf(base));
   });
 
+  it('the output limit in the key is the one sent upstream', () => {
+    const passthrough = (body: Record<string, unknown>) => keyOf(body, 'tenant-a', null);
+    // OpenAI-format: no limit is no limit, never the gateway default; a capped request is a different request.
+    expect(passthrough({ ...base, max_tokens: MAX })).not.toBe(passthrough(base));
+    expect(passthrough({ ...base, max_tokens: 10 })).not.toBe(passthrough(base));
+    expect(passthrough({ ...base, max_tokens: 10 })).not.toBe(passthrough({ ...base, max_tokens: 20 }));
+    expect(passthrough({ ...base, max_tokens: 10 })).toBe(passthrough({ ...base, max_tokens: 10 }));
+    // A translating provider is given the default when there is none, so the two are the same request there.
+    expect(keyOf({ ...base, max_tokens: MAX })).toBe(keyOf(base));
+    // max_tokens wins over max_completion_tokens, as the adapters read them.
+    expect(keyOf({ ...base, max_tokens: 5, max_completion_tokens: 9 })).toBe(keyOf({ ...base, max_tokens: 5, max_completion_tokens: 7 }));
+    expect(keyOf({ ...base, max_tokens: 5, max_completion_tokens: 9 })).not.toBe(keyOf({ ...base, max_tokens: 6, max_completion_tokens: 9 }));
+  });
+
   it('different tenants get different keys; shared tenants share one', () => {
     const a = { tenantId: 'aaaa', cacheShared: false };
     const b = { tenantId: 'bbbb', cacheShared: false };
@@ -67,7 +87,7 @@ describe('cache key', () => {
     expect(keyOf(base, scopeOf({ ...a, cacheShared: true }))).toBe(keyOf(base, scopeOf({ ...b, cacheShared: true })));
     // A shared tenant never lands on a private tenant's key.
     expect(keyOf(base, scopeOf({ ...a, cacheShared: true }))).not.toBe(keyOf(base, scopeOf(a)));
-    expect(keyOf(base, scopeOf(a))).toMatch(/^p:cache:v1:aaaa:[0-9a-f]{64}$/);
+    expect(keyOf(base, scopeOf(a))).toMatch(/^p:cache:v2:aaaa:[0-9a-f]{64}$/);
   });
 });
 
