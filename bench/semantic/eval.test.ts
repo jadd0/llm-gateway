@@ -3,7 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { ensureDataset, parsePaws, parseQqp, pawsToTsv, sample, sha256, splitDevTest, type Pair } from './datasets.ts';
-import { curve, embedAll, evaluate, hashEmbedder, pickThreshold, recommendThreshold, renderSummary, THRESHOLDS, type CurveRow, type Scored } from './eval.ts';
+import { curve, embedAll, evaluate, hashEmbedder, MODES, pickThreshold, recommendThreshold, renderSummary, THRESHOLDS, type CurveRow, type Scored } from './eval.ts';
 
 const item = (sim: number, duplicate: boolean, source: 'qqp' | 'paws' = 'qqp'): Scored => ({ sim, duplicate, source });
 
@@ -201,6 +201,26 @@ describe('semantic evaluation', () => {
     // Chosen by nearest neighbour with guards: the highest threshold that still serves r2's 0.93.
     expect(r!.chosen?.threshold).toBe(93);
     expect(r!.chosen?.refusedBy).toEqual({ signature: 0, numbers: 1, quotes: 0, names: 0, negation: 0, tokens: 1 });
+  });
+
+  it('an entry text-identical to a request of a pair that is not a duplicate is wrong, and a hit rate is a share of the duplicates', () => {
+    const pairs: Pair[] = [
+      { id: 'd1', source: 'qqp', a: 'reset password', b: 'change password', duplicate: true },
+      // Not a duplicate, and its second prompt is another pair's first: the nearest entry is that one, identical.
+      { id: 'n1', source: 'qqp', a: 'close account', b: 'reset password', duplicate: false },
+    ];
+    const vectors = new Map<string, number[]>([
+      ['reset password', axisVec({ 1: 1 })],
+      ['change password', axisVec({ 1: 0.95 })],
+      ['close account', axisVec({ 2: 1 })],
+    ]);
+    const [r] = evaluate({ dev: pairs, test: pairs, vectors: { none: { M: vectors } }, maxWrongRate: 0.5, guard: GUARD, minHitRate: 0.05 });
+    for (const mode of MODES) {
+      const rows = r!.test[mode];
+      expect(rows.length).toBeGreaterThan(0);
+      for (const row of rows) expect(row.hitRate).toBeLessThanOrEqual(1);
+    }
+    expect(r!.test.nn.find((c) => c.threshold === 90)).toMatchObject({ served: 2, hits: 1, wrong: 1, duplicates: 1, hitRate: 1 });
   });
 
   it('with no threshold inside the budget it says so and recommends the lowest wrong rate above the minimum hit rate', () => {

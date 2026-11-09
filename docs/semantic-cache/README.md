@@ -20,8 +20,10 @@ with a message that says so, and the gateway refuses to start with `SEMANTIC_ENA
 The same version check picks the query: from 0.8 the index scan keeps going until a filtered query has its row
 (`hnsw.iterative_scan`); before 0.8 the index is not used for a large scope and context, which are sorted exactly instead.
 
-**Upgrading.** Migration 0005 adds `tenants.semantic_cache` defaulting to false, so no tenant changes behaviour when it is
-applied. A deployment that ran an earlier build of this PR with the feature on for everyone must opt its tenants in again.
+**Migration.** 0005 is new in this change: it creates the extension, the `semantic_cache` table, the `semantic_nearest`
+function the lookup calls, `spend_ledger.cache_kind` and `tenants.semantic_cache` (default false, so no tenant changes
+behaviour until `keys set-semantic-cache <tenant> on`). Nothing is deployed with an earlier 0005. Another change also
+adds a 0005; whichever merges second renumbers its file and its journal entry.
 
 ## What may differ
 
@@ -45,10 +47,12 @@ text (an image, several parts) is exact-only. Same cacheability rule as the exac
 4. After the exact cache stores a new answer, its prompt is queued to be embedded and inserted, after the response is on its
    way. The queue is bounded (`SEMANTIC_FILL_QUEUE`); a full queue drops the job and counts it in the logs. The row expires
    with the answer. Expired rows are deleted in batches every `SEMANTIC_CLEANUP_S`.
-5. The lookup runs inside the exact cache's single-flight: of several identical misses in a burst only the leader asks the
-   semantic cache. If it is served by a similar prompt, followers in the same process get that answer too; a follower that
-   opted out, or whose tenant is off, goes upstream instead, and nothing is written under the exact key, where such a
-   request would read it as an exact answer. Followers in another process go upstream.
+5. The lookup runs inside the exact cache's single-flight. If the leader is served by a similar prompt it hands its
+   followers a reference to that entry (kept in Redis for a few seconds, so followers in other processes get it too), and they
+   are served without asking. A follower that opted out, or whose tenant is off, goes upstream instead, and nothing is
+   written under the exact key, where such a request would read it as an exact answer. A follower that is not handed
+   an answer (the leader failed, gave up, or its lookup found nothing and the answer could not be cached) looks for itself
+   before going upstream, so a similar answer is never passed over.
 
 A request that opts out (`x-gateway-semantic: off`, `cache-control: no-store`, a tenant that has not opted in or was switched
 off with `keys set-semantic-cache <tenant> off`) is never embedded, so its prompt is never sent to the embedding API.
@@ -90,10 +94,12 @@ and the first 200 million tokens of an account are free.
   and "capital of Zorvania-9" as near-identical. Questions that differ only in a detail the model ignores can be served
   each other's answer, which is why the guards compare numbers, names and quotes exactly, the threshold is chosen against labelled
   non-paraphrases (PAWS), and the feature is off until a tenant opts in.
-- The query's time budget is enforced by Postgres: each lookup runs in a transaction with `SET LOCAL statement_timeout`
-  (`SEMANTIC_PG_TIMEOUT_MS`), so a slow query is cancelled and its connection freed. Semantic queries use a pool of their own
-  (`SEMANTIC_PG_POOL`), and one that cannot get a connection within the budget fails at once, so authentication and budgets
-  never queue behind them.
+- The query's time budget is enforced by Postgres: a lookup is one statement (the `semantic_nearest` function counts, picks
+  the path and ranks), and the lookup pool is opened with `statement_timeout = SEMANTIC_PG_TIMEOUT_MS`, so a slow query is
+  cancelled with its connection freed and no transaction is left behind when the caller stops waiting. Lookups use a pool of
+  their own (`SEMANTIC_PG_POOL`, connections kept warm, up to 2 s to open one: opening a connection is not the query), and
+  fills, removals and the sweep another (`SEMANTIC_PG_FILL_POOL`), so a burst of fills never takes a lookup's connection and
+  neither queues behind authentication or the budget.
 - A filtered vector search can return too few rows. A scope and context with up to 1000 rows is searched exactly (read
   through the `(scope, context_hash)` index, sorted by distance), which no index setting can make miss. A larger one uses the
   vector index with an iterative scan on pgvector 0.8 and later, and an exact sort before.

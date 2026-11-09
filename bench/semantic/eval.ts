@@ -10,8 +10,8 @@
 //
 //   node --env-file-if-exists=.env.local bench/semantic/eval.ts --qqp 6000 --paws 4000 --embedders local,voyage
 //
-// A served answer is right only when the entry served is the pair's own `a` and the pair is a duplicate (or the entry
-// is the identical text of `b`); any other entry served counts as wrong, because the data does not label the
+// A served answer is right only when the pair is a duplicate and the entry served is the pair's own `a` (or the identical
+// text of `b`); any other entry served counts as wrong, because the data does not label the
 // other entries against `b` (conservative). The threshold is chosen on the dev half, by nearest neighbour with
 // guards, and every reported figure is from the test half.
 // Cross-model: `b` embedded by one model and `a` by the other (an API query against a local entry, and back).
@@ -34,7 +34,7 @@ export interface Scored {
   /** The request's pair is a duplicate: what the hit rate is a share of. */
   duplicate: boolean;
   source: Source;
-  /** Serving the candidate gives a right answer. Absent: right exactly when the pair is a duplicate. */
+  /** Serving the candidate gives a right answer (only a duplicate pair can be answered right). Absent: right exactly when the pair is a duplicate. */
   right?: boolean;
   /** The first guard that refuses the candidate; absent when they all pass. */
   guard?: GuardRule | undefined;
@@ -62,8 +62,10 @@ export function curve(items: readonly Scored[], thresholds: readonly number[] = 
   return thresholds.map((threshold) => {
     const cut = threshold / 100;
     const served = items.filter((i) => i.sim >= cut && (!o.guards || i.guard === undefined));
-    const hits = served.filter((i) => i.right ?? i.duplicate).length;
+    // A hit is a right answer to a duplicate pair, so hits and duplicates are counted over the same population.
+    const hits = served.filter((i) => i.duplicate && (i.right ?? true)).length;
     const wrong = served.length - hits;
+    if (hits > duplicates) throw new Error(`hit rate above 1: ${hits} hits of ${duplicates} duplicates`);
     return {
       threshold,
       served: served.length,
@@ -135,7 +137,7 @@ export function score(pairs: readonly Pair[], queryVectors: Vectors, entryVector
 /**
  * Store-wide nearest neighbour, as the gateway looks up: the store holds the distinct `a` of `pairs`, each pair's
  * `b` is asked of it, and the entry nearest to `b` is the candidate, whichever pair it came from. It is a right
- * answer only when it is the pair's own `a` of a duplicate pair, or the identical text of `b`. Ties go to the
+ * answer only when the pair is a duplicate and the entry is its own `a` or the identical text of `b`. Ties go to the
  * earlier entry.
  */
 export function scoreNearest(pairs: readonly Pair[], queryVectors: Vectors, entryVectors: Vectors, guard?: GuardOptions, sig: (t: string) => GuardSignature = signer()): Scored[] {
@@ -165,7 +167,7 @@ export function scoreNearest(pairs: readonly Pair[], queryVectors: Vectors, entr
     const entry = texts[best];
     if (entry === undefined) throw new Error('empty store');
     const refused = guard ? failedGuard(sig(entry), sig(p.b), guard) : undefined;
-    return { sim: bestSim, duplicate: p.duplicate, source: p.source, right: entry === p.b || (entry === p.a && p.duplicate), guard: refused };
+    return { sim: bestSim, duplicate: p.duplicate, source: p.source, right: p.duplicate && (entry === p.a || entry === p.b), guard: refused };
   });
 }
 
@@ -370,7 +372,7 @@ export function renderSummary(info: RunInfo, results: readonly ComboResult[]): s
   L.push(
     `Sampled ${info.qqp} QQP and ${info.paws} PAWS pairs (seed ${info.seed}); dev ${info.dev} pairs (${info.devDuplicates} duplicates), test ${info.test} pairs (${info.testDuplicates} duplicates). Every figure below is on test; the threshold was chosen on dev.`,
     '',
-    `How it is measured. *Pairwise* looks at each pair alone. *Nearest neighbour* is how the gateway looks up: the store holds the first prompt of every pair, each second prompt is asked of it, and the nearest entry is the candidate. A served answer is right only when the entry is that pair's own first prompt of a duplicate pair (or the identical text); any other entry served counts as wrong. *Guards* refuse a candidate whose numbers, quoted strings, names or negation words differ from the request's${info.guard.tokenSet ? `, or whose content words differ by more than ${info.guard.maxDiff} (symmetric difference)` : ' (the content-word guard is off)'}. Hit rate is the share of duplicate pairs served right; wrong rate is the share of served answers that are wrong.`,
+    `How it is measured. *Pairwise* looks at each pair alone. *Nearest neighbour* is how the gateway looks up: the store holds the first prompt of every pair, each second prompt is asked of it, and the nearest entry is the candidate. A served answer is right only when the pair is a duplicate and the entry is that pair's own first prompt (or the identical text); any other entry served counts as wrong. *Guards* refuse a candidate whose numbers, quoted strings, names or negation words differ from the request's${info.guard.tokenSet ? `, or whose content words differ by more than ${info.guard.maxDiff} (symmetric difference)` : ' (the content-word guard is off)'}. Hit rate is the share of duplicate pairs served right; wrong rate is the share of served answers that are wrong.`,
     '',
     `Threshold selection: nearest neighbour with guards, on dev: the most right answers served with at most ${pct(info.maxWrongRate, 1)} of served answers wrong. When no threshold fits that budget the table says so and recommends the threshold with the lowest wrong rate among those that still serve at least ${pct(info.minHitRate, 0)} of the duplicates.`,
     '',
