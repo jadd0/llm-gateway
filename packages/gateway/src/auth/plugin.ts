@@ -52,13 +52,14 @@ const authPlugin: FastifyPluginAsync<AuthOptions> = async (app, opts) => {
     const token = bearerToken(request.headers.authorization);
     if (token === undefined || !looksLikeKey(token)) {
       // Never reaches the key store, so the failure is charged here.
-      const g = opts.ipLimiter ? await opts.ipLimiter.take(request.ip) : undefined;
+      // An unknown address (no socket) has no bucket of its own; sharing one would let a single client lock out the rest.
+      const g = opts.ipLimiter && request.ip ? await opts.ipLimiter.take(request.ip) : undefined;
       if (g?.refused) return refuse(g.retryAfterMs);
       return reply.code(401).send(unauthorized());
     }
     let tenant: Tenant | null;
     try {
-      tenant = await opts.keyStore.lookup(hashKey(opts.pepper, token), request.ip);
+      tenant = await opts.keyStore.lookup(hashKey(opts.pepper, token), request.ip || undefined);
     } catch (err) {
       if (err instanceof LookupRefused) return refuse(err.retryAfterMs);
       throw err;

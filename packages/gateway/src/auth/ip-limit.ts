@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { isIPv6 } from 'node:net';
 import type { Redis } from 'ioredis';
-import { isStarting } from '../redis.ts';
+import { isStarting, replyWithin } from '../redis.ts';
 import type { PostgresGuard } from './key-store.ts';
 
 // The per-key limiter's bounded-adjust script, used here to hand a token back (delta +1, capped at capacity).
@@ -81,20 +81,7 @@ export function createIpLimiter(opts: IpLimiterOptions): IpLimiter {
     log?.info({}, 'redis available again, per-address limiting resumed');
   };
 
-  const withTimeout = <T>(p: Promise<T>): Promise<T> =>
-    new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new RedisTimeout('no reply in time')), timeoutMs);
-      p.then(
-        (v) => {
-          clearTimeout(timer);
-          resolve(v);
-        },
-        (e: unknown) => {
-          clearTimeout(timer);
-          reject(e);
-        },
-      );
-    });
+  const withTimeout = <T>(p: Promise<T>): Promise<T> => replyWithin(p, timeoutMs, () => new RedisTimeout('no reply in time'));
 
   const at = (now?: number) => now ?? clock?.();
 
@@ -110,14 +97,26 @@ export function createIpLimiter(opts: IpLimiterOptions): IpLimiter {
 
   return {
     async take(ip: string, now?: number) {
+      let call: Promise<[number, number]> | undefined;
       try {
         const t = at(now);
-        const [taken, waitMs] = await withTimeout(cmd.ipTake(key(ip), limitPerMin, ...(t === undefined ? [] : [t])));
+        call = cmd.ipTake(key(ip), limitPerMin, ...(t === undefined ? [] : [t]));
+        const [taken, waitMs] = await withTimeout(call);
         recovered();
         if (taken === 1) return { refused: false, refund: () => refund(ip, now) };
         return { refused: true, retryAfterMs: waitMs };
       } catch (err) {
         outage(err);
+        // The request goes on unlimited, but Redis may still run the script and take a token for a request
+        // that was never counted: hand it back.
+        if (err instanceof RedisTimeout && call !== undefined) {
+          call.then(
+            (late) => {
+              if (late[0] === 1) void refund(ip, now);
+            },
+            () => {}, // the command failed, so nothing was taken
+          );
+        }
         return { refused: false, refund: async () => {} };
       }
     },

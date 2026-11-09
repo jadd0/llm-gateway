@@ -49,7 +49,8 @@ export interface KeyStore {
    * The tenant a key hash belongs to, or null for unknown and revoked keys. With an address and a
    * guard, every lookup that is not a cache hit on a valid key first takes a token from the address's
    * bucket (and gives it back if the key is valid); it throws LookupRefused when there is none. A
-   * cached valid key never touches the guard.
+   * cached valid key never touches the guard. With no cache (redis null) the address is charged only after
+   * Postgres found no such key, so a valid key never touches the bucket.
    */
   lookup(keyHash: string, ip?: string): Promise<Tenant | null>;
   /**
@@ -156,7 +157,18 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
       await g.refund(); // a database fault is not this client's failed authentication
       throw err;
     }
-    if (tenant !== null) await g.refund();
+    if (tenant !== null) void g.refund(); // never throws; the response need not wait for it
+    return tenant;
+  }
+
+  // Without a key cache every request queries Postgres anyway, so the guard has nothing to protect: charge the
+  // address only after the lookup came back unknown, and a valid key never touches the bucket.
+  async function chargedAfterMiss(hash: string, ip: string | undefined): Promise<Tenant | null> {
+    const tenant = await fromPostgres(hash);
+    if (tenant === null && ip !== undefined && opts.beforePostgres) {
+      const g = await opts.beforePostgres(ip);
+      if (g.refused) throw new LookupRefused(g.retryAfterMs);
+    }
     return tenant;
   }
 
@@ -209,7 +221,7 @@ export function createKeyStore(opts: KeyStoreOptions): KeyStore {
 
   return {
     async lookup(hash, ip) {
-      if (redis === null) return guarded(hash, ip);
+      if (redis === null) return chargedAfterMiss(hash, ip);
 
       const key = redisKey(hash);
       let cached: string | null;
