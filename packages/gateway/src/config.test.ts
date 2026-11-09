@@ -30,3 +30,25 @@ describe('budget settings', () => {
     expect(() => loadConfig(env({ BUDGET_DEFAULT_MONTHLY_USD: '1e3' }))).toThrow();
   });
 });
+
+describe('provider settings', () => {
+  it('defaults name each provider, keys are unset, and blank values mean unset', () => {
+    const c = loadConfig(env({ ANTHROPIC_API_KEY: '', GEMINI_API_KEY: ' ' }));
+    expect(c).toMatchObject({
+      upstreamBaseUrl: 'https://api.openai.com/v1',
+      anthropicBaseUrl: 'https://api.anthropic.com',
+      anthropicVersion: '2023-06-01',
+      geminiBaseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+      mockBaseUrl: 'http://127.0.0.1:9000',
+      anthropicApiKey: undefined,
+      geminiApiKey: undefined,
+    });
+    expect(c.modelRoutes.map(([prefix]) => prefix).slice(0, 3)).toEqual(['mock-anthropic-', 'mock-gemini-', 'mock-openai-']);
+  });
+
+  it('MODEL_ROUTES is validated at start-up', () => {
+    expect(loadConfig(env({ MODEL_ROUTES: 'x-=anthropic' })).modelRoutes).toEqual([['x-', 'anthropic']]);
+    expect(() => loadConfig(env({ MODEL_ROUTES: 'x-=cohere' }))).toThrow(/names unknown provider .*cohere/);
+    expect(() => loadConfig(env({ MODEL_ROUTES: 'nonsense' }))).toThrow(/model prefix/);
+  });
+});
