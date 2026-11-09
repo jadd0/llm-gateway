@@ -207,6 +207,21 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     expect(res.headers['x-budget-remaining-usd']).toBe('0.999939'); // 1,000,000 - 61
   });
 
+  it('with no max_tokens the worst case is the default allowance, not what the key rate limit would clamp it to', async () => {
+    // The key allows 60 tokens a minute, so the limiter trims its estimate to 60. The budget holds the
+    // whole default output (1024 tokens at 3 micro-USD each) plus 1 prompt token.
+    const s = await fresh(1_000_000);
+    const res = await app.inject({
+      method: 'POST',
+      url: '/v1/chat/completions',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
+      payload: JSON.stringify({ model: 'mock-ok', messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    expect(res.statusCode).toBe(200);
+    expect(res.headers['x-ratelimit-remaining-tokens']).toBe('0');
+    expect(res.headers['x-budget-remaining-usd']).toBe('0.996927'); // 1,000,000 - (1 + 1024 * 3)
+  });
+
   it('a tenant with no cap of its own gets the gateway default', async () => {
     const s = await fresh(null);
     const res = await chat(s.key);
