@@ -190,20 +190,3 @@ one more. A test that reads the real Redis clock checks that refill really comes
 Pending quiet run: overhead of the check (limiter off vs on, same rate) and the 1 000-request burst against a
 100-per-minute key come from `bench/run-ratelimit.sh`, results in `bench/results/pr-4/`. No figure is quoted here
 until that run is committed.
-
-## Questions you should be able to answer
-
-1. **Why must the check be atomic?** Read-then-write from two gateways lets both see "1 left" and both spend it.
-   A Lua script runs as one uninterruptible step inside Redis, so the read, the decision and the write cannot be
-   interleaved. This is why 1 000 concurrent callers admit exactly 100.
-2. **Why Lua and not MULTI/WATCH?** MULTI cannot branch on a value it has read, so it cannot say "charge both only if
-   both can pay". WATCH can, but it retries when another client touched the key, and under a burst on one key that is
-   nearly every attempt. The script has no retries.
-3. **Why Redis's clock?** Gateway clocks drift. If instance A is 30 s ahead it would refill buckets that instance B
-   thinks are empty. Reading `TIME` inside the script gives every instance the same time.
-4. **Why a token bucket rather than a sliding window?** It permits a short burst up to the limit while capping the
-   average, which is how API traffic behaves, and it stores two numbers, not every request's timestamp.
-5. **What does failing open risk, and how are tokens estimated and corrected?** While Redis is down nobody is limited,
-   so a runaway caller can spend freely until it returns (budgets bound the money). Tokens are charged as characters / 4
-   plus the allowed output before the call, then moved to the provider's real count after it: refund if over, debit if
-   under, and the estimate simply stands if no count arrives.

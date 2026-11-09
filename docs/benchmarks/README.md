@@ -39,18 +39,3 @@ and a native rig.
 
 Overhead 0.233 ms p50 / 0.982 ms p95 (instant, 1000 req/s); 0.238 ms p50 / 0.254 ms p95 to first byte
 (realistic, 200 req/s). Throughput: last good step 10000 req/s; p95 99.091 ms at the 12000 req/s step.
-
-## Questions you should be able to answer
-
-1. **Why benchmark natively rather than in Docker?** Docker on macOS adds a virtual network hop of the same
-   order as the overhead being measured. Running natively keeps it out of every figure.
-2. **Why `constant-arrival-rate`?** It fixes requests per second rather than users, so a slow gateway
-   cannot hide by slowing the load.
-3. **Why compare against a direct run?** The difference isolates the gateway; absolute latency includes the
-   mock and k6.
-4. **What does the 12000 req/s p95 jump mean?** At the 12000 req/s step the gateway's p95 was 99.091 ms
-   while direct stayed at 1.067 ms, and p95 stayed elevated at higher rates. It is consistent with the
-   gateway process saturating while sharing a laptop with k6 and the mock. It is one run per step, so the
-   single 99 ms value may be a one-off, and the cause (event loop, pool size, CPU contention) is not known.
-5. **What are the limits of these numbers?** One laptop, load generator and system under test together, 15 s
-   steps, one run each. They are a baseline for comparing later PRs, not a capacity claim.

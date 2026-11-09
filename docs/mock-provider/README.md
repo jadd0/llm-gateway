@@ -35,15 +35,3 @@ Called directly, the mock's own latency floor in the instant profile was 1.190 m
 req/s, and in the realistic profile 200.202 ms p50 to first byte. It sustained every throughput step up to
 20000 req/s with p95 at most 1.437 ms ([BENCHMARKS.md](../../BENCHMARKS.md)), so it was not the limit in the
 gateway runs.
-
-## Questions you should be able to answer
-
-1. **Why a mock provider at all?** To measure the gateway and not someone else's servers, to be free and
-   repeatable, and to trigger outages on demand.
-2. **How do you know the mock is not the bottleneck?** Direct runs against it stayed at or below 1.437 ms p95
-   through 20000 req/s, while the gateway's p95 degraded from 12000 req/s.
-3. **What do `hang` and `reset` test?** `hang` never answers, so it exercises the gateway's timeout (504).
-   `reset` destroys the socket, which exercises dropped connections.
-4. **How does streaming pacing work?** After `latencyMs` it emits a role chunk, then `completionTokens`
-   chunks `tokenDelayMs` apart, a final chunk with usage, then `[DONE]`.
-5. **What does it not do?** It does not model a real tokenizer, real errors beyond a 500, or real rate limits.
