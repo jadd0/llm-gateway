@@ -16,7 +16,10 @@
     "smoke:providers": "node --env-file-if-exists=.env.local scripts/smoke-providers.ts",
     "bench:providers": "bash bench/run-providers.sh",
     "bench:chaos": "bash bench/run-chaos.sh",
-    "bench:cache": "bash bench/run-cache.sh"
+    "bench:cache": "bash bench/run-cache.sh",
+    "bench:semantic-eval": "node --env-file-if-exists=.env.local bench/semantic/eval.ts",
+    "bench:vector-index": "node --env-file-if-exists=.env.local bench/semantic/index-bench.ts",
+    "bench:semantic": "bash bench/run-semantic.sh"
   },
   "devDependencies": {
     "@types/node": "^26.6.6",
