@@ -4,7 +4,7 @@ Diagram: [architecture.html](architecture.html).
 
 An LLM gateway is one HTTP endpoint that apps call instead of calling model providers directly.
 It forwards each request to the provider its model name selects and relays the answer, translated to OpenAI's format where the provider has its own, and later PRs add the policy around that
-hop (auth, limits, budgets, caching, failover, logging).
+hop (auth, limits, budgets, resilience, caching, logging).
 
 ## Built
 

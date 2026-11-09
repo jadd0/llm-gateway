@@ -5,6 +5,9 @@ Diagram: [providers.html](providers.html). Code: `packages/gateway/src/providers
 Apps speak OpenAI format only. The gateway reads the `model` name, picks a provider, and translates the
 request, the answer, the streamed chunks, the usage and the errors between OpenAI's format and the provider's.
 
+Each model name is one attempt target: retries, the circuit breaker and fallback to another model's provider are in
+[../resilience/](../resilience/README.md).
+
 ## The three formats side by side
 
 | | OpenAI (and the mock) | Anthropic | Gemini |

@@ -69,7 +69,11 @@ async function stubHandler(req: http.IncomingMessage, res: http.ServerResponse) 
   const authFail = /-(401|403)(?![0-9])/.exec(`${body.model ?? ''} ${path}`);
   if (authFail) {
     const status = Number(authFail[1]);
-    return json(status, { error: { message: 'Incorrect API key provided: sk-live-REDACTED', type: 'invalid_request_error', code: 'invalid_api_key', status: 'UNAUTHENTICATED' } });
+    return json(
+      status,
+      { error: { message: 'Incorrect API key provided: sk-live-REDACTED', type: 'invalid_request_error', code: 'invalid_api_key', status: 'UNAUTHENTICATED' } },
+      { 'request-id': 'req_auth_1', 'anthropic-ratelimit-requests-remaining': '7', 'set-cookie': 'a=b' },
+    );
   }
   if (path.endsWith('/chat/completions')) {
     return json(200, { id: 'x', object: 'chat.completion', choices: [{ index: 0, message: { role: 'assistant', content: 'ok' }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } });
@@ -409,6 +413,10 @@ describe('translated streams and errors', { timeout: 60_000 }, () => {
           code: 'provider_auth_failed',
         });
         expect(text).not.toContain('sk-live');
+        // The provider's correlation and rate-limit headers still reach the caller; its cookies do not.
+        expect(res.headers.get('request-id'), model).toBe('req_auth_1');
+        expect(res.headers.get('anthropic-ratelimit-requests-remaining'), model).toBe('7');
+        expect(res.headers.has('set-cookie'), model).toBe(false);
       }
     }
     // The status and the provider's error code are in the server log; its words (which can echo the key) are nowhere.

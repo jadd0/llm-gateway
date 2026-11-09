@@ -42,7 +42,8 @@ export type ReserveOutcome =
 /** How a request ended. A refund releases the hold; a charge replaces it with what was really spent. */
 export type SettleOutcome =
   | { kind: 'refund' }
-  | { kind: 'charge'; costMicros: number; promptTokens: number; completionTokens: number; estimated: boolean };
+  /** `model` is the one that served, when a fallback made it differ from the one the hold was made for. */
+  | { kind: 'charge'; costMicros: number; promptTokens: number; completionTokens: number; estimated: boolean; model?: string };
 
 export interface Budget {
   /** Holds `estimate` against the tenant's month, or says why not. Never throws. */
@@ -274,7 +275,7 @@ export async function createBudget(opts: BudgetOptions): Promise<Budget> {
             requestId: res.id,
             tenantId: res.tenantId,
             period: res.period,
-            model: res.model,
+            model: outcome.model ?? res.model,
             promptTokens: outcome.promptTokens,
             completionTokens: outcome.completionTokens,
             costMicros: outcome.costMicros,

@@ -8,12 +8,13 @@ import { createBudget, type Budget, type BudgetOptions, type Reservation } from 
 
 /** How a request ended, as the budget needs to know. */
 export type BudgetOutcome =
-  /** The provider reported what the call used. */
-  | { kind: 'used'; usage: Usage }
+  /** The provider reported what the call used, priced at `model` (the one that served; default: the one asked for). */
+  | { kind: 'used'; usage: Usage; model?: string }
   /** Nothing was used: the whole hold is released. */
   | { kind: 'refund' }
-  /** No usage was seen (client left, stream broke, no usage in the answer): the hold is charged in full. */
-  | { kind: 'keep' };
+  /** No usage was seen (client left, stream broke, no usage in the answer): the estimate is charged, priced at
+   *  `model` when it is known which one was serving, else the hold is charged in full. */
+  | { kind: 'keep'; model?: string };
 
 /** What the route needs to end the budget hold once it knows how the call went. */
 export interface BudgetCharge {
@@ -42,6 +43,8 @@ export interface BudgetPluginOptions {
   defaultMaxTokens: number;
   /** Whether a model name is served at all. An unroutable name holds nothing: the route answers it with model_not_found. */
   isRoutable(model: string): boolean;
+  /** The models a request for `model` may be served by, in order. The hold covers the dearest of them. */
+  chainFor?(model: string): string[];
 }
 
 // Tokens the provider reported, split into the two prices. A usage with only a total (no split) is
@@ -79,7 +82,9 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
     }
 
     const { prompt, output } = estimateWorstCase(body.value, opts.defaultMaxTokens);
-    const estimate = costMicros(price, prompt, output);
+    // A fallback may land the request on a dearer model, so the hold is the worst case over the chain.
+    const chainPrices = (opts.chainFor?.(model) ?? [model]).map((m) => priceFor(m)).filter((p): p is Price => p !== undefined);
+    const estimate = Math.max(costMicros(price, prompt, output), ...chainPrices.map((p) => costMicros(p, prompt, output)));
     const cap = request.tenant.monthlyBudgetMicros ?? opts.defaultCapMicros;
     const result = await budget.reserve({
       tenantId: request.tenant.tenantId, model, estimate, cap, promptTokens: prompt, completionTokens: output,
@@ -107,14 +112,19 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
         settled = true;
         if (outcome.kind === 'refund') return budget.settle(held, { kind: 'refund' });
         if (outcome.kind === 'keep') {
+          const served = outcome.model === undefined ? undefined : priceFor(outcome.model);
           return budget.settle(held, {
-            kind: 'charge', costMicros: held.amount, promptTokens: held.promptTokens,
+            kind: 'charge',
+            costMicros: served === undefined ? held.amount : Math.min(held.amount, costMicros(served, held.promptTokens, held.completionTokens)),
+            promptTokens: held.promptTokens,
             completionTokens: held.completionTokens, estimated: true,
+            ...(outcome.model !== undefined ? { model: outcome.model } : {}),
           });
         }
-        const u = costOfUsage(price, outcome.usage);
+        const u = costOfUsage((outcome.model === undefined ? undefined : priceFor(outcome.model)) ?? price, outcome.usage);
         return budget.settle(held, {
           kind: 'charge', costMicros: u.cost, promptTokens: u.prompt, completionTokens: u.completion, estimated: false,
+          ...(outcome.model !== undefined ? { model: outcome.model } : {}),
         });
       },
     };

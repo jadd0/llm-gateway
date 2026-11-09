@@ -16,7 +16,7 @@ describe('budget settings', () => {
     expect(() => loadConfig(env({ BUDGET_RESERVATION_TTL_S: '5', UPSTREAM_MAX_DURATION_MS: '240000' }))).toThrow();
     expect(loadConfig(env({ BUDGET_RESERVATION_TTL_S: '271', UPSTREAM_MAX_DURATION_MS: '240000' })).budgetReservationTtlS).toBe(271);
     // The idle timeout is not what the hold must outlast.
-    expect(loadConfig(env({ UPSTREAM_TIMEOUT_MS: '600000' })).upstreamTimeoutMs).toBe(600_000);
+    expect(loadConfig(env({ UPSTREAM_IDLE_TIMEOUT_MS: '600000' })).upstreamIdleTimeoutMs).toBe(600_000);
     // Budgets off: nothing to hold, nothing to check.
     expect(loadConfig(env({ BUDGET_ENABLED: 'false', BUDGET_RESERVATION_TTL_S: '1' })).budgetEnabled).toBe(false);
     // The default total deadline is covered by the default hold.
@@ -62,5 +62,40 @@ describe('OPENAI_BASE_URL', () => {
     expect(loadConfig(env({ OPENAI_BASE_URL: 'https://openrouter.ai/api/v1/' })).upstreamBaseUrl).toBe('https://openrouter.ai/api/v1/');
     expect(loadConfig(env({})).upstreamBaseUrl).toBe('https://api.openai.com/v1');
     expect(loadConfig(env({ OPENAI_BASE_URL: '' })).upstreamBaseUrl).toBe('https://api.openai.com/v1');
+  });
+});
+
+describe('resilience settings', () => {
+  it('defaults match the plan', () => {
+    expect(loadConfig(env({}))).toMatchObject({
+      upstreamConnectTimeoutMs: 5000,
+      upstreamHeadersTimeoutMs: 120_000,
+      upstreamIdleTimeoutMs: 30_000,
+      retryMaxAttemptsPerModel: 3,
+      retryBaseMs: 200,
+      retryCapMs: 2000,
+      retryAfterMaxMs: 5000,
+      retryMinRemainingMs: 1000,
+      breakerWindowMs: 10_000,
+      breakerMinFailures: 5,
+      breakerFailureRatio: 0.5,
+      breakerOpenMs: 15_000,
+      breakerRedisTimeoutMs: 50,
+      modelFallbacks: [],
+      mockAnthropicBaseUrl: 'http://127.0.0.1:9000',
+      mockGeminiBaseUrl: 'http://127.0.0.1:9000',
+    });
+    const c = loadConfig(env({ MOCK_BASE_URL: 'http://127.0.0.1:9100', MOCK_GEMINI_BASE_URL: 'http://127.0.0.1:9101' }));
+    expect([c.mockBaseUrl, c.mockAnthropicBaseUrl, c.mockGeminiBaseUrl]).toEqual([
+      'http://127.0.0.1:9100', 'http://127.0.0.1:9100', 'http://127.0.0.1:9101',
+    ]);
+  });
+
+  it('the old single timeout is refused with a message naming the three that replace it', () => {
+    expect(() => loadConfig(env({ UPSTREAM_TIMEOUT_MS: '30000' }))).toThrow(
+      /UPSTREAM_CONNECT_TIMEOUT_MS.*UPSTREAM_HEADERS_TIMEOUT_MS.*UPSTREAM_IDLE_TIMEOUT_MS/s,
+    );
+    // A blank value is "not set", as for every other setting.
+    expect(loadConfig(env({ UPSTREAM_TIMEOUT_MS: '' })).upstreamIdleTimeoutMs).toBe(30_000);
   });
 });

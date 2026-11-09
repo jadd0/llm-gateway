@@ -10,6 +10,8 @@ import { createLimiter } from './ratelimit/limiter.ts';
 import { rateLimit } from './ratelimit/plugin.ts';
 import { chatRoutes } from './routes/chat.ts';
 import { createRedis } from './redis.ts';
+import { createBreaker, probeLockTtlMs, type Breaker } from './resilience/breaker.ts';
+import { chainFor } from './resilience/fallback.ts';
 import { createUpstream } from './upstream.ts';
 
 export function buildApp(
@@ -22,6 +24,10 @@ export function buildApp(
     budgetClock?: () => number;
     /** Replaces the budget's Postgres ledger. Tests only. */
     budgetPgLedger?: PgLedger;
+    /** Pins the circuit breaker's clock (ms). Tests only: production reads Redis TIME. */
+    breakerClock?: () => number;
+    /** Wraps the circuit breaker. Tests only. */
+    wrapBreaker?: (breaker: Breaker) => Breaker;
     /** How long a client of a deadline-cut stream gets to take the last bytes. Tests only. */
     cutDrainMs?: number;
   } = {},
@@ -37,11 +43,11 @@ export function buildApp(
   const handle = createDb({ databaseUrl: config.databaseUrl, poolSize: config.dbPoolSize });
   // One client serves the key cache and the rate limiter. Its command timeout covers the limiter's
   // own timeout, so the limiter decides when to give up, not the socket.
-  const useRedis =
-    config.redisUrl !== undefined && (config.authCache === 'redis' || config.rateLimitEnabled || config.budgetEnabled);
+  // The circuit breaker is always on and shares its state through Redis, so a configured Redis is always used.
+  const useRedis = config.redisUrl !== undefined;
   const redis = useRedis
     ? createRedis(config.redisUrl!, {
-        commandTimeoutMs: Math.max(500, config.rateLimitRedisTimeoutMs, config.budgetRedisTimeoutMs),
+        commandTimeoutMs: Math.max(500, config.rateLimitRedisTimeoutMs, config.budgetRedisTimeoutMs, config.breakerRedisTimeoutMs),
       })
     : null;
   const keyStore = keyStoreFromConfig(config, handle.db, config.authCache === 'redis' ? redis : null, app.log);
@@ -104,10 +110,38 @@ export function buildApp(
       defaultCapMicros: config.budgetDefaultMonthlyMicros,
       defaultMaxTokens: config.rateLimitDefaultMaxTokens,
       isRoutable: (model) => upstream.resolve(model) !== undefined,
+      chainFor: (model) => chainFor(config.modelFallbacks, model),
     });
   }
+  // Shared in Redis when there is one, so every gateway process sees the same open or closed provider; each
+  // process keeps its own in-memory breaker for as long as Redis cannot answer.
+  const breaker = (extra.wrapBreaker ?? ((b: Breaker) => b))(createBreaker({
+    redis,
+    keyPrefix: config.redisKeyPrefix,
+    settings: {
+      windowMs: config.breakerWindowMs,
+      minFailures: config.breakerMinFailures,
+      failureRatio: config.breakerFailureRatio,
+      openMs: config.breakerOpenMs,
+    },
+    redisTimeoutMs: config.breakerRedisTimeoutMs,
+    // A probe that never reports back frees the breaker once the longest attempt it could be making has
+    // lapsed, but never later than one cooldown.
+    probeTtlMs: probeLockTtlMs(config.upstreamConnectTimeoutMs + config.upstreamHeadersTimeoutMs, config.breakerOpenMs),
+    log: app.log,
+    ...(extra.breakerClock ? { clock: extra.breakerClock } : {}),
+  }));
   app.register(chatRoutes, {
     upstream,
+    breaker,
+    chains: config.modelFallbacks,
+    retry: {
+      maxAttempts: config.retryMaxAttemptsPerModel,
+      baseMs: config.retryBaseMs,
+      capMs: config.retryCapMs,
+      retryAfterMaxMs: config.retryAfterMaxMs,
+      minRemainingMs: config.retryMinRemainingMs,
+    },
     maxDurationMs: config.upstreamMaxDurationMs,
     defaultMaxTokens: config.rateLimitDefaultMaxTokens,
     ...(extra.cutDrainMs ? { cutDrainMs: extra.cutDrainMs } : {}),
