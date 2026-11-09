@@ -22,6 +22,7 @@ const scope = `${run}-s`;
 const CTX = 'c'.repeat(64);
 const NOW = new Date('2030-01-01T00:00:00Z').getTime();
 const answer: CachedCompletion = { content: 'Paris', finishReason: 'stop', usage: null, model: 'mock-1' };
+const ctx = (n: number) => String(n).padStart(64, '0');
 const split = (text: string): SemanticSplit => ({ text, contextHash: CTX });
 
 afterAll(async () => {
@@ -120,5 +121,54 @@ describe('semantic lookup', () => {
     // The stub embeds as voyage-4-lite.
     expect(await off.lookup.find(scoped, split('q'))).toEqual({ status: 'miss' });
     expect((await world({ q: angle(0) }, { crossModel: true }).lookup.find(scoped, split('q'))).status).toBe('hit');
+  });
+
+  it('a close match that fails a guard is a miss that names the rule, and its answer is never read', async () => {
+    // The verifier's case: two order numbers 0.982 apart in meaning space.
+    const scoped = `${run}-guard`;
+    const w = world({ 'refund order number 1235': angle(0) }, { threshold: 0.95 });
+    await w.cache.set(`${prefix}order-1234`, answer);
+    await w.store.upsert({ scope: scoped, contextHash: CTX, exactKey: `${prefix}order-1234`, embedding: atSimilarity(0.982), embedder: 'voyage-4-lite', guardSig: guardSignature('refund order number 1234'), expiresAt: new Date(NOW + 3600_000) });
+    let reads = 0;
+    const counting = { get: (k: string) => (reads++, w.cache.get(k)) };
+    const lookup = createSemanticLookup({ embedder: w.stub.embedder, store: w.store, cache: counting, threshold: 0.95, guard: { tokenSet: true, maxDiff: 2 }, crossModel: true, maxChars: 100, pgTimeoutMs: 500, clock: () => NOW });
+    expect(await lookup.find(scoped, split('refund order number 1235'))).toEqual({ status: 'miss', guard: 'numbers' });
+    expect(reads).toBe(0);
+    // With the guard satisfied (the stored prompt is the same text) the same vector distance serves.
+    await w.store.upsert({ scope: scoped, contextHash: CTX, exactKey: `${prefix}order-1234`, embedding: atSimilarity(0.982), embedder: 'voyage-4-lite', guardSig: guardSignature('refund order number 1235'), expiresAt: new Date(NOW + 3600_000) });
+    expect((await lookup.find(scoped, split('refund order number 1235'))).status).toBe('hit');
+    expect(reads).toBe(1);
+  });
+
+  it('each guard rule reaches the caller, and the content-word guard can be switched off', async () => {
+    const scoped = `${run}-rules`;
+    const cases: Array<[string, string, string | undefined]> = [
+      ['pay 10 dollars today', 'pay 11 dollars today', 'numbers'],
+      [`say 'hi there' to him`, `say 'bye now' to him`, 'quotes'],
+      ['visit France this summer', 'visit Spain this summer', 'names'],
+      ['is it safe to eat', 'is it not safe to eat', 'negation'],
+      ['reset account password quickly', 'update billing address immediately now', 'tokens'],
+    ];
+    for (const [i, [stored, asked, rule]] of cases.entries()) {
+      const w = world({ [asked]: angle(0) });
+      const key = `${prefix}rule-${i}`;
+      await w.cache.set(key, answer);
+      await w.store.upsert({ scope: scoped, contextHash: ctx(i), exactKey: key, embedding: atSimilarity(0.99), embedder: 'voyage-4-lite', guardSig: guardSignature(stored), expiresAt: new Date(NOW + 3600_000) });
+      expect(await w.lookup.find(scoped, { text: asked, contextHash: ctx(i) }), asked).toEqual({ status: 'miss', guard: rule });
+      if (rule === 'tokens') {
+        const off = createSemanticLookup({ embedder: w.stub.embedder, store: w.store, cache: w.cache, threshold: 0.95, guard: { tokenSet: false, maxDiff: 2 }, crossModel: true, maxChars: 100, pgTimeoutMs: 500, clock: () => NOW });
+        expect((await off.find(scoped, { text: asked, contextHash: ctx(i) })).status).toBe('hit');
+      }
+    }
+  });
+
+  it('a dangling row is removed without holding the lookup', async () => {
+    const w = world({ q: angle(0) });
+    const scoped = `${run}-slow-remove`;
+    await w.store.upsert({ scope: scoped, contextHash: CTX, exactKey: `${prefix}missing2`, embedding: atSimilarity(0.99), embedder: 'voyage-4-lite', guardSig: guardSignature('q'), expiresAt: new Date(NOW + 3600_000) });
+    const stuck: SemanticStore = { ...w.store, remove: () => new Promise(() => {}) };
+    const lookup = createSemanticLookup({ embedder: w.stub.embedder, store: stuck, cache: w.cache, threshold: 0.95, guard: { tokenSet: true, maxDiff: 2 }, crossModel: true, maxChars: 100, pgTimeoutMs: 500, clock: () => NOW });
+    // A delete that never finishes: the lookup still answers.
+    expect(await Promise.race([lookup.find(scoped, split('q')), new Promise((r) => setTimeout(() => r('hung'), 1000))])).toEqual({ status: 'miss' });
   });
 });
