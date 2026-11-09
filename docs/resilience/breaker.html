@@ -5169,8 +5169,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <!-- Transition paths -->
         <path data-edge-from="closed" data-edge-to="open" data-edge-label="5+ failures, ratio 0.5" data-edge-key="0" data-edge-id="trip" data-composition-points="153,157;343,157" d="M 153 157 L 343 157" class="a-security" stroke-width="1.1" marker-end="url(#arrowhead-security)"/>
         <path data-edge-from="open" data-edge-to="half" data-edge-label="cooldown over" data-edge-key="1" data-edge-id="cooldown" data-composition-points="461,157;651,157" d="M 461 157 L 651 157" class="a-default" stroke-width="1.1" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="half" data-edge-to="closed" data-edge-label="probe answered" data-edge-key="2" data-edge-id="probe-ok" data-composition-points="710,126;710,95;94,95;94,126" d="M 710 126 L 710 105 Q 710 95 700 95 L 104 95 Q 94 95 94 105 L 94 126" class="a-emphasis" stroke-width="2" marker-end="url(#arrowhead-emphasis)"/>
-        <path data-edge-from="half" data-edge-to="open" data-edge-label="probe failed" data-edge-key="3" data-edge-id="probe-fail" data-composition-points="710,188;710,235;402,235;402,188" d="M 710 188 L 710 225 Q 710 235 700 235 L 412 235 Q 402 235 402 225 L 402 188" class="a-security" stroke-width="1.1" marker-end="url(#arrowhead-security)"/>
+        <path data-edge-from="half" data-edge-to="closed" data-edge-label="probe 2xx" data-edge-key="2" data-edge-id="probe-ok" data-composition-points="710,126;710,95;94,95;94,126" d="M 710 126 L 710 105 Q 710 95 700 95 L 104 95 Q 94 95 94 105 L 94 126" class="a-emphasis" stroke-width="2" marker-end="url(#arrowhead-emphasis)"/>
+        <path data-edge-from="half" data-edge-to="open" data-edge-label="probe not 2xx" data-edge-key="3" data-edge-id="probe-fail" data-composition-points="710,188;710,235;402,235;402,188" d="M 710 188 L 710 225 Q 710 235 700 235 L 412 235 Q 402 235 402 225 L 402 188" class="a-security" stroke-width="1.1" marker-end="url(#arrowhead-security)"/>
 
         <!-- States -->
         <g id="node-closed" data-node-id="closed" data-node-label="Closed" tabindex="0" role="button" aria-label="Focus Closed, calls allowed, Breaker per provider target" aria-pressed="false" data-node-kind="start" data-node-sublabel="calls allowed" data-node-tag="default" data-node-context="Breaker per provider target">
@@ -5221,13 +5221,13 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="518.15" y="136" width="75.7" height="16" rx="4" class="c-mask"/>
           <text x="556" y="147" class="t-muted" font-size="8" text-anchor="middle">cooldown over</text>
         </g>
-        <g data-detail="context" data-edge-from="half" data-edge-to="closed" data-edge-label="probe answered" data-edge-key="2" data-edge-id="probe-ok">
+        <g data-detail="context" data-edge-from="half" data-edge-to="closed" data-edge-label="probe 2xx" data-edge-key="2" data-edge-id="probe-ok">
           <rect x="361.7" y="74" width="80.60000000000001" height="16" rx="4" class="c-mask"/>
-          <text x="402" y="85" class="t-backend" font-size="8" text-anchor="middle">probe answered</text>
+          <text x="402" y="85" class="t-backend" font-size="8" text-anchor="middle">probe 2xx</text>
         </g>
-        <g data-detail="context" data-edge-from="half" data-edge-to="open" data-edge-label="probe failed" data-edge-key="3" data-edge-id="probe-fail">
+        <g data-detail="context" data-edge-from="half" data-edge-to="open" data-edge-label="probe not 2xx" data-edge-key="3" data-edge-id="probe-fail">
           <rect x="520.6" y="214" width="70.80000000000001" height="16" rx="4" class="c-mask"/>
-          <text x="556" y="225" class="t-security" font-size="8" text-anchor="middle">probe failed</text>
+          <text x="556" y="225" class="t-security" font-size="8" text-anchor="middle">probe not 2xx</text>
         </g>
 
         <!-- Legend -->
@@ -5438,7 +5438,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <h3>Closed to open</h3>
         </div>
         <ul>
-          <li>&bull; Only 429, 5xx and connect or headers timeouts count</li>
+          <li>&bull; Only 5xx and connect or headers timeouts count; a 429 does not</li>
           <li>&bull; A 400 or the gateway&#39;s own 401 never counts</li>
         </ul>
       </div>
@@ -5449,7 +5449,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <h3>Half-open</h3>
         </div>
         <ul>
-          <li>&bull; Exactly one probe across all processes</li>
+          <li>&bull; Exactly one probe, one attempt; only a 2xx closes</li>
           <li>&bull; Everyone else behaves as if still open</li>
           <li>&bull; Redis unreachable: each process runs this same machine in memory</li>
         </ul>
