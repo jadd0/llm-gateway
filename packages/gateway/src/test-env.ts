@@ -45,6 +45,9 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
     BREAKER_MIN_FAILURES: '1000000',
     // Test files run in parallel against one Postgres with a hundred connections; a gateway under test does not need 20.
     DB_POOL_SIZE: '5',
+    // A budget that sees Redis time out declares an outage and moves the one shared epoch, under every
+    // other test file's balances. On a loaded machine 50 ms is routine, so tests wait longer unless they ask.
+    BUDGET_REDIS_TIMEOUT_MS: '5000',
     ...overrides,
     OPENAI_BASE_URL: upstreamUrl,
     // The mock adds its own /v1 for the OpenAI format, so it gets the origin. Tests stand one stub in for
