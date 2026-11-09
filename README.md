@@ -52,7 +52,7 @@ client ──► gateway (stateless, N instances behind a load balancer)
 | Mock provider | OpenAI-compatible stand-in with configurable latency, errors and outages, so benchmarks measure the gateway rather than a real provider |
 | Dashboard (Next.js) | Metrics over the request log |
 
-Design decisions and the measurements behind them will be recorded in `docs/decisions/`.
+Design notes and diagrams per part live in [`docs/`](docs/README.md).
 
 ## Benchmarks
 
@@ -62,8 +62,8 @@ sizes will live in `BENCHMARKS.md`, with the raw k6 output committed alongside.
 
 | Area | What is measured | Result |
 |---|---|---|
-| Throughput | Sustained load against the mock provider | _not yet measured_ |
-| Overhead | Gateway-added latency, p50 / p95 | _not yet measured_ |
+| Throughput | Sustained load against the mock provider | 10000 req/s through one gateway process, zero errors (laptop, k6 on the same machine; see [BENCHMARKS.md](BENCHMARKS.md)) |
+| Overhead | Gateway-added latency, p50 / p95 | 0.23 ms / 0.98 ms non-streamed at 1000 req/s; 0.24 ms / 0.25 ms to first streamed byte at 200 req/s |
 | Correctness | Over-limit requests across 3+ instances under concurrent load | _not yet measured_ |
 | Resilience | Client success rate while a provider is down | _not yet measured_ |
 | Caching | Hit rate and spend saved on a realistic prompt set | _not yet measured_ |
