@@ -103,11 +103,13 @@ export function buildApp(
       },
       defaultCapMicros: config.budgetDefaultMonthlyMicros,
       defaultMaxTokens: config.rateLimitDefaultMaxTokens,
+      isRoutable: (model) => upstream.resolve(model) !== undefined,
     });
   }
   app.register(chatRoutes, {
     upstream,
     maxDurationMs: config.upstreamMaxDurationMs,
+    defaultMaxTokens: config.rateLimitDefaultMaxTokens,
     ...(extra.cutDrainMs ? { cutDrainMs: extra.cutDrainMs } : {}),
   });
   return app;

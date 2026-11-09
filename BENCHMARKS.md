@@ -156,3 +156,15 @@ What the run measures:
 - **Redis down:** the same flood (`flood-redis-down.json`) and the instant profile with budgets off and on
   (`gateway-instant-redis-down-budget-{off,on}.json`) against a gateway whose Redis is unreachable, so every decision is
   made on the Postgres path.
+
+## Translation overhead (PR 6)
+
+Pending quiet run. `bash bench/run-providers.sh`, started behind `bash bench/quiet.sh bench/results/pr-6`, writes the
+results to `bench/results/pr-6/`; no figure is quoted here until that run is committed (R3).
+
+What the run measures: the realistic streamed scenario (200 req/s, 200 ms first byte, 10 ms per token, 20 tokens) through
+the gateway to the mock's three formats, `mock-openai-1` (pass-through) against `mock-anthropic-1` and `mock-gemini-1`
+(translated). The difference between the first and the other two is the cost of translating the request, the stream and the
+usage. Files: `gateway-mock-{openai,anthropic,gemini}-1.json`. A short run on the build machine only proved the script
+works; it is not a result.
+

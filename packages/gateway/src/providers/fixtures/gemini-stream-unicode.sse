@@ -1,0 +1,6 @@
+data: {"candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": "مرحبا"}]}}], "modelVersion": "gemini-3.1-flash-lite"}
+
+data: {"candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": " 👋🏽 "}]}}], "modelVersion": "gemini-3.1-flash-lite"}
+
+data: {"candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": "سلام, 你好"}]}, "finishReason": "STOP"}], "modelVersion": "gemini-3.1-flash-lite", "usageMetadata": {"promptTokenCount": 9, "candidatesTokenCount": 15, "totalTokenCount": 24}}
+

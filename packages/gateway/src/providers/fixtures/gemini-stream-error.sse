@@ -1,0 +1,4 @@
+data: {"candidates": [{"index": 0, "content": {"role": "model", "parts": [{"text": "Hello"}]}}], "modelVersion": "gemini-3.1-flash-lite"}
+
+data: {"error": {"code": 503, "message": "The model is overloaded. Please try again later.", "status": "UNAVAILABLE"}}
+

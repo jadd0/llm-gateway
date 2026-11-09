@@ -3,13 +3,13 @@
 Diagram: [architecture.html](architecture.html).
 
 An LLM gateway is one HTTP endpoint that apps call instead of calling model providers directly.
-It forwards each request upstream and relays the answer, and later PRs add the policy around that
+It forwards each request to the provider its model name selects and relays the answer, translated to OpenAI's format where the provider has its own, and later PRs add the policy around that
 hop (auth, limits, budgets, caching, failover, logging).
 
 ## Built
 
-- **Gateway** (`packages/gateway`): Fastify. `POST /v1/chat/completions` is forwarded to one upstream,
-  streamed or not. See [../gateway/README.md](../gateway/README.md).
+- **Gateway** (`packages/gateway`): Fastify. `POST /v1/chat/completions` is routed by model name to OpenAI, Anthropic or Gemini (or the mock), translated where needed,
+  streamed or not. See [../providers/README.md](../providers/README.md). See [../gateway/README.md](../gateway/README.md).
 - **Mock provider** (`packages/mock-provider`): OpenAI-wire-format stand-in with configurable latency,
   errors and outages. See [../mock-provider/README.md](../mock-provider/README.md).
 - **Auth** (`packages/gateway/src/auth`): every request needs `Authorization: Bearer gw_...`. Keys are stored
@@ -25,13 +25,13 @@ hop (auth, limits, budgets, caching, failover, logging).
 
 ## Planned (marked dashed in the diagram)
 
-Real provider adapters, budgets, exact and semantic caches,
+Exact and semantic caches,
 retries and circuit breaker, a batched request-log queue into Postgres, and the dashboard.
 
 ## Request flow today
 
 client, then the gateway's key check (Redis, or Postgres on a miss), then the rate limit (one Redis script), then the
-mock, then back. A request over its limit is answered 429 before it reaches the mock.
+budget reservation, then the provider the model name selects (through its adapter), then back. A request over its limit is answered 429 before it reaches the mock.
 
 ## Why this design
 
@@ -55,7 +55,7 @@ compared against rather than an impression. PR 3 added the key check and re-meas
    non-streamed in the baseline.
 2. **Why is the gateway stateless?** So instances scale horizontally; anything shared goes to Redis or
    Postgres. Auth uses both: Postgres is the source of truth for keys, Redis only caches it.
-3. **What is built versus planned?** Built: passthrough, the mock, tenants and API-key auth, per-key rate limits, per-tenant monthly budgets (see [../budgets/](../budgets/README.md)). Planned: everything dashed in the
+3. **What is built versus planned?** Built: passthrough, provider adapters (Anthropic, OpenAI, Gemini), the mock, tenants and API-key auth, per-key rate limits, per-tenant monthly budgets (see [../budgets/](../budgets/README.md)). Planned: everything dashed in the
    diagram.
 4. **How do you know the numbers are the gateway's?** The mock removes provider variance, and each figure is
    a difference against a direct-to-mock run at the same rate.

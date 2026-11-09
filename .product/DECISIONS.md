@@ -39,6 +39,8 @@ Format — one entry per decision under its category, newest last, ids never reu
   Src: founder chose "Shrink window, merge" in chat · Code: packages/gateway/src/budget/budget.ts
 - **D-023** 2026-11-09 · loop default · active — If neither Redis nor Postgres can decide a budget reservation, the request is refused with 503 budget_unavailable (fail closed), and requests refused for budget hand back their rate-limit tokens. Why: D-018 keeps spend capped; with both stores down there is no safe way to admit a paid call.
   Src: .product/plans/pr-5.md "Notes from the build" · Code: packages/gateway/src/budget/budget.ts
+- **D-026** 2026-11-09 · loop default · active — When a provider answers 401 to the gateway's own key, the client gets 502 `provider_auth_failed` with a generic message ("the gateway's credentials for <provider> were rejected"); the provider's real status and error code (never its message, which can echo the key) are logged server-side only. Replaces "provider status kept" for 401 only; a 403 (region block, no model access) is not necessarily a bad key and takes the normal path with the provider's message. Why: the caller did nothing wrong and cannot fix the gateway's key; a pass-through 401 reads as "your key is bad" and leaks the provider's wording.
+  Src: PR 6 fix pass 1 brief · Code: packages/gateway/src/routes/chat.ts
 
 ## Data, privacy & legal
 - **D-011** 2026-11-09 · founder · active — API keys are stored only as HMAC-SHA256(server pepper, key) via Node's built-in crypto, never plaintext and not bcrypt/argon2. Why: keys are 256-bit random, so slow hashing adds per-request latency for no security gain.

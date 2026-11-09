@@ -64,7 +64,7 @@ the gateway won't start), so a gateway that crashes mid-request can't hold money
 ## Other behaviour worth knowing
 
 - **Only priced models are served.** A model with no price gets `400 model_not_priced`: a cap can't be enforced
-  without a price. Only `mock-*` models are priced now; real prices arrive in PR 6.
+  without a price. `mock-*` models and six real models (the current flagship and smallest text model of Anthropic, OpenAI and Gemini) are priced, each real row with its read date and pricing page; see [../providers/README.md](../providers/README.md).
 - **A streamed request with a `stream_options` shape the gateway can't rewrite** (not an object) is forwarded untouched,
   so no usage chunk is requested and it can't be reconciled: it is charged the full estimate.
 - **A total deadline per upstream call (`UPSTREAM_MAX_DURATION_MS`, default 240 s).** `UPSTREAM_TIMEOUT_MS` only limits

@@ -2,9 +2,10 @@ import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
 import { PassThrough, Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { errorBody } from '../errors.ts';
-import { chatRequest, type ChatBody } from '../request-body.ts';
+import { chatRequest } from '../request-body.ts';
 import { usageSettler, type UsageSettler } from '../usage/settle.ts';
 import { SseUsageTap, usageFromBody } from '../usage/sse-usage.ts';
+import { logAuthRejected, providerAuthMessage, tryJson } from '../providers/common.ts';
 import type { Upstream } from '../upstream.ts';
 
 const TIMEOUT_CODES = new Set([
@@ -42,34 +43,6 @@ function upstreamFailure(reply: FastifyReply, err: unknown, refund: UsageSettler
   return reply.code(502).send(errorBody('upstream unreachable', 'gateway_error'));
 }
 
-type Tap = 'none' | 'read' | 'strip';
-
-// What goes upstream for a request, and how the answer's usage is read. A streamed answer only carries
-// token counts if the provider is asked (stream_options.include_usage), and the counts correct the
-// up-front charges. The body is changed as little as possible:
-//   - the client already asked: forwarded untouched, usage read;
-//   - no stream_options: the option is spliced in after the opening brace, so nothing else in the bytes
-//     moves (no JSON round trip, big integers keep their precision); the usage-only chunk the client
-//     did not ask for is stripped from what it receives;
-//   - stream_options with include_usage not true: rewritten through JSON, usage chunk stripped;
-//   - stream_options of any other shape: forwarded untouched and not reconciled (the estimate stays).
-function forwardBody(parsed: ChatBody, raw: Buffer, metered: boolean): { body: Buffer; tap: Tap } {
-  if (!metered || parsed.stream !== true) return { body: raw, tap: 'none' };
-  if (!('stream_options' in parsed)) {
-    const open = raw.indexOf(0x7b);
-    if (open < 0) return { body: raw, tap: 'none' };
-    const splice = Buffer.from('"stream_options":{"include_usage":true},');
-    return { body: Buffer.concat([raw.subarray(0, open + 1), splice, raw.subarray(open + 1)]), tap: 'strip' };
-  }
-  const so = parsed.stream_options;
-  if (typeof so !== 'object' || so === null || Array.isArray(so)) return { body: raw, tap: 'none' };
-  if ((so as { include_usage?: unknown }).include_usage === true) return { body: raw, tap: 'read' };
-  return {
-    body: Buffer.from(JSON.stringify({ ...parsed, stream_options: { ...so, include_usage: true } })),
-    tap: 'strip',
-  };
-}
-
 // Sits last in a streamed answer's pipeline. When the call's total deadline passes it drops the rest of the
 // answer and ends the stream, with one OpenAI-shaped error event first if the answer is an event stream
 // (any other kind of body is ended without adding anything to it).
@@ -97,8 +70,8 @@ const maxDurationEvent = `data: ${JSON.stringify({
   error: { message: 'upstream call exceeded the maximum duration', type: 'gateway_error', code: 'upstream_max_duration' },
 })}\n\n`;
 
-export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs: number; cutDrainMs?: number }> = async (app, opts) => {
-  const { upstream, maxDurationMs } = opts;
+export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs: number; defaultMaxTokens: number; cutDrainMs?: number }> = async (app, opts) => {
+  const { upstream, maxDurationMs, defaultMaxTokens } = opts;
   // After a cut stream's last bytes are written, a client that still hasn't taken them this long is dropped.
   const cutDrainMs = opts.cutDrainMs ?? 5000;
 
@@ -143,8 +116,22 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
     // Usage is needed only when something was charged up front (either plugin may be off).
     const metered = (request.rateLimit ?? null) !== null || (request.budget ?? null) !== null;
     const rawBody = request.body as Buffer;
-    const forward = forwardBody(parsed, rawBody, metered);
-    const upstreamBody = forward.body;
+
+    // Nothing has gone upstream yet, so a request refused here gives back everything it was charged.
+    const refuse = (status: number, message: string, code: string, param?: string) => {
+      settle.refund();
+      return reply.code(status).send({
+        error: { message, type: status >= 500 ? 'gateway_error' : 'invalid_request_error', code, ...(param ? { param } : {}) },
+      });
+    };
+    const target = upstream.resolve(parsed.model);
+    if (!target) return refuse(400, `The model "${parsed.model}" does not exist or is not served by this gateway.`, 'model_not_found', 'model');
+    if (!target.configured) return refuse(503, `The provider for "${parsed.model}" is not configured on this gateway.`, 'provider_not_configured');
+    const adapter = target.adapter;
+    const built = adapter.buildRequest({ body: parsed, raw: rawBody, metered, defaultMaxTokens, apiKey: target.apiKey });
+    if (!built.ok) return refuse(400, built.message, 'unsupported_parameter', built.param);
+    const forward = built.request;
+    const includeUsage = (parsed.stream_options as { include_usage?: unknown } | null | undefined)?.include_usage === true;
 
     const abort = new AbortController();
     // 'close' on the response fires on client disconnect, on normal completion, and when a failed
@@ -197,11 +184,11 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
       reply.code(504).send(errorBody('upstream call exceeded the maximum duration', 'gateway_error', 'upstream_max_duration'));
     let res;
     try {
-      res = await upstream.pool.request({
-        path: upstream.chatPath,
+      res = await target.pool.request({
+        path: target.basePath + forward.path,
         method: 'POST',
-        headers: upstream.headers,
-        body: upstreamBody,
+        headers: forward.headers,
+        body: forward.body,
         signal: abort.signal,
       });
     } catch (err) {
@@ -214,6 +201,39 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
     if (res.statusCode >= 300) settle.refund();
 
     const extraHeaders = passthroughHeaders(res.headers, request.rateLimit != null);
+    const translated = adapter.translates ? adapter : undefined;
+
+    // The provider rejected the gateway's own credential. That is not the caller's doing and the provider's
+    // wording is not the caller's business: they get a generic 502. The log keeps the status and the provider's
+    // error code only, never its message, which can echo part of the key.
+    if (res.statusCode === 401) {
+      let errBody: Buffer;
+      try {
+        errBody = Buffer.from(await res.body.arrayBuffer());
+      } catch (err) {
+        if (deadlineHit) return tooLong();
+        if (abort.signal.aborted) return reply;
+        return upstreamFailure(reply, err, null);
+      }
+      const e = (tryJson(errBody) as { error?: { code?: unknown; type?: unknown; status?: unknown } } | undefined)?.error;
+      const providerCode = [e?.code, e?.type, e?.status].find((v): v is string => typeof v === 'string')?.slice(0, 64);
+      logAuthRejected(reply.log, target.provider, providerCode, res.statusCode);
+      return reply.code(502).send(errorBody(providerAuthMessage(target.provider), 'gateway_error', 'provider_auth_failed'));
+    }
+
+    // A translated provider's error is rewritten into the OpenAI error shape, streamed request or not.
+    if (translated && res.statusCode >= 300) {
+      let errBody: Buffer;
+      try {
+        errBody = Buffer.from(await res.body.arrayBuffer());
+      } catch (err) {
+        if (deadlineHit) return tooLong();
+        if (abort.signal.aborted) return reply;
+        return upstreamFailure(reply, err, null);
+      }
+      const mappedError = translated.mapError(res.statusCode, errBody);
+      return reply.code(mappedError.status).headers(extraHeaders).send(mappedError.body);
+    }
     const contentType = res.headers['content-type'];
     const type = Array.isArray(contentType) ? contentType[0] : contentType;
 
@@ -231,13 +251,13 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
       reply.raw.writeHead(res.statusCode, {
         ...(reply.getHeaders() as Record<string, string | number | string[]>), // rate-limit headers set before the route ran
         ...extraHeaders,
-        ...(type ? { 'content-type': type } : {}),
+        ...(translated ? { 'content-type': 'text/event-stream' } : type ? { 'content-type': type } : {}),
         'cache-control': 'no-cache',
         'x-accel-buffering': 'no',
         'server-timing': `gw-pre;dur=${ms(dispatched - started)}`,
       });
       reply.raw.flushHeaders();
-      guard = new DeadlineGuard(res.statusCode < 300 && /text\/event-stream/i.test(type ?? ''));
+      guard = new DeadlineGuard(res.statusCode < 300 && (translated !== undefined || /text\/event-stream/i.test(type ?? '')));
       // The upstream body feeds the response through a relay, so aborting the upstream at the deadline
       // doesn't tear down the response before the cut has been written.
       relay = new PassThrough();
@@ -252,7 +272,17 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
         }
       });
       try {
-        if (metered && res.statusCode < 300 && forward.tap !== 'none') {
+        if (translated) {
+          // Provider events are converted as they arrive; usage is reported by the translator.
+          const translator = translated.streamTransform({
+            includeUsage,
+            log: reply.log,
+            onUsage: (usage) => {
+              if (metered) settle.used(usage);
+            },
+          });
+          await pipeline(relay, translator, guard, reply.raw);
+        } else if (metered && res.statusCode < 300 && forward.tap !== 'none') {
           // Once bytes are flowing a failure keeps the estimate charged: tokens were partly used.
           const tap = new SseUsageTap(
             (usage) => {
@@ -286,8 +316,20 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
       // stream that fails after bytes were sent). A non-2xx answer was already refunded above.
       return upstreamFailure(reply, err, null);
     }
+    let type2 = type;
+    if (translated && res.statusCode < 300) {
+      try {
+        const answer = translated.parseResponse(payload);
+        payload = Buffer.from(JSON.stringify(answer.openaiBody));
+        type2 = 'application/json';
+        if (metered && answer.usage) settle.used(answer.usage);
+      } catch (err) {
+        // The provider answered 2xx and did the work, but its body is not one the adapter can read.
+        return upstreamFailure(reply, err, null);
+      }
+    }
     const received = performance.now();
-    if (metered && res.statusCode < 300) {
+    if (!translated && metered && res.statusCode < 300) {
       const usage = usageFromBody(payload);
       if (usage) settle.used(usage);
     }
@@ -297,7 +339,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs:
     reply
       .code(res.statusCode)
       .headers(extraHeaders)
-      .header('content-type', type ?? 'application/json');
+      .header('content-type', type2 ?? 'application/json');
     // gw-post is measured last so it covers building the reply, up to the send call.
     const postReceiptMs = performance.now() - received;
     return reply

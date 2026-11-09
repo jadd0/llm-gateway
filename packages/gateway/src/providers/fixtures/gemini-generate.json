@@ -1,0 +1,26 @@
+{
+  "candidates": [
+    {
+      "content": {
+        "role": "model",
+        "parts": [
+          {
+            "text": "Hello! "
+          },
+          {
+            "text": "How can I help you today?"
+          }
+        ]
+      },
+      "finishReason": "STOP",
+      "index": 0
+    }
+  ],
+  "usageMetadata": {
+    "promptTokenCount": 9,
+    "candidatesTokenCount": 11,
+    "totalTokenCount": 27,
+    "thoughtsTokenCount": 7
+  },
+  "modelVersion": "gemini-3.1-flash-lite"
+}

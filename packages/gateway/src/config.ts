@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { parseUsd } from './pricing/prices.ts';
+import { DEFAULT_MODEL_ROUTES, parseModelRoutes, type ModelRoutes } from './providers/router.ts';
 
 // A blank value in an env file (`KEY=`) means "not set", so the default applies.
 const blankAsUnset = (v: unknown) => (typeof v === 'string' && v.trim() === '' ? undefined : v);
@@ -43,8 +44,42 @@ const schema = z
   .object({
     GATEWAY_HOST: z.preprocess(blankAsUnset, z.string().default('127.0.0.1')),
     GATEWAY_PORT: int(8080, 0),
-    OPENAI_BASE_URL: z.preprocess(blankAsUnset, z.url().default('http://127.0.0.1:9000')),
+    // Base URLs carry the API version prefix, as the providers' own SDKs expect; adapters append to them.
+    // A URL with no path is refused: this one carries /v1 (the gateway used to add it), and a leftover
+    // `http://host:port` would send every request to a path the provider does not serve.
+    OPENAI_BASE_URL: z.preprocess(
+      blankAsUnset,
+      z
+        .url()
+        .default('https://api.openai.com/v1')
+        .refine((u) => new URL(u).pathname.replace(/\/+$/, '') !== '', {
+          message:
+            'OPENAI_BASE_URL needs the API version path, as OpenAI\'s SDKs take it: https://api.openai.com/v1 (a proxy: https://host/v1). The gateway no longer adds /v1',
+        }),
+    ),
     OPENAI_API_KEY: z.preprocess(blankAsUnset, z.string().optional()),
+    ANTHROPIC_BASE_URL: z.preprocess(blankAsUnset, z.url().default('https://api.anthropic.com')),
+    ANTHROPIC_API_KEY: z.preprocess(blankAsUnset, z.string().optional()),
+    ANTHROPIC_VERSION: z.preprocess(blankAsUnset, z.string().default('2023-06-01')),
+    GEMINI_BASE_URL: z.preprocess(blankAsUnset, z.url().default('https://generativelanguage.googleapis.com/v1beta')),
+    GEMINI_API_KEY: z.preprocess(blankAsUnset, z.string().optional()),
+    // The mock provider (all three of its formats). It needs no key.
+    MOCK_BASE_URL: z.preprocess(blankAsUnset, z.url().default('http://127.0.0.1:9000')),
+    // Which provider serves a model: "prefix=provider" pairs, the longest matching prefix wins.
+    MODEL_ROUTES: z.preprocess(
+      blankAsUnset,
+      z
+        .string()
+        .default(DEFAULT_MODEL_ROUTES)
+        .transform((v, ctx): ModelRoutes => {
+          const routes = parseModelRoutes(v);
+          if (typeof routes === 'string') {
+            ctx.addIssue({ code: 'custom', message: routes });
+            return [];
+          }
+          return routes;
+        }),
+    ),
     UPSTREAM_CONNECTIONS: int(256, 1),
     UPSTREAM_TIMEOUT_MS: int(30_000, 1),
     // A total deadline per upstream call. UPSTREAM_TIMEOUT_MS only limits silence, so a slow stream
@@ -97,6 +132,13 @@ export interface Config {
   port: number;
   upstreamBaseUrl: string;
   upstreamApiKey: string | undefined;
+  anthropicBaseUrl: string;
+  anthropicApiKey: string | undefined;
+  anthropicVersion: string;
+  geminiBaseUrl: string;
+  geminiApiKey: string | undefined;
+  mockBaseUrl: string;
+  modelRoutes: ModelRoutes;
   upstreamConnections: number;
   upstreamTimeoutMs: number;
   upstreamMaxDurationMs: number;
@@ -133,6 +175,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     port: e.GATEWAY_PORT,
     upstreamBaseUrl: e.OPENAI_BASE_URL,
     upstreamApiKey: e.OPENAI_API_KEY,
+    anthropicBaseUrl: e.ANTHROPIC_BASE_URL,
+    anthropicApiKey: e.ANTHROPIC_API_KEY,
+    anthropicVersion: e.ANTHROPIC_VERSION,
+    geminiBaseUrl: e.GEMINI_BASE_URL,
+    geminiApiKey: e.GEMINI_API_KEY,
+    mockBaseUrl: e.MOCK_BASE_URL,
+    modelRoutes: e.MODEL_ROUTES,
     upstreamConnections: e.UPSTREAM_CONNECTIONS,
     upstreamTimeoutMs: e.UPSTREAM_TIMEOUT_MS,
     upstreamMaxDurationMs: e.UPSTREAM_MAX_DURATION_MS,

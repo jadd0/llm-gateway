@@ -40,6 +40,8 @@ export interface BudgetPluginOptions {
   defaultCapMicros: number;
   /** Output tokens assumed when a request names no max_tokens. */
   defaultMaxTokens: number;
+  /** Whether a model name is served at all. An unroutable name holds nothing: the route answers it with model_not_found. */
+  isRoutable(model: string): boolean;
 }
 
 // Tokens the provider reported, split into the two prices. A usage with only a total (no split) is
@@ -67,6 +69,7 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
     if (!body.ok) return;
 
     const model = body.value.model;
+    if (!opts.isRoutable(model)) return;
     const price = priceFor(model);
     if (price === undefined) {
       refundTokens(request);
