@@ -122,11 +122,14 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     done(null, body),
   );
 
+  // Requests that dispatched at least one attempt: whatever they end as (a 500 included), "0 attempts" is untrue.
+  const sent = new WeakSet<FastifyRequest>();
+
   // A request refused before anything was sent upstream (400, 402, 429 from the budget or rate limiter, ...)
   // still says which model was asked for and that no attempt was made, as the replies of a dispatched
   // request do. Only authenticated requests: a caller refused by the key check learns nothing about models.
   app.addHook('onSend', async (request, reply) => {
-    if (reply.statusCode < 400 || request.tenant === null || reply.hasHeader('x-gateway-attempts')) return;
+    if (reply.statusCode < 400 || request.tenant === null || reply.hasHeader('x-gateway-attempts') || sent.has(request)) return;
     reply.header('x-gateway-attempts', '0');
     const body = Buffer.isBuffer(request.body) ? chatRequest(request) : undefined;
     if (body?.ok) setModelHeader(reply, body.value.model);
@@ -329,6 +332,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
         if (abort.signal.aborted) break; // the deadline or the client came while the breaker was asked
         while (true) {
           attempts++;
+          sent.add(request);
           triesOnModel++;
           state.model = model;
           const attemptStarted = performance.now();

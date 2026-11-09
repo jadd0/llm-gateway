@@ -543,6 +543,21 @@ describe('what counts as a failure, and where a failure leads', { timeout: 60_00
     expect(sent).toBeLessThan(10 * 1024 * 1024); // the provider was cut off, not drained
   }, 15_000);
 
+  it('a 500 raised after an attempt was made does not claim zero attempts', async () => {
+    const broken = (b: Breaker): Breaker => ({
+      acquire: (t) => b.acquire(t),
+      record: () => {
+        throw new Error('breaker exploded');
+      },
+    });
+    const gw = await gateway({}, { wrapBreaker: broken });
+    const s = await tenant();
+    const res = await send(gw, s.key);
+    expect(res.status).toBe(500);
+    expect(A.hits).toBeGreaterThanOrEqual(1);
+    expect(res.headers.get('x-gateway-attempts')).toBeNull();
+  });
+
   it('402 before dispatch carries x-gateway-model and attempts 0', async () => {
     const gw = await gateway();
     const broke = await tenant(undefined, 1); // a cap of one micro-USD: every hold is refused
