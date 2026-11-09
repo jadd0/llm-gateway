@@ -49,6 +49,8 @@ export interface SpendEntry {
   costMicros: number;
   estimated: boolean;
   savedMicros: number;
+  /** Which cache served a hit; absent for a charge or refund, and for a hit queued before the semantic cache (exact). */
+  cacheKind?: 'exact' | 'semantic';
 }
 
 export type StreamEntry = { kind: 'log'; entry: LogEntry } | { kind: 'spend'; entry: SpendEntry };
@@ -73,7 +75,7 @@ export function toSpendFields(e: SpendEntry): string[] {
     'v', ENTRY_VERSION, 'k', 'spend',
     'id', e.id, 'sk', e.kind, 'tn', e.tenantId, 'pe', e.period, 'md', e.model,
     'pt', str(e.promptTokens), 'ct', str(e.completionTokens), 'co', str(e.costMicros),
-    'es', str(e.estimated), 'sv', str(e.savedMicros),
+    'es', str(e.estimated), 'sv', str(e.savedMicros), 'ck', e.cacheKind ?? '',
   ];
 }
 
@@ -134,12 +136,14 @@ export function fromStreamFields(fields: string[]): StreamEntry {
     if (sk !== 'charge' && sk !== 'refund' && sk !== 'hit') throw new Error('unknown spend kind');
     const period = m.get('pe') ?? '';
     if (!PERIOD.test(period)) throw new Error('field pe is not a period');
+    const ck = orNull(m.get('ck'));
+    if (ck !== null && ck !== 'exact' && ck !== 'semantic') throw new Error('unknown cache kind');
     return {
       kind: 'spend',
       entry: {
         kind: sk, id: uuid(m, 'id'), tenantId: uuid(m, 'tn'), period, model: m.get('md') ?? '',
         promptTokens: int(m, 'pt'), completionTokens: int(m, 'ct'), costMicros: int(m, 'co'),
-        estimated: bool(m, 'es'), savedMicros: int(m, 'sv'),
+        estimated: bool(m, 'es'), savedMicros: int(m, 'sv'), ...(ck ? { cacheKind: ck } : {}),
       },
     };
   }

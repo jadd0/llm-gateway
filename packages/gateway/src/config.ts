@@ -159,6 +159,26 @@ const schema = z
     CACHE_WAIT_MS: int(120_000, 1),
     CACHE_REDIS_TIMEOUT_MS: int(50, 1),
     CACHE_REPLAY_CHUNK_CHARS: int(64, 1),
+    SEMANTIC_ENABLED: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
+    SEMANTIC_THRESHOLD: z.preprocess(blankAsUnset, z.coerce.number().gt(0).lte(1).default(0.95)),
+    SEMANTIC_DIMENSIONS: int(1024, 1),
+    VOYAGE_API_KEY: z.preprocess(blankAsUnset, z.string().optional()),
+    VOYAGE_BASE_URL: z.preprocess(blankAsUnset, z.url().default('https://api.voyageai.com/v1')),
+    VOYAGE_MODEL: z.preprocess(blankAsUnset, z.string().default('voyage-4-lite')),
+    SEMANTIC_VOYAGE_TIMEOUT_MS: int(300, 1),
+    OLLAMA_URL: z.preprocess(blankAsUnset, z.url().default('http://127.0.0.1:11434')),
+    SEMANTIC_LOCAL_MODEL: z.preprocess(blankAsUnset, z.string().default('hf.co/MongoDB/voyage-4-nano-GGUF:Q8_0')),
+    SEMANTIC_LOCAL_TIMEOUT_MS: int(200, 1),
+    SEMANTIC_CROSS_MODEL: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('false')),
+    SEMANTIC_INPUT_TYPE: z.preprocess(blankAsUnset, z.enum(['none', 'query']).default('none')),
+    SEMANTIC_MAX_INPUT_CHARS: int(2000, 1),
+    SEMANTIC_PG_TIMEOUT_MS: int(100, 1),
+    SEMANTIC_PG_POOL: int(4, 1),
+    SEMANTIC_PG_FILL_POOL: int(2, 1),
+    SEMANTIC_GUARD_TOKENSET: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
+    SEMANTIC_GUARD_MAX_DIFF: int(2, 0),
+    SEMANTIC_FILL_QUEUE: int(1000, 1),
+    SEMANTIC_CLEANUP_S: int(300, 1),
     // stream: every request is queued in a Redis stream and written to Postgres by the log worker.
     // inline: one awaited Postgres insert per request; the "before" of the logging benchmark, nothing else.
     LOG_MODE: z.preprocess(blankAsUnset, z.enum(['stream', 'inline']).default('stream')),
@@ -223,6 +243,10 @@ const schema = z
   .refine((e) => e.CACHE_ENABLED === 'false' || e.CACHE_WAIT_MS >= e.CACHE_LOCK_MS, {
     message: 'CACHE_WAIT_MS must not be shorter than CACHE_LOCK_MS: a waiter should outlast one lock lifetime',
     path: ['CACHE_WAIT_MS'],
+  })
+  .refine((e) => e.SEMANTIC_DIMENSIONS === 1024, {
+    message: 'SEMANTIC_DIMENSIONS must be 1024: semantic_cache.embedding is vector(1024), and changing it needs a migration',
+    path: ['SEMANTIC_DIMENSIONS'],
   })
   .refine((e) => e.BUDGET_ENABLED === 'false' || e.BUDGET_RESERVATION_TTL_S * 1000 > e.UPSTREAM_MAX_DURATION_MS + 30_000, {
     message:
@@ -308,6 +332,37 @@ export interface Config {
   cacheRedisTimeoutMs: number;
   /** Characters (code points) per content chunk when a cached answer is replayed as a stream. */
   cacheReplayChunkChars: number;
+  /** The semantic step needs the response cache too: it reads the answer from there. */
+  semanticEnabled: boolean;
+  /** Cosine similarity at or above which a stored prompt's answer is served. */
+  semanticThreshold: number;
+  semanticDimensions: number;
+  /** Blank: the API embedder is not used and every lookup embeds locally. */
+  voyageApiKey: string | undefined;
+  voyageBaseUrl: string;
+  voyageModel: string;
+  voyageTimeoutMs: number;
+  ollamaUrl: string;
+  semanticLocalModel: string;
+  semanticLocalTimeoutMs: number;
+  /** True: a stored vector is compared with a query made by the other embedder; false: only with its own. */
+  semanticCrossModel: boolean;
+  /** 'query' puts the embedding model's query prompt in front of the text; 'none' embeds it bare. */
+  semanticInputType: 'none' | 'query';
+  /** A last user message longer than this is not embedded (the semantic step is skipped). */
+  semanticMaxInputChars: number;
+  /** The nearest-neighbour query's budget; slower is a miss. */
+  semanticPgTimeoutMs: number;
+  /** Connections of the pool the semantic cache's queries use, so auth and budgets never queue behind them. */
+  semanticPgPool: number;
+  /** Connections for its fills, removals and cleanup, apart from the lookup pool. */
+  semanticPgFillPool: number;
+  /** Whether the content-word guard runs (the number, quote, name and negation guards always do). */
+  semanticGuardTokenSet: boolean;
+  /** The content-word guard: the two prompts' word sets may differ (symmetric difference) by at most this many words. */
+  semanticGuardMaxDiff: number;
+  semanticFillQueue: number;
+  semanticCleanupS: number;
   logMode: 'stream' | 'inline';
   logGroup: string;
   logBatchSize: number;
@@ -398,6 +453,26 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cacheWaitMs: e.CACHE_WAIT_MS,
     cacheRedisTimeoutMs: e.CACHE_REDIS_TIMEOUT_MS,
     cacheReplayChunkChars: e.CACHE_REPLAY_CHUNK_CHARS,
+    semanticEnabled: e.SEMANTIC_ENABLED === 'true' && e.CACHE_ENABLED === 'true',
+    semanticThreshold: e.SEMANTIC_THRESHOLD,
+    semanticDimensions: e.SEMANTIC_DIMENSIONS,
+    voyageApiKey: e.VOYAGE_API_KEY,
+    voyageBaseUrl: e.VOYAGE_BASE_URL.replace(/\/+$/, ''),
+    voyageModel: e.VOYAGE_MODEL,
+    voyageTimeoutMs: e.SEMANTIC_VOYAGE_TIMEOUT_MS,
+    ollamaUrl: e.OLLAMA_URL.replace(/\/+$/, ''),
+    semanticLocalModel: e.SEMANTIC_LOCAL_MODEL,
+    semanticLocalTimeoutMs: e.SEMANTIC_LOCAL_TIMEOUT_MS,
+    semanticCrossModel: e.SEMANTIC_CROSS_MODEL === 'true',
+    semanticInputType: e.SEMANTIC_INPUT_TYPE,
+    semanticMaxInputChars: e.SEMANTIC_MAX_INPUT_CHARS,
+    semanticPgTimeoutMs: e.SEMANTIC_PG_TIMEOUT_MS,
+    semanticPgPool: e.SEMANTIC_PG_POOL,
+    semanticPgFillPool: e.SEMANTIC_PG_FILL_POOL,
+    semanticGuardTokenSet: e.SEMANTIC_GUARD_TOKENSET === 'true',
+    semanticGuardMaxDiff: e.SEMANTIC_GUARD_MAX_DIFF,
+    semanticFillQueue: e.SEMANTIC_FILL_QUEUE,
+    semanticCleanupS: e.SEMANTIC_CLEANUP_S,
     logMode: e.LOG_MODE,
     logGroup: e.LOG_GROUP,
     logBatchSize: e.LOG_BATCH_SIZE,

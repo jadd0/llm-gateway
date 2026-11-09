@@ -6,7 +6,7 @@ import { apiKeys, spendLedger, tenants, tenantSpend } from '../db/schema.ts';
 import { isPeriod, periodOf } from '../budget/period.ts';
 import { formatUsd, parseUsd } from '../pricing/prices.ts';
 import { generateKey, hashKey, keyPrefix, KEY_PREFIX_LENGTH } from '../auth/keys.ts';
-import { keyStoreFromConfig, type KeyStore } from '../auth/key-store.ts';
+import { keyStoreFromConfig, type KeyStore, type TenantFlag } from '../auth/key-store.ts';
 import { createRedis } from '../redis.ts';
 
 export class CliError extends Error {}
@@ -138,19 +138,19 @@ export async function setBudget(db: Db['db'], keyStore: KeyStore, tenantName: st
   return { tenant: tenantName, micros, cached: r.cached };
 }
 
-// "on" puts the tenant in the shared response-cache pool, "off" back in its own. Anything else is refused.
-export function parseSharing(raw: string | undefined): boolean {
+// "on" or "off" for a tenant switch (set-cache-sharing, set-semantic-cache). Anything else is refused.
+export function parseOnOff(raw: string | undefined, command: string): boolean {
   if (raw === 'on') return true;
   if (raw === 'off') return false;
-  throw new CliError('set-cache-sharing needs "on" or "off"');
+  throw new CliError(`${command} needs "on" or "off"`);
 }
 
-// Switches a tenant between its own response-cache scope and the shared pool.
-export async function setCacheSharing(db: Db['db'], keyStore: KeyStore, tenantName: string, shared: boolean) {
+// Sets one of a tenant's on/off switches: response-cache sharing, or the semantic cache (off until a tenant opts in).
+export async function setTenantFlag(db: Db['db'], keyStore: KeyStore, tenantName: string, flag: TenantFlag, value: boolean) {
   const [tenant] = await db.select({ id: tenants.id }).from(tenants).where(eq(tenants.name, tenantName));
   if (!tenant) throw new CliError(`no tenant named "${tenantName}"`);
-  const r = await keyStore.setCacheShared(tenant.id, shared);
-  return { tenant: tenantName, shared, cached: r.cached };
+  const r = await keyStore.setTenantFlag(tenant.id, flag, value);
+  return { tenant: tenantName, value, cached: r.cached };
 }
 
 // What a tenant has spent in a UTC month (default: this one), from the settled-spend record.
@@ -167,7 +167,12 @@ export async function showSpend(db: Db['db'], tenantName: string, period = perio
     .where(and(eq(tenantSpend.tenantId, tenant.id), eq(tenantSpend.period, period)));
   // Cache hits are zero-cost rows in the same ledger; what they saved is what the same usage would have cost.
   const [hits] = await db
-    .select({ hits: sql<string>`count(*)`, saved: sql<string>`coalesce(sum(${spendLedger.savedMicros}), 0)` })
+    .select({
+      hits: sql<string>`count(*)`,
+      exact: sql<string>`count(*) filter (where ${spendLedger.cacheKind} = 'exact')`,
+      semantic: sql<string>`count(*) filter (where ${spendLedger.cacheKind} = 'semantic')`,
+      saved: sql<string>`coalesce(sum(${spendLedger.savedMicros}), 0)`,
+    })
     .from(spendLedger)
     .where(and(eq(spendLedger.tenantId, tenant.id), eq(spendLedger.period, period), eq(spendLedger.cached, true)));
   return {
@@ -176,6 +181,8 @@ export async function showSpend(db: Db['db'], tenantName: string, period = perio
     spentMicros: row?.spent ?? 0,
     capMicros: tenant.cap,
     cacheHits: Number(hits?.hits ?? 0),
+    exactHits: Number(hits?.exact ?? 0),
+    semanticHits: Number(hits?.semantic ?? 0),
     savedMicros: Number(hits?.saved ?? 0),
   };
 }
@@ -187,6 +194,7 @@ const USAGE = `usage:
   keys set-limits <prefix> [--rpm <n|default>] [--tpm <n|default>]
   keys set-budget <tenant> --monthly-usd <amount|default>
   keys set-cache-sharing <tenant> on|off
+  keys set-semantic-cache <tenant> on|off
   keys show-spend <tenant> [--period YYYY-MM]
   keys revoke-key <prefix>
   keys list-keys [tenant]`;
@@ -297,15 +305,19 @@ async function main(argv: string[]) {
       }
       return;
     }
-    case 'set-cache-sharing': {
+    case 'set-cache-sharing':
+    case 'set-semantic-cache': {
       if (!args[0] || args.length !== 2) throw new CliError(USAGE);
       const tenant = args[0];
-      const shared = parseSharing(args[1]);
+      const sharing = command === 'set-cache-sharing';
+      const value = parseOnOff(args[1], command);
       const config = loadCacheConfig();
       const redis = config.authCache === 'redis' && config.redisUrl ? createRedis(config.redisUrl) : null;
       try {
-        const r = await withDb(config.databaseUrl, (db) => setCacheSharing(db, keyStoreFromConfig(config, db, redis), tenant, shared));
-        console.log(`${r.tenant}: response cache ${r.shared ? 'shared' : 'private'}`);
+        const r = await withDb(config.databaseUrl, (db) =>
+          setTenantFlag(db, keyStoreFromConfig(config, db, redis), tenant, sharing ? 'cacheShared' : 'semanticCache', value),
+        );
+        console.log(sharing ? `${r.tenant}: response cache ${r.value ? 'shared' : 'private'}` : `${r.tenant}: semantic cache ${r.value ? 'on' : 'off'}`);
         if (config.authCache === 'redis' && (config.redisUrl === undefined || (redis !== null && !r.cached))) {
           // The database has the new setting; a cached copy of a key keeps the old one until it expires.
           throw new CliError(
@@ -323,7 +335,7 @@ async function main(argv: string[]) {
       const tenant = positionals[0];
       const r = await withDb(loadDbConfig().databaseUrl, (db) => showSpend(db, tenant, values.period));
       const cap = r.capMicros === null ? 'default cap' : 'cap ' + DOLLAR + formatUsd(r.capMicros);
-      console.log(`${r.tenant} ${r.period}: spent ${DOLLAR}${formatUsd(r.spentMicros)} (${cap}); cache hits ${r.cacheHits}, saved ${DOLLAR}${formatUsd(r.savedMicros)}`);
+      console.log(`${r.tenant} ${r.period}: spent ${DOLLAR}${formatUsd(r.spentMicros)} (${cap}); cache hits ${r.cacheHits} (exact ${r.exactHits}, semantic ${r.semanticHits}), saved ${DOLLAR}${formatUsd(r.savedMicros)}`);
       return;
     }
     case 'revoke-key': {

@@ -15,7 +15,7 @@ services:
       retries: 10
 
   postgres:
-    image: pgvector/pgvector:pg17
+    image: pgvector/pgvector:0.8.7-pg17
     ports: ["127.0.0.1:5436:5432"]
     environment:
       POSTGRES_USER: gateway
@@ -27,5 +27,27 @@ services:
       interval: 2s
       retries: 10
 
+  # The local embedder (CPU): voyage-4-nano, the open-weights model in the Voyage 4 embedding space, so its
+  # vectors are comparable with voyage-4-lite's. Used when VOYAGE_API_KEY is blank or Voyage is slow or down.
+  ollama:
+    image: ollama/ollama:0.40.15
+    ports: ["127.0.0.1:11434:11434"]
+    volumes: ["ollama:/root/.ollama"]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 3s
+      retries: 20
+
+  # One-shot: pulls the GGUF (about 374 MB) into the ollama volume and exits. A no-op once it is there.
+  ollama-pull:
+    image: ollama/ollama:0.40.15
+    depends_on:
+      ollama: { condition: service_healthy }
+    environment:
+      OLLAMA_HOST: ollama:11434
+    entrypoint: ["ollama", "pull", "hf.co/MongoDB/voyage-4-nano-GGUF:Q8_0"]
+    restart: "no"
+
 volumes:
   pgdata:
+  ollama:

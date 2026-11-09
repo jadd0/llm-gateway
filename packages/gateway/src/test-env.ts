@@ -37,10 +37,18 @@ export function testConfig(overrides: Record<string, string> = {}): Config {
     BUDGET_ENABLED: 'false',
     // Likewise the response cache: off unless a test asks, so repeated identical requests reach the upstream.
     CACHE_ENABLED: 'false',
+    // And the semantic step: off unless a test asks, and never reaching a real embedder or a developer's key.
+    SEMANTIC_ENABLED: 'false',
+    VOYAGE_API_KEY: '',
     // One attempt per model and a breaker that does not open, unless a test asks for retries and breaking, so
     // tests of other parts see one upstream call per request.
     RETRY_MAX_ATTEMPTS_PER_MODEL: '1',
     BREAKER_MIN_FAILURES: '1000000',
+    // Test files run in parallel against one Postgres with a hundred connections; a gateway under test does not need 20.
+    DB_POOL_SIZE: '5',
+    // A budget that sees Redis time out declares an outage and moves the one shared epoch, under every
+    // other test file's balances. On a loaded machine 50 ms is routine, so tests wait longer unless they ask.
+    BUDGET_REDIS_TIMEOUT_MS: '5000',
     ...overrides,
     OPENAI_BASE_URL: upstreamUrl,
     // The mock adds its own /v1 for the OpenAI format, so it gets the origin. Tests stand one stub in for

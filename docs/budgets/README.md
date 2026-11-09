@@ -13,7 +13,7 @@ ends, the reservation is replaced by what was really spent. Over the cap the ans
 
 The response cache runs before the budget step, so a hit reserves nothing and is served even when the cap is spent. It
 writes one `spend_ledger` row with `cached = true`, `cost_micros = 0` and `saved_micros`; `tenant_spend` is not touched,
-so the balance is exactly what it was. See [../cache/README.md](../cache/README.md).
+so the balance is exactly what it was. A hit found by meaning has the same row with `cache_kind = 'semantic'`; `keys show-spend` splits the two. See [../cache/README.md](../cache/README.md) and [../semantic-cache/README.md](../semantic-cache/README.md).
 
 ## Reserve, then settle
 
