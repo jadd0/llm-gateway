@@ -193,7 +193,7 @@ describe('semantic store on a private table', () => {
   for (const iterativeScan of [true, false]) {
     it(`a scope and context with many rows is searched exactly (${iterativeScan ? 'pgvector 0.8 iterative scan' : 'before 0.8: index off, exact sort'})`, async () => {
       // exactMax 3: the 6 rows below take the second path.
-      const { store: own } = open(stingy, { exactMax: 3, pgvector: { version: iterativeScan ? '0.8.7' : '0.7.4', iterativeScan } });
+      const { store: own } = open(iterativeScan ? adverse : [...stingy, '-c enable_seqscan=off'], { exactMax: 3, pgvector: { version: iterativeScan ? '0.8.7' : '0.7.4', iterativeScan } });
       await crowd(own, 1500);
       const scoped = `${iterativeScan}`;
       for (const [i, deg] of [90, 85, 75, 60, 55, 50].entries()) await own.upsert(row(`many-${scoped}`, 'm', `m${i}`, angle(deg)));
