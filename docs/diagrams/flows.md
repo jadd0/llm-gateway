@@ -18,3 +18,4 @@ lines verbatim; for any plan in the branch's diff, a flow line missing from this
 - Chat completion passthrough → `docs/gateway/chat-passthrough.html` → `packages/gateway/src/{routes/chat.ts,upstream.ts}`
 - API key check → `docs/auth/api-key-check.html` → `packages/gateway/src/auth/{plugin.ts,key-store.ts}`
 - API key management (CLI) → `docs/auth/api-key-check.html` → `packages/gateway/src/cli/keys.ts`
+- Rate limit check and usage reconcile → `docs/rate-limiter/token-bucket.html` → `packages/gateway/src/{ratelimit/plugin.ts,ratelimit/limiter.ts,ratelimit/token-bucket.lua,ratelimit/token-bucket-adjust.lua,usage/estimate.ts,usage/sse-usage.ts}`
