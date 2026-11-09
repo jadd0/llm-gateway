@@ -33,6 +33,8 @@ Format — one entry per decision under its category, newest last, ids never reu
   Src: founder chose "Fall back to Postgres" · Code: packages/gateway/src/budget/pg-ledger.ts
 - **D-019** 2026-11-09 · founder · active — Budgets are monthly caps that reset on the 1st of each UTC calendar month. Why: matches how API plans work.
   Src: founder chose "Monthly, resets"
+- **D-023** 2026-11-09 · loop default · active — If neither Redis nor Postgres can decide a budget reservation, the request is refused with 503 budget_unavailable (fail closed), and requests refused for budget hand back their rate-limit tokens. Why: D-018 keeps spend capped; with both stores down there is no safe way to admit a paid call.
+  Src: .product/plans/pr-5.md "Notes from the build" · Code: packages/gateway/src/budget/budget.ts
 
 ## Data, privacy & legal
 - **D-011** 2026-11-09 · founder · active — API keys are stored only as HMAC-SHA256(server pepper, key) via Node's built-in crypto, never plaintext and not bcrypt/argon2. Why: keys are 256-bit random, so slow hashing adds per-request latency for no security gain.
