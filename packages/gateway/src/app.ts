@@ -95,6 +95,7 @@ export function buildApp(
         redisTimeoutMs: config.budgetRedisTimeoutMs,
         epochRefreshS: config.budgetEpochRefreshS,
         outageFailures: config.budgetOutageFailures,
+        sweepIntervalS: config.budgetSweepIntervalS,
         ...(extra.budgetClock ? { clock: extra.budgetClock } : {}),
         ...(extra.budgetPgLedger ? { pgLedger: extra.budgetPgLedger } : {}),
       },
@@ -102,6 +103,6 @@ export function buildApp(
       defaultMaxTokens: config.rateLimitDefaultMaxTokens,
     });
   }
-  app.register(chatRoutes, { upstream });
+  app.register(chatRoutes, { upstream, maxDurationMs: config.upstreamMaxDurationMs });
   return app;
 }

@@ -134,12 +134,34 @@ describe('postgres ledger', { timeout: 120_000 }, () => {
   it('recording the same request twice charges once', async () => {
     const t = await newTenant();
     const e = entry(t, 500);
-    expect(await ledger.settle(e.requestId, e)).toMatchObject({ recorded: true, charges: 1 });
-    expect(await ledger.settle(e.requestId, e)).toMatchObject({ recorded: false });
-    expect(await ledger.settle(e.requestId, { ...e, costMicros: 9999 })).toMatchObject({ recorded: false });
-    expect(await ledger.spent(t, P)).toBe(500);
+    expect(await ledger.settle(e.requestId, e)).toMatchObject({ recorded: true, charges: 1, spent: 500 });
+    // A repeat (a retry after a lost reply) is not charged again but still reports the current totals, which
+    // include the charge, so the live balance can be corrected from it.
+    await ledger.settle(randomUUID(), entry(t, 70)); // someone else's charge lands in between
+    expect(await ledger.settle(e.requestId, e)).toMatchObject({ recorded: false, spent: 570, charges: 2 });
+    expect(await ledger.settle(e.requestId, { ...e, costMicros: 9999 })).toMatchObject({ recorded: false, spent: 570, charges: 2 });
+    await ledger.settle(randomUUID(), null);
+    expect(await ledger.spent(t, P)).toBe(570);
     const rows = await handle.db.execute(sql`select count(*) as n from spend_ledger where tenant_id = ${t}`);
-    expect(Number(rows.rows[0]!.n)).toBe(1);
+    expect(Number(rows.rows[0]!.n)).toBe(2);
+  });
+
+  it('holds go with their tenant, and the sweep deletes only lapsed ones, at most `limit` per call', async () => {
+    const gone = await newTenant();
+    await ledger.hold(reserveArgs(gone, 100, 1000));
+    expect(await heldRows(gone)).toBe(1);
+    await handle.db.execute(sql`delete from tenants where id = ${gone}`);
+    expect(await heldRows(gone)).toBe(0); // on delete cascade
+
+    const t = await newTenant();
+    const live = reserveArgs(t, 100, 1000);
+    await ledger.hold(live);
+    for (let i = 0; i < 3; i++) await ledger.hold(reserveArgs(t, 10, 1000, { ttlMs: -60_000 }));
+    expect(await ledger.sweepExpired(0)).toBe(0);
+    let removed = 0;
+    while ((await heldRows(t)) > 1) removed += await ledger.sweepExpired(1);
+    expect(removed).toBeGreaterThanOrEqual(3);
+    expect(await heldRows(t)).toBe(1); // the live one survived
   });
 
   it('an expired hold does not count against the cap', async () => {

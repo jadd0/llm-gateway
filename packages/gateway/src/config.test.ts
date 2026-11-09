@@ -9,14 +9,18 @@ const env = (extra: Record<string, string>) => ({
 });
 
 describe('budget settings', () => {
-  it('a reservation TTL that does not outlast the upstream timeout stops the gateway starting', () => {
-    expect(() => loadConfig(env({ BUDGET_RESERVATION_TTL_S: '30', UPSTREAM_TIMEOUT_MS: '30000' }))).toThrow(
-      /BUDGET_RESERVATION_TTL_S must be longer than UPSTREAM_TIMEOUT_MS/,
-    );
-    expect(() => loadConfig(env({ BUDGET_RESERVATION_TTL_S: '5', UPSTREAM_TIMEOUT_MS: '30000' }))).toThrow();
-    expect(loadConfig(env({ BUDGET_RESERVATION_TTL_S: '31', UPSTREAM_TIMEOUT_MS: '30000' })).budgetReservationTtlS).toBe(31);
+  it('a reservation TTL that does not outlast the longest upstream call plus 30 s stops the gateway starting', () => {
+    // The longest a call can last is UPSTREAM_MAX_DURATION_MS; its hold needs 30 s more to be settled in.
+    const bad = { BUDGET_RESERVATION_TTL_S: '270', UPSTREAM_MAX_DURATION_MS: '240000' };
+    expect(() => loadConfig(env(bad))).toThrow(/BUDGET_RESERVATION_TTL_S must be longer than UPSTREAM_MAX_DURATION_MS/);
+    expect(() => loadConfig(env({ BUDGET_RESERVATION_TTL_S: '5', UPSTREAM_MAX_DURATION_MS: '240000' }))).toThrow();
+    expect(loadConfig(env({ BUDGET_RESERVATION_TTL_S: '271', UPSTREAM_MAX_DURATION_MS: '240000' })).budgetReservationTtlS).toBe(271);
+    // The idle timeout is not what the hold must outlast.
+    expect(loadConfig(env({ UPSTREAM_TIMEOUT_MS: '600000' })).upstreamTimeoutMs).toBe(600_000);
     // Budgets off: nothing to hold, nothing to check.
-    expect(loadConfig(env({ BUDGET_ENABLED: 'false', BUDGET_RESERVATION_TTL_S: '1', UPSTREAM_TIMEOUT_MS: '30000' })).budgetEnabled).toBe(false);
+    expect(loadConfig(env({ BUDGET_ENABLED: 'false', BUDGET_RESERVATION_TTL_S: '1' })).budgetEnabled).toBe(false);
+    // The default total deadline is covered by the default hold.
+    expect(loadConfig(env({}))).toMatchObject({ upstreamMaxDurationMs: 240_000, budgetReservationTtlS: 300 });
   });
 
   it('defaults, and the monthly cap is read as exact micro-USD', () => {

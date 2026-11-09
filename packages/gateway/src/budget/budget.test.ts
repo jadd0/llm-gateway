@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { Redis } from 'ioredis';
 import { sql } from 'drizzle-orm';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
@@ -15,7 +15,9 @@ const P = periodOf(Date.now());
 let handle: Db;
 let redis: Redis;
 let pgl: PgLedger;
-const faults = { down: false, failSettle: 0 };
+const faults: { down: boolean; failSettle: number; beforeReserve: (() => Promise<void>) | null; reserveRunsThenFails: boolean } = {
+  down: false, failSettle: 0, beforeReserve: null, reserveRunsThenFails: false,
+};
 const tenantIds: string[] = [];
 const open: Budget[] = [];
 
@@ -34,6 +36,15 @@ const flaky = new Proxy({} as Redis, {
           return gone();
         };
       }
+      if (prop === 'budReserve' && (faults.beforeReserve || faults.reserveRunsThenFails)) {
+        return async (...a: unknown[]) => {
+          await faults.beforeReserve?.();
+          const out = await (v as (...x: unknown[]) => Promise<unknown>).apply(redis, a);
+          // The script ran, but the client gives up on the answer (a timeout): the hold exists in Redis.
+          if (faults.reserveRunsThenFails) return gone();
+          return out;
+        };
+      }
     }
     return typeof v === 'function' ? v.bind(redis) : v;
   },
@@ -47,6 +58,8 @@ beforeAll(() => {
 afterEach(async () => {
   faults.down = false;
   faults.failSettle = 0;
+  faults.beforeReserve = null;
+  faults.reserveRunsThenFails = false;
   for (const b of open.splice(0)) await b.close();
 });
 afterAll(async () => {
@@ -302,18 +315,156 @@ describe('budget', { timeout: 120_000 }, () => {
     expect((await redisBal(t, h.epoch)).reserved).toBe(100);
   });
 
-  it('a failed Postgres hold insert refuses the request and releases the Redis hold', async () => {
+  it('a failed Postgres hold insert refuses the request before Redis is asked, so nothing is held anywhere', async () => {
     const t = await newTenant();
     const pgLedger: PgLedger = { ...pgl, hold: () => Promise.reject(new Error('connection reset')) };
     const budget = await newBudget({ pgLedger });
     const e = budget.epoch();
-    // The cap fits exactly one hold; if the Redis hold of the failed attempts leaked, the second would be refused.
     expect((await budget.reserve(req(t, 1000, 1000))).status).toBe('unavailable');
-    await budget.close(); // waits for the release
-    expect(await redisBal(t, e)).toMatchObject({ reserved: 0, spent: 0 });
+    await budget.close();
+    expect(await redis.exists(`${prefix}bud:{${t}}:${P}:${e}`)).toBe(0);
     expect(await count('budget_reservations', t)).toBe(0);
+    // The cap fits exactly one hold, and a healthy instance gets it.
     const healthy = await newBudget();
     expect((await healthy.reserve(req(t, 1000, 1000))).status).toBe('allowed');
+  });
+
+  it('the Postgres hold is written before Redis decides: a snapshot taken in between includes it', async () => {
+    const t = await newTenant();
+    const budget = await newBudget();
+    let seen: Awaited<ReturnType<PgLedger['snapshot']>> | null = null;
+    faults.beforeReserve = async () => {
+      seen = await pgl.snapshot(t, P);
+    };
+    const h = allowed(await budget.reserve(req(t, 1000, 5000)));
+    expect(seen).not.toBeNull();
+    expect(seen!.holds).toEqual([expect.objectContaining({ id: h.id, amount: 1000 })]);
+  });
+
+  it('a hold Redis refuses is removed from Postgres before the refusal is returned', async () => {
+    const t = await newTenant();
+    const budget = await newBudget();
+    allowed(await budget.reserve(req(t, 1000, 1500)));
+    expect((await budget.reserve(req(t, 1000, 1500))).status).toBe('denied');
+    expect((await budget.reserve(req(t, 1000, 1500))).status).toBe('denied');
+    expect(await count('budget_reservations', t)).toBe(1);
+  });
+
+  it('a request decided on Postgres after its hold was written is counted once', async () => {
+    const t = await newTenant();
+    const budget = await newBudget({ outageFailures: 1 });
+    faults.down = true;
+    // Two holds of 1000 fill a 2000 cap exactly; if the first were counted twice the second would be refused.
+    const first = allowed(await budget.reserve(req(t, 1000, 2000)));
+    const second = allowed(await budget.reserve(req(t, 1000, 2000)));
+    expect([first.path, second.path]).toEqual(['postgres', 'postgres']);
+    expect((await budget.reserve(req(t, 1, 2000))).status).toBe('denied');
+    expect(await count('budget_reservations', t)).toBe(2);
+  });
+
+  it('while the epoch bump is failing or pending, reserves stay on Postgres even though Redis answers; the first one after the bump rebuilds the new key', async () => {
+    const t = await newTenant();
+    let failing = true;
+    let gate: Promise<void> | null = null;
+    const pgLedger: PgLedger = {
+      ...pgl,
+      bumpEpoch: async (observed) => {
+        if (failing) throw new Error('connection reset');
+        if (gate) await gate;
+        return pgl.bumpEpoch(observed);
+      },
+    };
+    const budget = await newBudget({ pgLedger, outageFailures: 1 });
+    const e0 = budget.epoch();
+    const keyAt = (e: number) => `${prefix}bud:{${t}}:${P}:${e}`;
+    faults.down = true;
+    expect(allowed(await budget.reserve(req(t, 100, 100_000))).path).toBe('postgres'); // outage declared, the bump fails
+    faults.down = false; // Redis is back, but the new epoch is not in place
+    for (let i = 0; i < 3; i++) {
+      expect(allowed(await budget.reserve(req(t, 100, 100_000))).path).toBe('postgres');
+      expect(budget.mode()).toBe('postgres');
+      expect(budget.epoch()).toBe(e0);
+    }
+    expect(await redis.exists(keyAt(e0), keyAt(e0 + 1))).toBe(0); // Redis was not used at all
+    // The bump now works, but slowly: the reserve waits for it and does not touch the old epoch meanwhile.
+    failing = false;
+    let release!: () => void;
+    gate = new Promise<void>((r) => (release = r));
+    let done = false;
+    const next = budget.reserve(req(t, 100, 100_000)).then((r) => ((done = true), r));
+    for (let i = 0; i < 30; i++) await new Promise((r) => setImmediate(r));
+    expect(done).toBe(false);
+    expect(await redis.exists(keyAt(e0), keyAt(e0 + 1))).toBe(0);
+    release();
+    const back = allowed(await next);
+    expect(back.path).toBe('redis');
+    expect(budget.mode()).toBe('redis');
+    expect(budget.epoch()).toBe(e0 + 1);
+    // The new key was rebuilt from Postgres: the five live holds, counted once each.
+    expect(await redisBal(t, e0 + 1)).toMatchObject({ spent: 0, reserved: 500 });
+    expect(await redis.exists(keyAt(e0))).toBe(0);
+  });
+
+  it('a settle whose first reply was lost still corrects the live balance when it is retried', async () => {
+    const t = await newTenant();
+    let calls = 0;
+    const pgLedger: PgLedger = {
+      ...pgl,
+      settle: async (id, e) => {
+        const r = await pgl.settle(id, e); // committed
+        if (calls++ === 0) throw new Error('connection reset before the reply'); // ...but the answer is lost
+        return r;
+      },
+    };
+    const budget = await newBudget({ pgLedger });
+    const h = allowed(await budget.reserve(req(t, 1000, 10_000)));
+    await budget.settle(h, charge(700));
+    expect(calls).toBe(2);
+    expect(await count('spend_ledger', t)).toBe(1);
+    expect(await pgSpent(t)).toBe(700);
+    expect(await redisBal(t, budget.epoch())).toMatchObject({ spent: 700, reserved: 0, ver: 1 });
+  });
+
+  it('a Redis reserve that times out but still runs leaves no phantom hold once the request settles', async () => {
+    const t = await newTenant();
+    const budget = await newBudget({ outageFailures: 10 }); // one timeout is not an outage
+    const e = budget.epoch();
+    await budget.settle(allowed(await budget.reserve(req(t, 10, 10_000))), { kind: 'refund' }); // the balance exists
+    faults.reserveRunsThenFails = true;
+    const h = allowed(await budget.reserve(req(t, 1000, 10_000)));
+    faults.reserveRunsThenFails = false;
+    expect(h.path).toBe('postgres'); // decided on Postgres for this request
+    expect(budget.mode()).toBe('redis');
+    expect((await redisBal(t, e)).reserved).toBe(1000); // the script did run: a hold nothing else knows of
+    await budget.settle(h, charge(400));
+    expect(await redisBal(t, e)).toMatchObject({ spent: 400, reserved: 0 });
+    expect(await pgSpent(t)).toBe(400);
+  });
+
+  it('lapsed holds are deleted from Postgres while Redis is healthy, a bounded number at a time', async () => {
+    const t = await newTenant();
+    const budget = await newBudget({ sweepLimit: 2 });
+    const live = allowed(await budget.reserve(req(t, 100, 100_000)));
+    for (let i = 0; i < 5; i++) await pgl.hold({ id: randomUUID(), tenantId: t, period: P, estimate: 10, ttlMs: -60_000 });
+    expect(await count('budget_reservations', t)).toBe(6);
+    expect(budget.mode()).toBe('redis');
+    // Other test files' lapsed rows count too, so only this tenant's are checked.
+    let removed = 0;
+    while ((await count('budget_reservations', t)) > 1) removed += await budget.sweepExpired();
+    expect(removed).toBeGreaterThanOrEqual(5);
+    expect(await count('budget_reservations', t)).toBe(1);
+    expect(await budget.sweepExpired()).toBeLessThanOrEqual(2); // never more than the limit
+    await budget.settle(live, charge(50));
+    expect(await count('budget_reservations', t)).toBe(0);
+  });
+
+  it('the sweep runs on its timer', async () => {
+    const t = await newTenant();
+    await newBudget({ sweepIntervalS: 0.02 });
+    await pgl.hold({ id: randomUUID(), tenantId: t, period: P, estimate: 10, ttlMs: -60_000 });
+    const end = Date.now() + 20_000;
+    while ((await count('budget_reservations', t)) > 0 && Date.now() < end) await new Promise((r) => setTimeout(r, 20));
+    expect(await count('budget_reservations', t)).toBe(0);
   });
 
   it('reserve reports unavailable when neither Redis nor Postgres can decide', async () => {

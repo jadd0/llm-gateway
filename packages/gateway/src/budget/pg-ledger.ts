@@ -32,7 +32,11 @@ export interface PgReserveArgs {
 export interface SettleRecord {
   /** True if this request's charge was new; false for a refund or a repeat. */
   recorded: boolean;
-  /** tenant_spend.spent_micros and .charges right after this charge (only when `recorded`). */
+  /**
+   * tenant_spend.spent_micros and .charges for a settle that carried a charge: right after it for a new
+   * charge, the current values for a repeat (a retry after a lost reply must still be able to correct the
+   * live balance). 0 for a refund.
+   */
   spent: number;
   charges: number;
   /** The budget epoch when the transaction ran: the one the live balance should be corrected on. */
@@ -50,8 +54,15 @@ export interface PgLedger {
    * is released when this returns, long before the provider answers.
    */
   reserve(args: PgReserveArgs): Promise<{ allowed: boolean; remaining: number }>;
-  /** Writes the Postgres copy of a hold that Redis already admitted. No check: Redis decided. */
+  /**
+   * Writes a hold before Redis is asked, so a Postgres snapshot or a Postgres-path reserve that runs
+   * meanwhile counts it. No check; writing the same id again changes nothing.
+   */
   hold(args: Omit<PgReserveArgs, 'cap'>): Promise<void>;
+  /** Drops a hold that is not going to be used (Redis refused it). */
+  release(id: string): Promise<void>;
+  /** Deletes up to `limit` lapsed holds, whoever placed them. Returns how many. */
+  sweepExpired(limit: number): Promise<number>;
   /**
    * Drops a hold and records the charge (once per request id) in one transaction. `entry` is null for a
    * refund.
@@ -71,7 +82,15 @@ export interface PgLedger {
 // under its lock, so the charge count it returns orders charges in commit order.
 async function recordIn(tx: Tx, e: SpendEntry): Promise<Omit<SettleRecord, 'epoch'>> {
   const inserted = await tx.insert(spendLedger).values(e).onConflictDoNothing().returning({ id: spendLedger.requestId });
-  if (inserted.length === 0) return { recorded: false, spent: 0, charges: 0 };
+  if (inserted.length === 0) {
+    // Already recorded (a retry whose first reply was lost). Its charge is in tenant_spend, so hand back
+    // the current totals: they include it, and the live balance only takes them if it is behind.
+    const [cur] = await tx
+      .select({ spent: tenantSpend.spentMicros, charges: tenantSpend.charges })
+      .from(tenantSpend)
+      .where(and(eq(tenantSpend.tenantId, e.tenantId), eq(tenantSpend.period, e.period)));
+    return { recorded: false, spent: cur?.spent ?? 0, charges: cur?.charges ?? 0 };
+  }
   const [row] = await tx
     .insert(tenantSpend)
     .values({ tenantId: e.tenantId, period: e.period, spentMicros: e.costMicros, charges: 1 })
@@ -119,13 +138,25 @@ export function createPgLedger(db: Db['db']): PgLedger {
               sql`${budgetReservations.expiresAt} <= now()`,
             ),
           );
+        // This request's own hold, if it was written ahead of a Redis attempt that then failed, is not
+        // counted twice: it is replaced below.
         const [held] = await tx
           .select({ held: sql<string>`coalesce(sum(${budgetReservations.amountMicros}), 0)` })
           .from(budgetReservations)
-          .where(and(eq(budgetReservations.tenantId, a.tenantId), eq(budgetReservations.period, a.period)));
+          .where(
+            and(
+              eq(budgetReservations.tenantId, a.tenantId),
+              eq(budgetReservations.period, a.period),
+              sql`${budgetReservations.id} <> ${a.id}`,
+            ),
+          );
         const reserved = Number(held?.held ?? 0);
         const room = Math.max(0, a.cap - spent - reserved);
-        if (spent + reserved + a.estimate > a.cap) return { allowed: false, remaining: room };
+        if (spent + reserved + a.estimate > a.cap) {
+          await tx.delete(budgetReservations).where(eq(budgetReservations.id, a.id));
+          return { allowed: false, remaining: room };
+        }
+        await tx.delete(budgetReservations).where(eq(budgetReservations.id, a.id));
         await tx.insert(budgetReservations).values({
           id: a.id,
           tenantId: a.tenantId,
@@ -180,6 +211,17 @@ export function createPgLedger(db: Db['db']): PgLedger {
           expiresAt: sql`now() + ${a.ttlMs} * interval '1 millisecond'`,
         })
         .onConflictDoNothing();
+    },
+
+    async release(id) {
+      await db.delete(budgetReservations).where(eq(budgetReservations.id, id));
+    },
+
+    async sweepExpired(limit) {
+      const r = await db.execute(sql`
+        delete from budget_reservations
+        where id in (select id from budget_reservations where expires_at < now() limit ${limit})`);
+      return r.rowCount ?? 0;
     },
 
     settle: (id, entry) =>

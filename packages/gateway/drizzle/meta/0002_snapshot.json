@@ -1,5 +1,5 @@
 {
-  "id": "1eb29e14-1a8e-42c9-9431-cee415d1b4a1",
+  "id": "ebf8a577-927f-4d64-9b66-fd613c36190a",
   "prevId": "b1449a1b-989c-4f54-83c3-bb5dda92546b",
   "version": "7",
   "dialect": "postgresql",
@@ -199,7 +199,21 @@
           "with": {}
         }
       },
-      "foreignKeys": {},
+      "foreignKeys": {
+        "budget_reservations_tenant_id_tenants_id_fk": {
+          "name": "budget_reservations_tenant_id_tenants_id_fk",
+          "tableFrom": "budget_reservations",
+          "tableTo": "tenants",
+          "columnsFrom": [
+            "tenant_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},

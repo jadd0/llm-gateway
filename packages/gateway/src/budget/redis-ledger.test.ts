@@ -214,6 +214,21 @@ describe('redis ledger', { timeout: 120_000 }, () => {
     now = T0;
   });
 
+  it('holds a rebuild imported for requests not yet decided are decided by arrival: exactly the money that fits is admitted', async () => {
+    // 30 requests wrote their hold to Postgres first (61 each) and none has reached Redis yet. The first of
+    // them rebuilds the balance, which imports all 30. The cap fits three.
+    const t = tenant();
+    const ids = Array.from({ length: 30 }, () => randomUUID());
+    const l = ledger(async () => ({ spent: 0, charges: 0, holds: ids.map((id) => ({ id, amount: 61, ttlMs: 60_000 })) }));
+    const results = await Promise.all(ids.map((id) => l.reserve({ tenantId: t, period: P, epoch: 1, id, estimate: 61, cap: 190, ttlMs: 60_000 })));
+    expect(results.filter((r) => r.allowed)).toHaveLength(3);
+    expect(await bal(t)).toMatchObject({ spent: 0, reserved: 183 });
+    // A retry of one that was admitted is admitted again without being held twice.
+    const admitted = ids[results.findIndex((r) => r.allowed)]!;
+    expect((await l.reserve({ tenantId: t, period: P, epoch: 1, id: admitted, estimate: 61, cap: 190, ttlMs: 60_000 })).allowed).toBe(true);
+    expect(await bal(t)).toMatchObject({ reserved: 183 });
+  });
+
   it('rebuilt spend counts against the cap', async () => {
     const l = ledger(async () => ({ spent: 9500, charges: 3, holds: [] }));
     const t = tenant();

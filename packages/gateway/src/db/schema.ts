@@ -69,7 +69,9 @@ export const budgetReservations = pgTable(
   'budget_reservations',
   {
     id: uuid('id').primaryKey(),
-    tenantId: uuid('tenant_id').notNull(),
+    tenantId: uuid('tenant_id')
+      .notNull()
+      .references(() => tenants.id, { onDelete: 'cascade' }),
     period: char('period', { length: 7 }).notNull(),
     amountMicros: bigint('amount_micros', { mode: 'number' }).notNull(),
     expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),

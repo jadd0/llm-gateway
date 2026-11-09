@@ -1,5 +1,5 @@
 import type { FastifyPluginAsync, FastifyReply, FastifyRequest } from 'fastify';
-import type { Readable } from 'node:stream';
+import { Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { errorBody } from '../errors.ts';
 import { chatRequest, type ChatBody } from '../request-body.ts';
@@ -70,8 +70,29 @@ function forwardBody(parsed: ChatBody, raw: Buffer, metered: boolean): { body: B
   };
 }
 
-export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app, opts) => {
-  const { upstream } = opts;
+// Sits last in a streamed answer's pipeline. When the call's total deadline passes it replaces the rest
+// of the answer with one OpenAI-shaped error event and ends the stream.
+class DeadlineGuard extends Transform {
+  #cut = false;
+  override _transform(chunk: Buffer, _enc: BufferEncoding, done: (err?: Error | null, data?: Buffer) => void) {
+    if (this.#cut) done();
+    else done(null, chunk);
+  }
+  cutWith(event: string) {
+    if (this.#cut) return;
+    this.#cut = true;
+    // A blank line first closes any event the cut interrupted.
+    this.push(`\n\n${event}`);
+    this.push(null);
+  }
+}
+
+const maxDurationEvent = `data: ${JSON.stringify({
+  error: { message: 'upstream call exceeded the maximum duration', type: 'gateway_error', code: 'upstream_max_duration' },
+})}\n\n`;
+
+export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream; maxDurationMs: number }> = async (app, opts) => {
+  const { upstream, maxDurationMs } = opts;
 
   // Keep the original bytes so the upstream receives exactly what the client sent.
   app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) =>
@@ -82,14 +103,21 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
     // Every way out of the handler ends the request's up-front charges. keep() is last and counts only
     // if nothing above it (used, refund) already did: it is the case of no usage seen.
     const settle = usageSettler(request);
+    const timers: { deadline?: NodeJS.Timeout } = {};
     try {
-      return await handleChat(request, reply, settle);
+      return await handleChat(request, reply, settle, timers);
     } finally {
+      clearTimeout(timers.deadline);
       settle.keep();
     }
   });
 
-  async function handleChat(request: FastifyRequest, reply: FastifyReply, settle: UsageSettler) {
+  async function handleChat(
+    request: FastifyRequest,
+    reply: FastifyReply,
+    settle: UsageSettler,
+    timers: { deadline?: NodeJS.Timeout },
+  ) {
     const started = performance.now();
 
     const checked = chatRequest(request);
@@ -125,7 +153,29 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
       abort.abort();
     });
 
+    // A client that left before anything was sent upstream cost the provider nothing: everything held goes
+    // back. After dispatch the provider may bill, so the estimate stays (the catch blocks below).
+    if (abort.signal.aborted || request.raw.socket.destroyed) {
+      settle.refund();
+      return reply;
+    }
+
     const dispatched = performance.now();
+    // The deadline for the whole call. UPSTREAM_TIMEOUT_MS only limits silence, so without this a slow
+    // answer could outlive the budget hold that covers it.
+    let deadlineHit = false;
+    let guard: DeadlineGuard | undefined;
+    timers.deadline = setTimeout(() => {
+      deadlineHit = true;
+      if (guard) {
+        guard.cutWith(maxDurationEvent);
+        reply.raw.once('finish', () => abort.abort());
+      } else {
+        abort.abort();
+      }
+    }, maxDurationMs);
+    const tooLong = () =>
+      reply.code(504).send(errorBody('upstream call exceeded the maximum duration', 'gateway_error', 'upstream_max_duration'));
     let res;
     try {
       res = await upstream.pool.request({
@@ -136,6 +186,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
         signal: abort.signal,
       });
     } catch (err) {
+      if (deadlineHit) return tooLong(); // the estimate stays: the provider may have worked
       if (abort.signal.aborted) return reply; // client already gone
       return upstreamFailure(reply, err, settle);
     }
@@ -167,6 +218,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
         'server-timing': `gw-pre;dur=${ms(dispatched - started)}`,
       });
       reply.raw.flushHeaders();
+      guard = new DeadlineGuard();
       try {
         if (metered && res.statusCode < 300 && forward.tap !== 'none') {
           // Once bytes are flowing a failure keeps the estimate charged: tokens were partly used.
@@ -176,13 +228,13 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
             },
             { stripUsageChunk: forward.tap === 'strip' },
           );
-          await pipeline(res.body, tap, reply.raw);
+          await pipeline(res.body, tap, guard, reply.raw);
         } else {
-          await pipeline(res.body, reply.raw);
+          await pipeline(res.body, guard, reply.raw);
         }
       } catch (err) {
         // Upstream died or the client left mid-stream; pipeline already destroyed both ends.
-        if (!clientGone) {
+        if (!clientGone && !deadlineHit) {
           reply.log.warn(
             { errClass: (err as Error).name, code: (err as { code?: string }).code },
             'stream terminated',
@@ -196,6 +248,7 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
     try {
       payload = Buffer.from(await res.body.arrayBuffer());
     } catch (err) {
+      if (deadlineHit) return tooLong();
       if (abort.signal.aborted) return reply;
       // The provider answered 2xx and the body then broke: it did the work, so the estimate stays (as for a
       // stream that fails after bytes were sent). A non-2xx answer was already refunded above.

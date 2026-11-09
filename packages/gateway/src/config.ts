@@ -47,6 +47,9 @@ const schema = z
     OPENAI_API_KEY: z.preprocess(blankAsUnset, z.string().optional()),
     UPSTREAM_CONNECTIONS: int(256, 1),
     UPSTREAM_TIMEOUT_MS: int(30_000, 1),
+    // A total deadline per upstream call. UPSTREAM_TIMEOUT_MS only limits silence, so a slow stream
+    // that keeps trickling bytes could otherwise outlive the budget hold that covers it.
+    UPSTREAM_MAX_DURATION_MS: int(240_000, 1),
     LOG_LEVEL: z.preprocess(
       blankAsUnset,
       z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('warn'),
@@ -65,6 +68,7 @@ const schema = z
     BUDGET_REDIS_TIMEOUT_MS: int(50, 1),
     BUDGET_EPOCH_REFRESH_S: int(5, 1),
     BUDGET_OUTAGE_FAILURES: int(3, 1),
+    BUDGET_SWEEP_INTERVAL_S: int(60, 1),
   })
   .refine((e) => e.AUTH_CACHE === 'none' || e.REDIS_URL !== undefined, {
     message: 'REDIS_URL is required when AUTH_CACHE=redis',
@@ -78,9 +82,9 @@ const schema = z
     message: 'REDIS_URL is required when BUDGET_ENABLED=true',
     path: ['REDIS_URL'],
   })
-  .refine((e) => e.BUDGET_ENABLED === 'false' || e.BUDGET_RESERVATION_TTL_S * 1000 > e.UPSTREAM_TIMEOUT_MS, {
+  .refine((e) => e.BUDGET_ENABLED === 'false' || e.BUDGET_RESERVATION_TTL_S * 1000 > e.UPSTREAM_MAX_DURATION_MS + 30_000, {
     message:
-      'BUDGET_RESERVATION_TTL_S must be longer than UPSTREAM_TIMEOUT_MS (in seconds): a hold must outlive the longest call it covers',
+      'BUDGET_RESERVATION_TTL_S must be longer than UPSTREAM_MAX_DURATION_MS plus 30 seconds: a hold must outlive the longest call it covers',
     path: ['BUDGET_RESERVATION_TTL_S'],
   })
   .refine((e) => e.AUTH_TOMBSTONE_TTL_S > e.AUTH_CACHE_TTL_S, {
@@ -95,6 +99,7 @@ export interface Config {
   upstreamApiKey: string | undefined;
   upstreamConnections: number;
   upstreamTimeoutMs: number;
+  upstreamMaxDurationMs: number;
   logLevel: string;
   databaseUrl: string;
   dbPoolSize: number;
@@ -118,6 +123,7 @@ export interface Config {
   budgetRedisTimeoutMs: number;
   budgetEpochRefreshS: number;
   budgetOutageFailures: number;
+  budgetSweepIntervalS: number;
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
@@ -129,6 +135,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     upstreamApiKey: e.OPENAI_API_KEY,
     upstreamConnections: e.UPSTREAM_CONNECTIONS,
     upstreamTimeoutMs: e.UPSTREAM_TIMEOUT_MS,
+    upstreamMaxDurationMs: e.UPSTREAM_MAX_DURATION_MS,
     logLevel: e.LOG_LEVEL,
     databaseUrl: e.DATABASE_URL,
     dbPoolSize: e.DB_POOL_SIZE,
@@ -150,6 +157,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     budgetRedisTimeoutMs: e.BUDGET_REDIS_TIMEOUT_MS,
     budgetEpochRefreshS: e.BUDGET_EPOCH_REFRESH_S,
     budgetOutageFailures: e.BUDGET_OUTAGE_FAILURES,
+    budgetSweepIntervalS: e.BUDGET_SWEEP_INTERVAL_S,
   };
 }
 

@@ -36,8 +36,21 @@ local estimate = tonumber(ARGV[2])
 local cap = tonumber(ARGV[3])
 local room = math.max(0, cap - spent - reserved)
 
--- The same id again (a retry) is already held: admit it without holding twice.
-if redis.call('ZSCORE', KEYS[2], ARGV[1]) then return {1, room} end
+-- This id is already in the balance: either a retry of a request admitted before, or a hold a rebuild
+-- imported from Postgres because the request wrote it there first and has not been decided yet. Either
+-- way its money is already counted, so the question is whether everything counted fits. If it does the
+-- request is admitted without holding twice (a retry, or an import that fits); if not, its hold is
+-- dropped and it is refused, which makes room for the imports decided after it.
+local own = redis.call('HGET', KEYS[3], ARGV[1])
+if own then
+  if spent + reserved > cap then
+    redis.call('HDEL', KEYS[3], ARGV[1])
+    redis.call('ZREM', KEYS[2], ARGV[1])
+    redis.call('HINCRBY', KEYS[1], 'reserved', -tonumber(own))
+    return {0, math.max(0, cap - spent - reserved + tonumber(own))}
+  end
+  return {1, room}
+end
 if spent + reserved + estimate > cap then return {0, room} end
 
 redis.call('ZADD', KEYS[2], now + tonumber(ARGV[4]), ARGV[1])

@@ -1,4 +1,6 @@
+import { once } from 'node:events';
 import http, { type Server } from 'node:http';
+import type { Socket } from 'node:net';
 import type { AddressInfo } from 'node:net';
 import type { FastifyInstance } from 'fastify';
 import { eq, sql } from 'drizzle-orm';
@@ -15,7 +17,7 @@ import { createPgLedger } from './pg-ledger.ts';
 //   mock-ok       answers with usage: 1 prompt + 10 completion tokens (31 micro-USD)
 //   mock-nousage  answers 2xx with no usage at all
 //   mock-500      answers 500
-//   mock-hang     starts a stream and never finishes it
+//   mock-hang     starts a stream and never finishes it (non-streamed: never answers)
 //   mock-gated    waits for the test to open the gate before answering
 // 'hi' is 1 prompt token. With max_tokens 20 the worst case is 1 in + 20 out = 61 micro-USD.
 const WORST = 61;
@@ -28,6 +30,7 @@ let upstream: Server;
 let app: FastifyInstance;
 let handle: Db;
 let redis: Redis;
+const serverSockets: Socket[] = [];
 let hits = 0;
 let held = 0;
 let gate: { open: () => void; wait: Promise<void> } = newGate();
@@ -55,6 +58,7 @@ beforeAll(async () => {
         held++;
         await gate.wait;
       }
+      if (body.model === 'mock-hang' && !body.stream) return; // never answers
       const usage = body.model === 'mock-nousage' ? undefined : { prompt_tokens: 1, completion_tokens: 10, total_tokens: 11 };
       if (body.stream) {
         res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -84,6 +88,7 @@ beforeAll(async () => {
     { rateLimitClock: () => T0 },
   );
   await app.listen({ port: 0, host: '127.0.0.1' });
+  app.server.on('connection', (sk: Socket) => serverSockets.push(sk));
 });
 
 afterEach(() => {
@@ -344,5 +349,144 @@ describe('budget plugin', { timeout: 60_000 }, () => {
     const b = await settledAt(s.tenantId, 3 * ACTUAL);
     expect(b!.spent).toBeLessThanOrEqual(cap);
     expect((await ledgerRows(s.tenantId)).reduce((sum, r) => sum + r.cost, 0)).toBe(3 * ACTUAL);
+  });
+
+  // A raw client that can leave at a chosen moment, and the gateway-side socket it was served on.
+  const sendRaw = (target: FastifyInstance, key: string, body: object, onData?: (chunk: Buffer) => void) => {
+    const { port } = target.server.address() as AddressInfo;
+    const chunks: Buffer[] = [];
+    const req = http.request(
+      { port, host: '127.0.0.1', method: 'POST', path: '/v1/chat/completions', headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` } },
+      (res) => {
+        res.on('data', (c: Buffer) => {
+          chunks.push(c);
+          onData?.(c);
+        });
+        res.on('error', () => {});
+      },
+    );
+    req.on('error', () => {});
+    const ended = new Promise<void>((resolve) => req.on('close', () => resolve()));
+    req.end(JSON.stringify(body));
+    return { req, ended, text: () => Buffer.concat(chunks).toString('utf8') };
+  };
+  const body = (model: string, extra: object = {}) => ({ model, messages: [{ role: 'user', content: 'hi' }], max_tokens: 20, ...extra });
+  const newestServerSocket = async (target: FastifyInstance, sockets: Socket[]) => {
+    const end = Date.now() + 10_000;
+    while (sockets.length === 0 && Date.now() < end) await new Promise((r) => setTimeout(r, 5));
+    void target;
+    return sockets.at(-1)!;
+  };
+
+  const capped = (extraConfig: Record<string, string>, extra: object = {}) =>
+    buildApp(
+      testConfig({
+        API_KEY_PEPPER: base.apiKeyPepper,
+        REDIS_KEY_PREFIX: prefix,
+        OPENAI_BASE_URL: `http://127.0.0.1:${(upstream.address() as AddressInfo).port}`,
+        BUDGET_ENABLED: 'true',
+        BUDGET_REDIS_TIMEOUT_MS: '5000',
+        BUDGET_EPOCH_REFRESH_S: '3600',
+        RATE_LIMIT_REDIS_TIMEOUT_MS: '5000',
+        ...extraConfig,
+      }),
+      { rateLimitClock: () => T0, ...extra },
+    );
+
+  it('a streamed call past the maximum duration is cut with an error event and its hold is settled at the estimate', async () => {
+    const short = capped({ UPSTREAM_MAX_DURATION_MS: '300' });
+    await short.listen({ port: 0, host: '127.0.0.1' });
+    try {
+      const s = await fresh(1_000_000);
+      const r = sendRaw(short, s.key, body('mock-hang', { stream: true }));
+      await r.ended; // the gateway ended the stream itself: nothing here ever closes it
+      expect(r.text()).toContain('data: {"choices":[{"delta":{"content":"x"}}]}');
+      expect(r.text()).toContain('"code":"upstream_max_duration"');
+      expect(r.text()).toContain('"type":"gateway_error"');
+      await settledAt(s.tenantId, WORST); // settled long before the hold's own expiry (300 s)
+      expect(await ledgerRows(s.tenantId)).toEqual([{ cost: WORST, estimated: true, prompt: 1, completion: 20 }]);
+    } finally {
+      await short.close();
+    }
+  });
+
+  it('a non-streamed call past the maximum duration answers 504 and keeps the estimate', async () => {
+    const short = capped({ UPSTREAM_MAX_DURATION_MS: '300' });
+    await short.ready();
+    try {
+      const s = await fresh(1_000_000);
+      const res = await short.inject({
+        method: 'POST',
+        url: '/v1/chat/completions',
+        headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
+        payload: JSON.stringify(body('mock-hang')),
+      });
+      expect(res.statusCode).toBe(504);
+      expect(res.json().error).toMatchObject({ type: 'gateway_error', code: 'upstream_max_duration' });
+      await settledAt(s.tenantId, WORST);
+      expect(await ledgerRows(s.tenantId)).toEqual([{ cost: WORST, estimated: true, prompt: 1, completion: 20 }]);
+    } finally {
+      await short.close();
+    }
+  });
+
+  it('a client that leaves before the request is dispatched upstream gets everything back', async () => {
+    const real = createPgLedger(handle.db);
+    let holdEntered!: () => void;
+    const entered = new Promise<void>((r) => (holdEntered = r));
+    let openHold!: () => void;
+    const holdGate = new Promise<void>((r) => (openHold = r));
+    let settledNow!: () => void;
+    const settled = new Promise<void>((r) => (settledNow = r));
+    const sockets: Socket[] = [];
+    const gated = capped({}, {
+      budgetPgLedger: {
+        ...real,
+        hold: async (a: Parameters<typeof real.hold>[0]) => {
+          holdEntered();
+          await holdGate;
+          return real.hold(a);
+        },
+        settle: async (id: string, e: Parameters<typeof real.settle>[1]) => {
+          const r = await real.settle(id, e);
+          settledNow();
+          return r;
+        },
+      },
+    });
+    await gated.listen({ port: 0, host: '127.0.0.1' });
+    gated.server.on('connection', (sk: Socket) => sockets.push(sk));
+    try {
+      const s = await fresh(1_000_000);
+      const before = hits;
+      const r = sendRaw(gated, s.key, body('mock-ok'));
+      await entered; // the request is in the budget step, nothing has gone upstream
+      const sk = await newestServerSocket(gated, sockets);
+      r.req.destroy();
+      if (!sk.destroyed) await once(sk, 'close');
+      openHold();
+      await settled; // the route ran and ended the request
+      expect(hits).toBe(before);
+      expect(await ledgerRows(s.tenantId)).toEqual([]);
+      expect(await balance(s.tenantId)).toEqual({ spent: 0, reserved: 0 });
+      expect(await tokensLeft(s.keyId)).toBe(TPM); // the limiter's tokens are back too
+    } finally {
+      openHold();
+      await gated.close();
+    }
+  });
+
+  it('a client that leaves after the request was dispatched is charged the estimate', async () => {
+    const s = await fresh(1_000_000);
+    const before = serverSockets.length;
+    const r = sendRaw(app, s.key, body('mock-gated'));
+    await until(async () => held, (h) => h === 1); // the upstream has the request
+    const sk = serverSockets[before]!;
+    r.req.destroy();
+    if (!sk.destroyed) await once(sk, 'close');
+    gate.open();
+    await settledAt(s.tenantId, WORST);
+    expect(await ledgerRows(s.tenantId)).toEqual([{ cost: WORST, estimated: true, prompt: 1, completion: 20 }]);
+    expect(await tokensLeft(s.keyId)).toBe(TPM - 21); // the limiter keeps its estimate as well
   });
 });
