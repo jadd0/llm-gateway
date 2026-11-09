@@ -125,7 +125,7 @@ describe('response cache settings', () => {
   it('needs Redis, and a wait no longer than the lock', () => {
     const noRedis = { DATABASE_URL: 'postgres://u:p@127.0.0.1:1/db', API_KEY_PEPPER: 'x'.repeat(40), AUTH_CACHE: 'none', RATE_LIMIT_ENABLED: 'false', BUDGET_ENABLED: 'false' };
     expect(() => loadConfig(noRedis)).toThrow(/REDIS_URL is required when CACHE_ENABLED=true/);
-    expect(loadConfig({ ...noRedis, CACHE_ENABLED: 'false' }).cacheEnabled).toBe(false);
+    expect(loadConfig({ ...noRedis, CACHE_ENABLED: 'false', LOG_MODE: 'inline' }).cacheEnabled).toBe(false);
     expect(() => loadConfig(env({ CACHE_LOCK_MS: '1000', CACHE_WAIT_MS: '2000' }))).toThrow(/CACHE_WAIT_MS must not be longer than CACHE_LOCK_MS/);
   });
 });
