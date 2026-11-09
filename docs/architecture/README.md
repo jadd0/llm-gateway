@@ -25,7 +25,7 @@ hop (auth, limits, budgets, resilience, caching, logging).
 
 - **Response cache** (`packages/gateway/src/cache`): identical `temperature: 0` requests are answered from Redis, scoped per
   tenant, with one upstream call per burst of identical misses. See [../cache/README.md](../cache/README.md).
-- **Semantic cache** (`packages/gateway/src/semantic`): after an exact miss, the last user message is embedded (Voyage, else a local model) and the nearest stored prompt in pgvector serves its cached answer when close enough. See [../semantic-cache/README.md](../semantic-cache/README.md).
+- **Semantic cache** (`packages/gateway/src/semantic`): after an exact miss, the last user message is embedded (Voyage, else a local model) and the nearest stored prompt in pgvector serves its cached answer when close enough and its numbers, names, quotes and negations agree. Off per tenant until it opts in. See [../semantic-cache/README.md](../semantic-cache/README.md).
 - **Resilience** (`packages/gateway/src/resilience`): timeouts, retries, a Redis-shared circuit breaker and fallback chains. See [../resilience/README.md](../resilience/README.md).
 
 ## Planned (marked dashed in the diagram)

@@ -4,8 +4,24 @@ Diagram: [semantic-flow.html](semantic-flow.html). Code: `packages/gateway/src/s
 `store.ts`, `lookup.ts`, `fill.ts`), the step in `cache/plugin.ts`, the table in `db/schema.ts`.
 
 The exact cache misses the same question asked in different words. The semantic cache turns the last user message into a
-vector, finds the nearest stored prompt in Postgres (pgvector), and if it is close enough serves that prompt's cached
-answer. Every wrong match is a wrong answer to a customer, so the threshold comes from measurements, not taste.
+vector, finds the nearest stored prompt in Postgres (pgvector), and if it is close enough and passes the guards serves that
+prompt's cached answer. Every wrong match is a wrong answer to a customer, so the threshold and the guards come from
+measurements, not taste.
+
+**It is off for every tenant until the tenant opts in** (`npm run keys -- set-semantic-cache <tenant> on`). An embedding
+ranks prompts by meaning, and the meaning it ranks by blurs exactly what separates two answers: an early evaluation served
+the answer for order 1235 to a request about order 1234 at similarity 0.982, and served a large share of non-paraphrases at
+0.95. Exact-match caching, which has none of that risk, stays on for everyone. `SEMANTIC_ENABLED=false` switches the feature
+off for the whole gateway whatever the tenants say.
+
+**Requires Postgres with the pgvector extension** (0.8 or later preferred). `docker-compose.yml` runs the pinned
+`pgvector/pgvector` image. Migration 0005 runs `CREATE EXTENSION vector`; on a Postgres without it `npm run db:migrate` stops
+with a message that says so, and the gateway refuses to start with `SEMANTIC_ENABLED=true` until the extension is there.
+The same version check picks the query: from 0.8 the index scan keeps going until a filtered query has its row
+(`hnsw.iterative_scan`); before 0.8 the index is not used for a large scope and context, which are sorted exactly instead.
+
+**Upgrading.** Migration 0005 adds `tenants.semantic_cache` defaulting to false, so no tenant changes behaviour when it is
+applied. A deployment that ran an earlier build of this PR with the feature on for everyone must opt its tenants in again.
 
 ## What may differ
 
@@ -16,20 +32,45 @@ text (an image, several parts) is exact-only. Same cacheability rule as the exac
 
 ## The flow
 
-1. The exact lookup misses. If the tenant has the semantic cache on and the request does not send
-   `x-gateway-semantic: off`, the last message is embedded: Voyage `voyage-4-lite` within `SEMANTIC_VOYAGE_TIMEOUT_MS`,
+1. The exact lookup misses. If the tenant has opted in and the request does not send `x-gateway-semantic: off`, the burst's
+   leader (see step 5) embeds the last message: Voyage `voyage-4-lite` within `SEMANTIC_VOYAGE_TIMEOUT_MS`,
    else the local `voyage-4-nano` within `SEMANTIC_LOCAL_TIMEOUT_MS`, else the step is skipped. A failed Voyage is left
    alone for 5 seconds so an outage costs one timeout, not one per request.
-2. The nearest row of the same scope and context that has not expired is read. At or above `SEMANTIC_THRESHOLD` the row's
-   `exact_key` is read from Redis. If that entry is gone the row is deleted and the request is a miss.
+2. The nearest row of the same scope and context that has not expired is read. At or above `SEMANTIC_THRESHOLD` it must pass
+   the guards (below) before the row's `exact_key` is read from Redis. A guard that refuses is a miss, and the response
+   carries `x-gateway-semantic-guard: numbers|quotes|names|negation|tokens`. If the answer is gone from Redis the row is
+   deleted in the background and the request is a miss.
 3. A hit is replayed exactly like an exact hit: `x-gateway-cache: semantic-hit`, `x-gateway-similarity: 0.973`, no provider
    call, a zero-cost ledger row with `cache_kind = 'semantic'` and the saving. `keys show-spend` splits exact and semantic.
 4. After the exact cache stores a new answer, its prompt is queued to be embedded and inserted, after the response is on its
    way. The queue is bounded (`SEMANTIC_FILL_QUEUE`); a full queue drops the job and counts it in the logs. The row expires
    with the answer. Expired rows are deleted in batches every `SEMANTIC_CLEANUP_S`.
+5. The lookup runs inside the exact cache's single-flight: of several identical misses in a burst only the leader asks the
+   semantic cache. If it is served by a similar prompt, followers in the same process get that answer too; a follower that
+   opted out, or whose tenant is off, goes upstream instead, and nothing is written under the exact key, where such a
+   request would read it as an exact answer. Followers in another process go upstream.
 
-A request that opts out (`x-gateway-semantic: off`, `cache-control: no-store`, a tenant switched off with
-`keys set-semantic-cache <tenant> off`) is never embedded, so its prompt is never sent to the embedding API.
+A request that opts out (`x-gateway-semantic: off`, `cache-control: no-store`, a tenant that has not opted in or was switched
+off with `keys set-semantic-cache <tenant> off`) is never embedded, so its prompt is never sent to the embedding API.
+
+## Guards
+
+A vector is close for prompts that mean different things to a customer, so the stored prompt and the request must also agree
+on what the vector cannot see. Each is checked on the nearest row, after the threshold; the first that fails refuses it.
+
+| rule | header value | passes when |
+|---|---|---|
+| numbers and IDs | `numbers` | the digit sequences (`1234`, `3.5`, `A-123`, `#77`) are the same, as multisets |
+| quoted strings | `quotes` | the `'...'`, `"..."`, backtick and curly-quoted strings are the same, as multisets |
+| names | `names` | the capitalised words that do not start a sentence are the same set |
+| negation | `negation` | the count of `not`, `no`, `never`, `without`, `cannot`, `n't` ... is the same |
+| content words | `tokens` | the sets of content words (lowercased, stop words removed) differ by at most `SEMANTIC_GUARD_MAX_DIFF` (2) words in total; off with `SEMANTIC_GUARD_TOKENSET=false` |
+
+The row keeps a *signature* of its prompt, not the prompt: every element is a truncated hash, so Postgres holds no prompt text
+(the vector is already a lossy encoding of it) and the guards still get equality and set difference, which is all they use.
+A row whose signature version this code does not know is never served. The guards only make the cache serve less; what they cannot see is
+word order ("A beat B" against "B beat A" has the same names, words and numbers), and a related-but-different question
+(same topic, same names) passes them.
 
 ## One embedding space, two models
 
@@ -47,10 +88,18 @@ and the first 200 million tokens of an account are free.
 - Postgres slow (`SEMANTIC_PG_TIMEOUT_MS`) or down: a miss.
 - A different number or made-up name barely moves an embedding: in a smoke run the local model scored "capital of Zorvania-3"
   and "capital of Zorvania-9" as near-identical. Questions that differ only in a detail the model ignores can be served
-  each other's answer, which is why the threshold is chosen against labelled non-paraphrases (PAWS) and a tenant can turn the
-  feature off.
-- A filtered vector search can return too few rows: the query uses pgvector's iterative scan so the scan continues until it
-  finds a row that passes the filter.
+  each other's answer, which is why the guards compare numbers, names and quotes exactly, the threshold is chosen against labelled
+  non-paraphrases (PAWS), and the feature is off until a tenant opts in.
+- The query's time budget is enforced by Postgres: each lookup runs in a transaction with `SET LOCAL statement_timeout`
+  (`SEMANTIC_PG_TIMEOUT_MS`), so a slow query is cancelled and its connection freed. Semantic queries use a pool of their own
+  (`SEMANTIC_PG_POOL`), and one that cannot get a connection within the budget fails at once, so authentication and budgets
+  never queue behind them.
+- A filtered vector search can return too few rows. A scope and context with up to 1000 rows is searched exactly (read
+  through the `(scope, context_hash)` index, sorted by distance), which no index setting can make miss. A larger one uses the
+  vector index with an iterative scan on pgvector 0.8 and later, and an exact sort before.
+- With `SEMANTIC_CROSS_MODEL=false`, rows made by Voyage are invisible to lookups embedded locally. During a Voyage outage
+  (every lookup embeds locally) the cache therefore serves only the rows the local model made, and recovers when Voyage does.
+  A fill embeds patiently, but while Voyage is backing off it too goes straight to the local model.
 
 ## Choosing the threshold
 
@@ -58,11 +107,21 @@ and the first 200 million tokens of an account are free.
 with it, so it is used here for internal evaluation only) and PAWS-Wiki (the same words in another order, half of them
 meaning something else; Google LLC, free for any purpose). Both are downloaded at run time against a pinned sha256 and not
 committed. For each threshold from 0.80 to 0.99 it counts the paraphrases served (hit rate) and the share of served answers
-that belong to a different question (wrong-answer rate), for each model and across models. The threshold is the one with the
-most hits while at most 1% of served answers are wrong, chosen on a dev half and reported on a test half.
+that belong to a different question (wrong-answer rate), for each embedding model, input type and across models, four ways:
 
-Pending quiet run: `npm run bench:semantic-eval`. No figure is quoted here until `bench/results/pr-9/` is committed (R3);
-until then `SEMANTIC_THRESHOLD` is 0.95.
+- *pairwise*: each pair alone, the answer of the first prompt served to the second;
+- *nearest neighbour*: the store holds the first prompt of every pair and each second prompt is asked of it, as the gateway
+  looks up, so a prompt can be served another pair's answer. An answer is right only when the entry served is the pair's own
+  first prompt of a duplicate pair; any other entry served counts as wrong;
+- each of those with and without the guards.
+
+The threshold is selected on a dev half by nearest neighbour with guards (the most right answers while at most 1% of served
+answers are wrong) and reported on a test half. When no threshold meets 1% the report says so and recommends the threshold
+with the lowest wrong rate among those that still serve at least `--min-hit-rate` (default 5%) of the duplicates. 1% stays
+the target; the shipped `SEMANTIC_THRESHOLD` (0.95) and the opt-in default stand until the committed numbers say otherwise.
+
+Pending quiet run: `npm run bench:semantic-eval`. No figure is quoted here until `bench/results/pr-9/` is committed (R3); the
+report there is published whatever it shows.
 
 ## Choosing the index
 

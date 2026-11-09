@@ -21,8 +21,9 @@ committed run produces it.
   actual tokens after, and requests are refused once the budget is spent.
 - **Resilience:** retries with exponential backoff and jitter, timeouts, a circuit breaker per
   provider, and an ordered fallback chain of models.
-- **Caching:** an exact-match cache keyed on a normalised request hash, plus a semantic cache that
-  embeds the prompt and serves near-duplicates found in pgvector above a similarity threshold.
+- **Caching:** an exact-match cache keyed on a normalised request hash, plus an opt-in semantic cache
+  (off until a tenant turns it on) that embeds the prompt and serves near-duplicates found in pgvector
+  above a similarity threshold, once their numbers, names, quotes and negations also agree.
   Either can be skipped per request.
 - **Observability:** every request is logged with tenant, model, tokens, cost, latency, cache hit
   and fallback used. Log writes go through a queue and are batch-inserted, off the request path.
@@ -73,7 +74,8 @@ outage mid-test.
 
 ## Getting started
 
-Needs Node 24+ (26 recommended), npm, Docker (for Redis and Postgres) and [k6](https://k6.io) for benchmarks.
+Needs Node 24+ (26 recommended), npm, Docker (for Redis and Postgres) and [k6](https://k6.io) for benchmarks. Postgres must have the
+[pgvector](https://github.com/pgvector/pgvector) extension (the compose file runs a pinned `pgvector/pgvector` image); migration 0005 creates it.
 
 ```
 npm ci

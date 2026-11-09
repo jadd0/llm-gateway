@@ -12,7 +12,7 @@ services:
       retries: 10
 
   postgres:
-    image: pgvector/pgvector:pg17
+    image: pgvector/pgvector:0.8.7-pg17
     ports: ["127.0.0.1:5436:5432"]
     environment:
       POSTGRES_USER: gateway

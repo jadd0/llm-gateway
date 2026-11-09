@@ -198,8 +198,9 @@ Pending quiet run. Three runs, one at a time, each after `bash bench/quiet.sh be
 `bench/results/pr-9/` is committed (R3).
 
 - `npm run bench:semantic-eval`: hit rate and wrong-answer rate at thresholds 0.80 to 0.99 for Quora Question Pairs and PAWS-Wiki
-  pairs, per embedding model and across models, threshold chosen on a dev half and reported on a test half. Writes `eval.json`
-  and `summary.md`.
+  pairs, per embedding model, input type and across models, pairwise and store-wide nearest neighbour, each with and without the
+  guards; threshold chosen on a dev half (nearest neighbour with guards) and reported on a test half, with a recommendation when
+  none meets 1%. Writes `eval.json` and `summary.md`.
 - `npm run bench:vector-index`: HNSW, IVFFlat and an exact scan at 10 000 and 100 000 vectors: recall@1, p50 and p95 query time,
   build time and index size, with and without the scope-and-context filter. Writes `index-bench.json` and `index-bench.md`.
 - `npm run bench:semantic`: request latency of a semantic hit against an exact hit and a miss, through the gateway with a mock
