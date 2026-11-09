@@ -5177,7 +5177,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <path data-edge-from="attempt" data-edge-to="reply" data-edge-label="200" data-edge-key="4" data-edge-id="e4" data-composition-points="617.6,145;617.6,161;787.6,161;787.6,145" d="M 617.6 145 L 617.6 161 L 787.6 161 L 787.6 145" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="reply" data-edge-to="settle" data-edge-key="5" data-edge-id="e5" data-composition-points="853.6,119;881.6,119" d="M 853.6 119 L 881.6 119" class="a-default" stroke-width="1.4" marker-end="url(#arrowhead)"/>
         <path data-edge-from="breaker" data-edge-to="next" data-edge-label="open" data-edge-key="6" data-edge-id="e6" data-composition-points="434,145;434,166;516,166;516,243;500,243" d="M 434 145 L 434 166 L 516 166 L 516 243 L 500 243" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
-        <path data-edge-from="attempt" data-edge-to="backoff" data-edge-label="retryable (error body read capped, 2 s configurable)" data-edge-key="7" data-edge-id="e7" data-composition-points="617.6,145;617.6,166;535.6,166;535.6,243;551.6,243" d="M 617.6 145 L 617.6 166 L 535.6 166 L 535.6 243 L 551.6 243" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
+        <path data-edge-from="attempt" data-edge-to="backoff" data-edge-label="retryable (error body capped at 64 KiB and 2 s)" data-edge-key="7" data-edge-id="e7" data-composition-points="617.6,145;617.6,166;535.6,166;535.6,243;551.6,243" d="M 617.6 145 L 617.6 166 L 535.6 166 L 535.6 243 L 551.6 243" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
         <path data-edge-from="attempt" data-edge-to="next" data-edge-label="headers timeout" data-edge-key="8" data-edge-id="e8" data-composition-points="551.6,119;535.6,119;535.6,296;434,296;434,269" d="M 551.6 119 L 535.6 119 L 535.6 296 L 434 296 L 434 269" class="a-dashed" stroke-width="1.4" marker-end="url(#arrowhead-dashed)"/>
         <path data-edge-from="attempt" data-edge-to="fail" data-edge-label="other 4xx" data-edge-key="9" data-edge-id="e9" data-composition-points="551.6,119;535.6,119;535.6,296;787.6,296;787.6,269" d="M 551.6 119 L 535.6 119 L 535.6 296 L 787.6 296 L 787.6 269" class="a-security" stroke-width="1.4" marker-end="url(#arrowhead-security)"/>
 
@@ -5313,9 +5313,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="460" y="146" width="30" height="14" rx="3" class="c-mask"/>
           <text x="475" y="156" class="t-security" font-size="8" text-anchor="middle">open</text>
         </g>
-        <g data-detail="context" data-edge-from="attempt" data-edge-to="backoff" data-edge-label="retryable (error body read capped, 2 s configurable)" data-edge-key="7" data-edge-id="e7">
+        <g data-detail="context" data-edge-from="attempt" data-edge-to="backoff" data-edge-label="retryable (error body capped at 64 KiB and 2 s)" data-edge-key="7" data-edge-id="e7">
           <rect x="550" y="146" width="53.199999999999996" height="14" rx="3" class="c-mask"/>
-          <text x="576.6" y="156" class="t-database" font-size="8" text-anchor="middle">retryable (error body read capped, 2 s configurable)</text>
+          <text x="576.6" y="156" class="t-database" font-size="8" text-anchor="middle">retryable (error body capped at 64 KiB and 2 s)</text>
         </g>
         <g data-detail="context" data-edge-from="attempt" data-edge-to="next" data-edge-label="headers timeout" data-edge-key="8" data-edge-id="e8">
           <rect x="443.8" y="276" width="82" height="14" rx="3" class="c-mask"/>
