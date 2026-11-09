@@ -20,27 +20,35 @@ PIDS=()
 cleanup() { for p in "${PIDS[@]:-}"; do [ -n "$p" ] && kill "$p" 2>/dev/null || true; done; }
 trap cleanup EXIT
 
+require_free_port() { # port: a stale server on it would be measured instead of ours
+  if [ -n "$(lsof -ti "tcp:$1" -sTCP:LISTEN 2>/dev/null)" ]; then
+    echo "port $1 is already in use; stop that process first" >&2; exit 1
+  fi
+}
 start_mock() { # latency token_delay
+  require_free_port "$MOCK_PORT"
   MOCK_PORT="$MOCK_PORT" MOCK_LATENCY_MS="$1" MOCK_TOKEN_DELAY_MS="$2" MOCK_COMPLETION_TOKENS=20 \
     node "$ROOT/packages/mock-provider/src/server.ts" >/dev/null &
   MOCK_PID=$!; PIDS+=("$MOCK_PID")
-  wait_up "http://127.0.0.1:$MOCK_PORT/__control"
+  wait_up "http://127.0.0.1:$MOCK_PORT/__control" 200 "$MOCK_PID"
 }
 start_gateway() {
+  require_free_port "$GATEWAY_PORT"
   GATEWAY_PORT="$GATEWAY_PORT" OPENAI_BASE_URL="http://127.0.0.1:$MOCK_PORT" \
     UPSTREAM_CONNECTIONS="${UPSTREAM_CONNECTIONS:-256}" LOG_LEVEL=warn \
     node "$ROOT/packages/gateway/src/server.ts" >/dev/null &
   GW_PID=$!; PIDS+=("$GW_PID")
-  wait_up "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" 404
+  wait_up "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" 404 "$GW_PID"
 }
-wait_up() { # url [expected-http-status, default 200]
+wait_up() { # url expected-http-status pid: the process we started must be alive and answering
   local code
   for _ in $(seq 1 50); do
+    if ! kill -0 "$3" 2>/dev/null; then echo "process $3 exited before answering $1" >&2; exit 1; fi
     code=$(curl -s -o /dev/null -w '%{http_code}' "$1" || true)
-    if [ "$code" = "${2:-200}" ]; then return 0; fi
+    if [ "$code" = "$2" ]; then return 0; fi
     sleep 0.2
   done
-  echo "timed out waiting for $1 to answer ${2:-200} (last status: ${code:-none})" >&2; exit 1
+  echo "timed out waiting for $1 to answer $2 (last status: ${code:-none})" >&2; exit 1
 }
 stop() { kill "$MOCK_PID" "${GW_PID:-}" 2>/dev/null || true; wait "$MOCK_PID" "${GW_PID:-}" 2>/dev/null || true; GW_PID=""; }
 

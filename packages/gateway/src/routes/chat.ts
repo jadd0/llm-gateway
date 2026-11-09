@@ -1,6 +1,8 @@
 import type { FastifyPluginAsync, FastifyReply } from 'fastify';
+import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { z } from 'zod';
+import { errorBody } from '../errors.ts';
 import type { Upstream } from '../upstream.ts';
 
 // Only the shape the gateway needs; every other field is forwarded untouched.
@@ -15,8 +17,6 @@ const TIMEOUT_CODES = new Set([
   'UND_ERR_BODY_TIMEOUT',
   'UND_ERR_CONNECT_TIMEOUT',
 ]);
-
-const errorBody = (message: string, type: string) => ({ error: { message, type } });
 
 const ms = (n: number) => n.toFixed(3);
 
@@ -67,13 +67,17 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
 
     const abort = new AbortController();
     // 'close' on the response fires on client disconnect, on normal completion, and when a failed
-    // upstream makes pipeline() destroy the response. `upstreamError` is set first in that last
-    // case, so only a close with no upstream error counts as the client leaving.
+    // upstream makes pipeline() destroy the response. It counts as the client leaving only if the
+    // upstream body is still alive (or already finished cleanly) when it fires; a body that was
+    // destroyed, with or without an 'error' event, is an upstream failure.
     let clientGone = false;
-    let upstreamError: Error | undefined;
+    let upstreamFailed = false;
+    let upstreamDone = false;
+    let upstreamBody: Readable | undefined;
     reply.raw.on('close', () => {
       if (reply.raw.writableFinished) return;
-      if (!upstreamError) clientGone = true;
+      clientGone =
+        !upstreamFailed && (upstreamBody === undefined || upstreamDone || !upstreamBody.destroyed);
       abort.abort();
     });
 
@@ -100,8 +104,12 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
       // Hijack so Fastify neither buffers nor serialises: bytes go from the upstream socket
       // to the client socket as they arrive.
       reply.hijack();
-      res.body.once('error', (err) => {
-        if (!clientGone) upstreamError = err;
+      upstreamBody = res.body;
+      res.body.once('end', () => {
+        upstreamDone = true;
+      });
+      res.body.once('error', () => {
+        if (!clientGone) upstreamFailed = true;
       });
       reply.raw.writeHead(res.statusCode, {
         ...extraHeaders,
@@ -136,11 +144,17 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
     const upstreamMs = received - dispatched;
     const preDispatchMs = dispatched - started;
 
-    return reply
+    reply
       .code(res.statusCode)
       .headers(extraHeaders)
-      .header('content-type', type ?? 'application/json')
-      .header('server-timing', `gw-pre;dur=${ms(preDispatchMs)}, upstream;dur=${ms(upstreamMs)}`)
+      .header('content-type', type ?? 'application/json');
+    // gw-post is measured last so it covers building the reply, up to the send call.
+    const postReceiptMs = performance.now() - received;
+    return reply
+      .header(
+        'server-timing',
+        `gw-pre;dur=${ms(preDispatchMs)}, gw-post;dur=${ms(postReceiptMs)}, upstream;dur=${ms(upstreamMs)}`,
+      )
       .send(payload);
   });
 };

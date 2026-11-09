@@ -1,9 +1,13 @@
 import http, { type Server } from 'node:http';
+import { Readable } from 'node:stream';
 import type { AddressInfo } from 'node:net';
 import type { FastifyInstance } from 'fastify';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { createMockServer, type Settings } from '../../../mock-provider/src/server.ts';
+import Fastify from 'fastify';
 import { buildApp } from '../app.ts';
+import type { Upstream } from '../upstream.ts';
+import { chatRoutes } from './chat.ts';
 import { loadConfig } from '../config.ts';
 
 const settings: Settings = {
@@ -178,14 +182,15 @@ describe('POST /v1/chat/completions', () => {
     expect(((await res.json()) as any).error.type).toBe('server_error');
   });
 
-  it('non-streamed response carries server-timing gw-pre and upstream durations', async () => {
+  it('non-streamed response carries server-timing gw-pre, gw-post and upstream durations', async () => {
     Object.assign(settings, { latencyMs: 100 });
     const res = await post(payload());
     const timing = res.headers.get('server-timing') ?? '';
-    const m = /^gw-pre;dur=([\d.]+), upstream;dur=([\d.]+)$/.exec(timing);
+    const m = /^gw-pre;dur=([\d.]+), gw-post;dur=([\d.]+), upstream;dur=([\d.]+)$/.exec(timing);
     expect(m).not.toBeNull();
-    expect(Number(m![2])).toBeGreaterThanOrEqual(100);
+    expect(Number(m![3])).toBeGreaterThanOrEqual(100);
     expect(Number(m![1])).toBeGreaterThanOrEqual(0);
+    expect(Number(m![2])).toBeGreaterThanOrEqual(0);
   });
 
   it('streamed response carries server-timing gw-pre', async () => {
@@ -196,6 +201,16 @@ describe('POST /v1/chat/completions', () => {
 
   it('unknown route returns 404 in the OpenAI error shape', async () => {
     const res = await fetch(`${gw}/v1/nope`);
+    expect(res.status).toBe(404);
+    expect(((await res.json()) as any).error.type).toBe('invalid_request_error');
+  });
+
+  it('unknown POST route with an odd content-type returns 404, not 415', async () => {
+    const res = await fetch(`${gw}/v1/embeddings`, {
+      method: 'POST',
+      headers: { 'content-type': 'text/xml' },
+      body: '<a/>',
+    });
     expect(res.status).toBe(404);
     expect(((await res.json()) as any).error.type).toBe('invalid_request_error');
   });
@@ -240,25 +255,44 @@ describe('POST /v1/chat/completions', () => {
 
 describe('mid-stream failure logging', () => {
   const lines: string[] = [];
-  let logged: FastifyInstance;
-  let logUrl = '';
-
-  beforeAll(async () => {
-    logged = buildApp(
-      loadConfig({ OPENAI_BASE_URL: mockUrl, UPSTREAM_TIMEOUT_MS: '1000', LOG_LEVEL: 'warn' }),
-      { logStream: { write: (l: string) => void lines.push(l) } as unknown as NodeJS.WritableStream },
-    );
-    await logged.listen({ port: 0, host: '127.0.0.1' });
-    logUrl = `http://127.0.0.1:${(logged.server.address() as AddressInfo).port}`;
-  });
-  afterAll(() => logged.close());
+  const terminated = () => lines.filter((l) => l.includes('stream terminated'));
+  const logStream = { write: (l: string) => void lines.push(l) } as unknown as NodeJS.WritableStream;
   beforeEach(() => {
     lines.length = 0;
   });
 
-  const open = async (signal?: AbortSignal) => {
-    Object.assign(settings, { completionTokens: 100, tokenDelayMs: 50 });
-    const res = await fetch(`${logUrl}/v1/chat/completions`, {
+  // Starts a streaming SSE upstream that emits a chunk every 20 ms until its socket is destroyed.
+  const slowUpstream = async () => {
+    const sockets = new Set<import('node:net').Socket>();
+    const server = http.createServer((req, res) => {
+      req.resume();
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      const t = setInterval(() => res.write('data: {"x":1}\n\n'), 20);
+      res.on('close', () => clearInterval(t));
+    });
+    server.on('connection', (s) => sockets.add(s));
+    const port = await listen(server);
+    return {
+      port,
+      resetSockets: () => sockets.forEach((s) => s.destroy()),
+      close: async () => {
+        sockets.forEach((s) => s.destroy());
+        await new Promise((resolve) => server.close(resolve));
+      },
+    };
+  };
+
+  const gatewayFor = async (port: number) => {
+    const g = buildApp(
+      loadConfig({ OPENAI_BASE_URL: `http://127.0.0.1:${port}`, UPSTREAM_TIMEOUT_MS: '1000', LOG_LEVEL: 'warn' }),
+      { logStream },
+    );
+    await g.listen({ port: 0, host: '127.0.0.1' });
+    return { g, url: `http://127.0.0.1:${(g.server.address() as AddressInfo).port}` };
+  };
+
+  const openStream = async (url: string, signal?: AbortSignal) => {
+    const res = await fetch(`${url}/v1/chat/completions`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
       body: payload({ stream: true }),
@@ -268,23 +302,65 @@ describe('mid-stream failure logging', () => {
     await reader.read();
     return reader;
   };
-  const terminated = () => lines.filter((l) => l.includes('stream terminated'));
 
   it('an upstream reset mid-stream logs one warn', async () => {
-    const reader = await open();
-    mock.closeAllConnections();
-    await reader.read().catch(() => undefined);
-    expect(await until(() => terminated().length === 1)).toBe(true);
-    await new Promise((r) => setTimeout(r, 100));
-    expect(terminated()).toHaveLength(1);
+    const up = await slowUpstream();
+    const { g, url } = await gatewayFor(up.port);
+    try {
+      const reader = await openStream(url);
+      up.resetSockets();
+      await reader.read().catch(() => undefined);
+      expect(await until(() => terminated().length === 1)).toBe(true);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(terminated()).toHaveLength(1);
+    } finally {
+      await g.close();
+      await up.close();
+    }
   });
 
   it('a client abort mid-stream logs no warn', async () => {
-    const ctrl = new AbortController();
-    await open(ctrl.signal);
-    ctrl.abort();
-    expect(await until(() => closedResponses === 1)).toBe(true);
-    await new Promise((r) => setTimeout(r, 200));
-    expect(terminated()).toHaveLength(0);
+    const up = await slowUpstream();
+    const { g, url } = await gatewayFor(up.port);
+    try {
+      const ctrl = new AbortController();
+      await openStream(url, ctrl.signal);
+      ctrl.abort();
+      await new Promise((r) => setTimeout(r, 300));
+      expect(terminated()).toHaveLength(0);
+    } finally {
+      await g.close();
+      await up.close();
+    }
+  });
+
+  it('an upstream body destroyed without an error event still logs one warn', async () => {
+    // A fake pool hands the route a body that is later destroyed with no error, which a real
+    // socket never produces on demand.
+    const body = new Readable({ read() {} });
+    body.push('data: {"x":1}\n\n');
+    const upstream = {
+      chatPath: '/v1/chat/completions',
+      headers: {},
+      pool: {
+        request: async () => ({
+          statusCode: 200,
+          headers: { 'content-type': 'text/event-stream' },
+          body,
+        }),
+      },
+    } as unknown as Upstream;
+    const app3 = Fastify({ logger: { level: 'warn', stream: logStream } });
+    app3.register(chatRoutes, { upstream });
+    await app3.listen({ port: 0, host: '127.0.0.1' });
+    try {
+      const url = `http://127.0.0.1:${(app3.server.address() as AddressInfo).port}`;
+      const reader = await openStream(url);
+      body.destroy();
+      await reader.read().catch(() => undefined);
+      expect(await until(() => terminated().length === 1)).toBe(true);
+    } finally {
+      await app3.close();
+    }
   });
 });

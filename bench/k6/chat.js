@@ -16,6 +16,7 @@ const DURATION = Number(__ENV.DURATION_S || 60);
 
 // Time the gateway spent before dispatching upstream, from the server-timing header (absent when direct).
 const gwPreMs = new Trend('gw_pre_server_timing_ms');
+const gwPostMs = new Trend('gw_post_server_timing_ms');
 const upstreamMs = new Trend('upstream_server_timing_ms');
 
 const common = {
@@ -44,6 +45,7 @@ export const options = {
     'http_req_failed{phase:measure}': ['rate>=0'],
     'http_reqs{phase:measure}': ['count>=0'],
     'gw_pre_server_timing_ms{phase:measure}': ['max>=0'],
+    'gw_post_server_timing_ms{phase:measure}': ['max>=0'],
     'dropped_iterations{phase:measure}': ['count>=0'],
   },
 };
@@ -62,9 +64,11 @@ export default function () {
   });
   const timing = res.headers['Server-Timing'];
   if (timing) {
-    const gw = /gw(?:-pre)?;dur=([\d.]+)/.exec(timing);
+    const pre = /gw-pre;dur=([\d.]+)/.exec(timing);
+    const post = /gw-post;dur=([\d.]+)/.exec(timing);
     const up = /upstream;dur=([\d.]+)/.exec(timing);
-    if (gw) gwPreMs.add(Number(gw[1]));
+    if (pre) gwPreMs.add(Number(pre[1]));
+    if (post) gwPostMs.add(Number(post[1]));
     if (up) upstreamMs.add(Number(up[1]));
   }
 }
