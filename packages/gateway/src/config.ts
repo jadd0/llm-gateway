@@ -105,6 +105,9 @@ const schema = z
     // A total deadline for the whole request, every attempt and backoff included. The per-attempt timeouts
     // only limit silence, so a slow stream that keeps trickling bytes could otherwise outlive the budget hold.
     UPSTREAM_MAX_DURATION_MS: int(240_000, 1),
+    // A provider's error answer (status and headers in) is waited for this long for its body; a slower body is
+    // dropped, the status kept, and the request moves on.
+    UPSTREAM_ERROR_BODY_TIMEOUT_MS: int(2_000, 1),
     RETRY_MAX_ATTEMPTS_PER_MODEL: int(3, 1),
     RETRY_BASE_MS: int(200, 1),
     RETRY_CAP_MS: int(2_000, 1),
@@ -206,6 +209,7 @@ export interface Config {
   upstreamHeadersTimeoutMs: number;
   upstreamIdleTimeoutMs: number;
   upstreamMaxDurationMs: number;
+  upstreamErrorBodyTimeoutMs: number;
   retryMaxAttemptsPerModel: number;
   retryBaseMs: number;
   retryCapMs: number;
@@ -266,6 +270,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     upstreamHeadersTimeoutMs: e.UPSTREAM_HEADERS_TIMEOUT_MS,
     upstreamIdleTimeoutMs: e.UPSTREAM_IDLE_TIMEOUT_MS,
     upstreamMaxDurationMs: e.UPSTREAM_MAX_DURATION_MS,
+    upstreamErrorBodyTimeoutMs: e.UPSTREAM_ERROR_BODY_TIMEOUT_MS,
     retryMaxAttemptsPerModel: e.RETRY_MAX_ATTEMPTS_PER_MODEL,
     retryBaseMs: e.RETRY_BASE_MS,
     retryCapMs: e.RETRY_CAP_MS,

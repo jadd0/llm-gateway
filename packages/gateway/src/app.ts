@@ -158,6 +158,7 @@ export function buildApp(
     },
     maxDurationMs: config.upstreamMaxDurationMs,
     defaultMaxTokens: config.rateLimitDefaultMaxTokens,
+    errorBodyTimeoutMs: config.upstreamErrorBodyTimeoutMs,
     ...(extra.cutDrainMs ? { cutDrainMs: extra.cutDrainMs } : {}),
   });
   return app;

@@ -80,6 +80,8 @@ export interface ChatRouteOptions {
   retry: RetryPolicy;
   maxDurationMs: number;
   defaultMaxTokens: number;
+  /** How long a provider's error body is waited for once its status and headers are in. */
+  errorBodyTimeoutMs: number;
   cutDrainMs?: number;
 }
 
@@ -99,7 +101,7 @@ type Failure =
 const asText = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v);
 
 export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts) => {
-  const { upstream, breaker, chains, retry, maxDurationMs, defaultMaxTokens } = opts;
+  const { upstream, breaker, chains, retry, maxDurationMs, defaultMaxTokens, errorBodyTimeoutMs } = opts;
   // After a cut stream's last bytes are written, a client that still hasn't taken them this long is dropped.
   const cutDrainMs = opts.cutDrainMs ?? 5000;
 
@@ -107,6 +109,16 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
   app.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) =>
     done(null, body),
   );
+
+  // A request refused before anything was sent upstream (400, 402, 429 from the budget or rate limiter, ...)
+  // still says which model was asked for and that no attempt was made, as the replies of a dispatched
+  // request do. Only authenticated requests: a caller refused by the key check learns nothing about models.
+  app.addHook('onSend', async (request, reply) => {
+    if (reply.statusCode < 400 || request.tenant === null || reply.hasHeader('x-gateway-attempts')) return;
+    reply.header('x-gateway-attempts', '0');
+    const body = Buffer.isBuffer(request.body) ? chatRequest(request) : undefined;
+    if (body?.ok) reply.header('x-gateway-model', body.value.model);
+  });
 
   app.post('/v1/chat/completions', { config: { rateLimited: true, budgeted: true } }, async (request, reply) => {
     // Every way out of the handler ends the request's up-front charges. keep() is last and counts only
@@ -121,6 +133,28 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
       settle.keep(state.model);
     }
   });
+
+  // The error body of a non-2xx answer, read in full (which also frees the socket) unless it takes longer than
+  // errorBodyTimeoutMs: a provider that sends its status and then stalls must not hold the request for the
+  // whole idle timeout before the next attempt or model. A slow body is dropped and its connection closed;
+  // the status is kept.
+  async function readErrorBody(stream: Readable & { arrayBuffer(): Promise<ArrayBuffer> }): Promise<Buffer> {
+    let timer: NodeJS.Timeout | undefined;
+    const read = stream.arrayBuffer().then((b) => Buffer.from(b));
+    const slow = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), errorBodyTimeoutMs);
+    });
+    try {
+      const got = await Promise.race([read, slow]);
+      if (got !== null) return got;
+      read.catch(() => {}); // destroying the stream rejects the pending read
+      stream.destroy();
+      app.log.warn({ timeoutMs: errorBodyTimeoutMs }, 'upstream error body too slow, dropped');
+      return Buffer.alloc(0);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   async function handleChat(request: FastifyRequest, reply: FastifyReply, settle: UsageSettler, state: RequestState) {
     const started = performance.now();
@@ -287,7 +321,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
             // the one the client gets.
             let body: Buffer;
             try {
-              body = Buffer.from(await res.body.arrayBuffer());
+              body = await readErrorBody(res.body);
             } catch (err) {
               if (abort.signal.aborted) break models;
               // The status alone decides what happens next; the client gets the answer without its body.
