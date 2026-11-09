@@ -30,7 +30,8 @@ function passthroughHeaders(upstream: Record<string, string | string[] | undefin
 }
 
 function upstreamFailure(reply: FastifyReply, err: unknown, charge: RateLimitCharge | null): FastifyReply {
-  // Nothing reached the client and the provider did no work for it: the whole estimate goes back.
+  // `charge` is passed only when the provider did no work (no 2xx was received): then the whole estimate
+  // goes back. A 2xx whose body broke passes null, because the provider did generate it.
   void charge?.settle(0);
   const code = (err as { code?: string }).code ?? '';
   // Log the error class and code only; messages can carry request data.
