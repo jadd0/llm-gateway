@@ -50,9 +50,11 @@ export interface BudgetPluginOptions {
 
 // Tokens the provider reported, split into the two prices. A usage with only a total (no split) is
 // priced entirely as output, the dearer side, so the charge is never too low.
+const completionOf = (usage: Usage) => Math.max(usage.completionTokens, usage.totalTokens - usage.promptTokens);
+
 export function costOfUsage(price: Price, usage: Usage): { prompt: number; completion: number; cost: number } {
   const prompt = usage.promptTokens;
-  const completion = Math.max(usage.completionTokens, usage.totalTokens - usage.promptTokens);
+  const completion = completionOf(usage);
   return { prompt, completion, cost: costMicros(price, prompt, completion) };
 }
 
@@ -74,7 +76,7 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
       model: hit.model,
       // The tokens are the stored usage's whether or not the model has a price; only the saving needs one.
       promptTokens: u?.promptTokens ?? 0,
-      completionTokens: u === undefined ? 0 : Math.max(u.completionTokens, u.totalTokens - u.promptTokens),
+      completionTokens: u === undefined ? 0 : completionOf(u),
       savedMicros: cost?.cost ?? 0,
     });
   });

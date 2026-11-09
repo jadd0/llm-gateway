@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { cacheKey, isCacheable, normalise, scopeOf } from './key.ts';
+import { KEY_VERSION, cacheKey, isCacheable, normalise, scopeOf } from './key.ts';
 
 const MAX = 1024;
 const base = { model: 'mock-1', temperature: 0, messages: [{ role: 'user', content: 'hello' }] };
@@ -13,6 +13,11 @@ describe('cache key', () => {
     // Two parts are not one string: the provider may treat them differently.
     const two = { ...base, messages: [{ role: 'user', content: [{ type: 'text', text: 'hel' }, { type: 'text', text: 'lo' }] }] };
     expect(keyOf(two)).not.toBe(keyOf(base));
+  });
+
+  it('the key carries the version of the rules that made it', () => {
+    expect(KEY_VERSION).toBe('v2');
+    expect(keyOf(base)).toContain(':cache:v2:');
   });
 
   it('field order does not change the key', () => {
@@ -82,7 +87,7 @@ describe('cache key', () => {
     expect(keyOf(base, scopeOf({ ...a, cacheShared: true }))).toBe(keyOf(base, scopeOf({ ...b, cacheShared: true })));
     // A shared tenant never lands on a private tenant's key.
     expect(keyOf(base, scopeOf({ ...a, cacheShared: true }))).not.toBe(keyOf(base, scopeOf(a)));
-    expect(keyOf(base, scopeOf(a))).toMatch(/^p:cache:v1:aaaa:[0-9a-f]{64}$/);
+    expect(keyOf(base, scopeOf(a))).toMatch(/^p:cache:v2:aaaa:[0-9a-f]{64}$/);
   });
 });
 

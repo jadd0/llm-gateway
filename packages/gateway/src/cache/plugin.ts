@@ -130,8 +130,14 @@ const cachePlugin: FastifyPluginAsync<CachePluginOptions> = async (app, opts) =>
       },
     };
     request.cacheFill = fill;
-    // However the request ends (a refusal by a later hook, a client that left, an error) a leader is let go.
-    if (leader) reply.raw.once('close', () => fill.abandon());
+    // However the request ends (a refusal by a later hook, a client that left, an error) a leader is let go: its
+    // fill is abandoned, and if that cannot be (a write is in flight) its lock stops being renewed.
+    if (leader) {
+      reply.raw.once('close', () => {
+        fill.abandon();
+        leader.closed();
+      });
+    }
   });
 
   // A hit: no provider, no budget hold. It counts as one request against the key's rpm and gives the token

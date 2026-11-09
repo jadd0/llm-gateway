@@ -8,6 +8,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { buildApp } from '../app.ts';
 import { keyStoreFromConfig } from '../auth/key-store.ts';
 import { periodOf } from '../budget/period.ts';
+import { KEY_VERSION } from '../cache/key.ts';
+import type { CacheFill } from '../cache/plugin.ts';
 import { createDb, type Db } from '../db/client.ts';
 import { spendLedger, tenants, tenantSpend } from '../db/schema.ts';
 import { cleanup, seedKey, testConfig } from '../test-env.ts';
@@ -39,6 +41,7 @@ let handle: Db;
 let redis: Redis;
 let gw = '';
 const calls: Record<string, number> = {};
+const abandons: Record<string, number> = {};
 const total = () => Object.values(calls).reduce((a, b) => a + b, 0);
 const tenantIds: string[] = [];
 let cacheDown = false;
@@ -108,6 +111,24 @@ beforeAll(async () => {
       }),
     },
   );
+  // Counts `abandon` calls per prompt: the fill is wrapped as the cache plugin assigns it to the request.
+  app.addHook('onRequest', async (request) => {
+    let fill: CacheFill | null = null;
+    Object.defineProperty(request, 'cacheFill', {
+      get: () => fill,
+      set: (f: CacheFill | null) => {
+        const content = (JSON.parse((request.body as Buffer).toString('utf8')) as { messages: Array<{ content?: string }> }).messages[0]?.content;
+        if (f && typeof content === 'string') {
+          const abandon = f.abandon.bind(f);
+          f.abandon = () => {
+            abandons[content] = (abandons[content] ?? 0) + 1;
+            abandon();
+          };
+        }
+        fill = f;
+      },
+    });
+  });
   await app.listen({ port: 0, host: '127.0.0.1' });
   gw = `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`;
 });
@@ -142,7 +163,7 @@ const until = async (cond: () => Promise<boolean> | boolean, timeoutMs = 3000) =
   return cond();
 };
 // The cache entries (not locks) a scope holds.
-const entries = async (scope: string) => (await redis.keys(`${prefix}cache:v1:${scope}:*`)).filter((k) => !k.endsWith(':lock'));
+const entries = async (scope: string) => (await redis.keys(`${prefix}cache:${KEY_VERSION}:${scope}:*`)).filter((k) => !k.endsWith(':lock'));
 const sse = (text: string) =>
   text
     .split('\n\n')
@@ -451,6 +472,11 @@ describe('response cache on POST /v1/chat/completions', () => {
     await streamed.text();
     await new Promise((r) => setTimeout(r, 100));
     expect(await entries(t.tenantId)).toHaveLength(0);
+    // A streamed request served by a fallback model stores nothing and lets go of its fill, once, as the non-streamed path does.
+    const sbody = req('mock-fb-a', uniq(), { stream: true });
+    await (await post(t.key, sbody)).text();
+    await new Promise((r) => setTimeout(r, 100));
+    expect(abandons[sbody.messages[0]!.content]).toBe(1);
     // The serving model asked for by name is an ordinary request and is cached under its own name.
     const direct = { ...body, model: 'mock-b' };
     await (await post(t.key, direct)).text();

@@ -6,15 +6,19 @@ import type { Lookup } from './store.ts';
 
 type Outcome = 'filled' | 'failed' | 'timeout';
 
-/** What a follower's `read` reports: the entry, a plain miss, or a Redis that could not answer. */
-export type Look<T> = { status: 'hit'; entry: T } | { status: 'miss' } | { status: 'unavailable' };
+/** A leader whose request has closed but never reported is dropped after this many lock lifetimes. */
+const BACKSTOP_LOCKS = 2;
 
 /** What `acquire` decided for one request that missed. */
 export type Acquired =
-  /** This request goes upstream for everyone. `finish` must be called when its fill is written or abandoned. */
-  | { role: 'leader'; finish(outcome: 'filled' | 'failed'): void }
+  /**
+   * This request goes upstream for everyone. `finish` must be called when its fill is written or abandoned.
+   * `closed` says the request is over (the reply finished or the client left): the lock stops being renewed,
+   * and a leader that still has not finished is dropped after a few lock lifetimes.
+   */
+  | { role: 'leader'; finish(outcome: 'filled' | 'failed'): void; closed(): void }
   /** An identical request is already going upstream. `wait` resolves with the entry, or undefined when this request should go upstream itself. */
-  | { role: 'follower'; wait<T>(read: () => Promise<Look<T>>): Promise<T | undefined> }
+  | { role: 'follower'; wait<T>(read: () => Promise<Lookup<T>>): Promise<T | undefined> }
   /** Redis could not say who leads: go upstream alone. */
   | { role: 'solo' };
 
@@ -30,9 +34,9 @@ export interface SingleFlightOptions {
   redis: Redis;
   /** How long the leader's Redis lock lasts between renewals. A leader that stops renewing is gone after this. */
   lockMs: number;
-  /** The most anyone waits for one fill, and the most a leader keeps renewing its lock. */
+  /** The most anyone waits for one fill. */
   waitMs: number;
-  /** How often a waiting follower looks at the entry and the lock. */
+  /** How often a process that follows another process's leader looks at the entry and the lock. */
   pollMs: number;
   /** A Redis answer slower than this is a failure. */
   timeoutMs: number;
@@ -50,9 +54,11 @@ interface Flight {
   /** Resolves once the kind is decided (and, for 'remote', the notification channel is subscribed). */
   ready: Promise<void>;
   settled: Promise<Outcome>;
+  /** The entry the poller found, handed to every waiter so none has to read it again. */
+  entry?: unknown;
   done: boolean;
   polling: boolean;
-  settle(outcome: Outcome): void;
+  settle(outcome: Outcome, entry?: unknown): void;
   /** Called once the kind is decided and, for 'remote', the channel is subscribed. */
   decided(): void;
 }
@@ -60,9 +66,10 @@ interface Flight {
 /**
  * One request in a burst of identical misses goes upstream; the others wait for its fill. Within a process
  * the first request claims the key in a map (no Redis call for the rest). Across processes the first to take
- * `SET lock NX PX` leads: it renews the lock while its call is in flight, so the lock is short and a dead
- * leader frees it within `lockMs`. Followers learn of the fill from the leader's notification, and also look
- * for it themselves every `pollMs`: entry present is a hit; no lock and no entry, or a Redis that does not
+ * `SET lock NX PX` leads: it renews the lock for as long as its request is open, so the lock is short and a
+ * dead leader frees it within `lockMs`. Followers in the leader's own process wait on its in-memory result.
+ * Followers in other processes learn of the fill from the leader's notification, and one poller per flight
+ * also looks for it every `pollMs`: entry present is a hit; no lock and no entry, or a Redis that does not
  * answer, sends them upstream at once. A failure is never shared.
  */
 export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
@@ -74,13 +81,14 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
   let subReady: Promise<boolean> | undefined;
 
   const dropSubscriber = () => {
-    sub?.disconnect();
+    const old = sub;
     sub = undefined;
     subReady = undefined;
+    old?.disconnect();
   };
 
   // The subscriber is a second connection, made when the first request has to wait on another process. One
-  // that never became ready is thrown away so a later call starts over.
+  // that never became ready, or that has since ended, is thrown away so a later call starts over.
   const subscriber = async (): Promise<Redis | undefined> => {
     if (!subReady) {
       const s = opts.redis.duplicate();
@@ -88,6 +96,11 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
       s.on('message', (channel: string, message: string) => {
         channels.get(channel)?.settle(message === 'filled' ? 'filled' : 'failed');
       });
+      const gone = () => {
+        if (sub === s) dropSubscriber();
+      };
+      s.on('end', gone);
+      s.on('close', gone);
       sub = s;
       subReady = waitReady(s, 2000);
     }
@@ -111,8 +124,10 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
       settled,
       done: false,
       polling: false,
-      settle: (o) => {
+      settle: (o, entry) => {
+        if (flight.done) return;
         flight.done = true;
+        flight.entry = entry;
         settle(o);
       },
       decided,
@@ -120,18 +135,19 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
     return flight;
   }
 
-  // One poller per flight per process, however many requests wait on it.
-  function poll<T>(key: string, flight: Flight, read: () => Promise<Look<T>>) {
-    if (flight.polling || flight.done) return;
+  // Only for a flight led by another process: one poller per flight, however many requests wait on it. A
+  // flight led in this process is settled by its leader, so a slow Redis read cannot end it early.
+  function poll<T>(key: string, flight: Flight, read: () => Promise<Lookup<T>>) {
+    if (flight.kind !== 'remote' || flight.polling || flight.done) return;
     flight.polling = true;
     const lockKey = `${key}:lock`;
     let timer: NodeJS.Timeout | undefined;
     const tick = async () => {
       try {
         // Lock first, then the entry: a leader writes the entry before it releases the lock.
-        const locked = flight.kind === 'remote' ? (await within(opts.redis.exists(lockKey), opts.timeoutMs)) === 1 : true;
+        const locked = (await within(opts.redis.exists(lockKey), opts.timeoutMs)) === 1;
         const look = await read();
-        if (look.status === 'hit') flight.settle('filled');
+        if (look.status === 'hit') flight.settle('filled', look.entry);
         else if (look.status === 'unavailable' || !locked) flight.settle('failed');
       } catch {
         flight.settle('failed');
@@ -147,7 +163,7 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
   }
 
   const wait = (key: string, flight: Flight) =>
-    async function <T>(read: () => Promise<Look<T>>): Promise<T | undefined> {
+    async function <T>(read: () => Promise<Lookup<T>>): Promise<T | undefined> {
       await flight.ready;
       if (flight.kind === 'remote') {
         // The fill may have landed before this process was listening.
@@ -164,6 +180,7 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
         }),
       ]).finally(() => clearTimeout(timer));
       if (outcome === 'failed') return undefined; // the leader gave up or Redis stopped answering: go upstream
+      if (outcome === 'filled' && flight.entry !== undefined) return flight.entry as T; // the poller already has it
       const last = await read(); // filled, or the wait ran out: one last look
       return last.status === 'hit' ? last.entry : undefined;
     };
@@ -213,14 +230,14 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
         flight.decided();
         let finished = false;
         let renewing: NodeJS.Timeout | undefined;
-        let safety: NodeJS.Timeout | undefined;
+        let backstop: NodeJS.Timeout | undefined;
         const stop = () => {
           clearInterval(renewing);
-          clearTimeout(safety);
+          clearTimeout(backstop);
           leaving.delete(stop);
         };
         leaving.add(stop);
-        // The lock is short; renewing it while the call is in flight is what keeps the followers waiting.
+        // The lock is short; renewing it while the request is open is what keeps the followers waiting.
         renewing = setInterval(() => {
           track(
             within(opts.redis.eval(RENEW, 1, lockKey, token, opts.lockMs), opts.timeoutMs).then(
@@ -232,9 +249,6 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
           );
         }, Math.max(1, Math.floor(opts.lockMs / 3)));
         renewing.unref();
-        // A leader that never reports (a bug, a lost reply) is dropped when the longest wait would be over.
-        safety = setTimeout(() => finish('failed'), opts.waitMs);
-        safety.unref();
         const finish = (outcome: 'filled' | 'failed') => {
           if (finished) return;
           finished = true;
@@ -254,7 +268,16 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
             })(),
           );
         };
-        return { role: 'leader', finish };
+        const closed = () => {
+          if (finished) return;
+          clearInterval(renewing);
+          // The request is over. A fill still being written has a few lock lifetimes; one that never reports
+          // (a bug, a lost reply) is dropped then, and its lock has already lapsed on its own.
+          clearTimeout(backstop);
+          backstop = setTimeout(() => finish('failed'), opts.lockMs * BACKSTOP_LOCKS);
+          backstop.unref();
+        };
+        return { role: 'leader', finish, closed };
       }
 
       // Another process leads: listen for it before anyone reads.

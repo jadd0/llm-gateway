@@ -2,7 +2,8 @@ import type { Redis } from 'ioredis';
 import { isStarting, replyWithin } from '../redis.ts';
 import type { CachedCompletion } from './replay.ts';
 
-export type Lookup = { status: 'hit'; entry: CachedCompletion } | { status: 'miss' } | { status: 'unavailable' };
+/** What a read of the cache found: the entry, a plain miss, or a Redis that could not answer. */
+export type Lookup<T = CachedCompletion> = { status: 'hit'; entry: T } | { status: 'miss' } | { status: 'unavailable' };
 export type Written = 'stored' | 'too-large' | 'unavailable';
 
 export interface CacheStore {

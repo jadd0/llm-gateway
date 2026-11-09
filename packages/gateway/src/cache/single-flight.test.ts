@@ -208,14 +208,88 @@ describe('single flight', () => {
     expect(performance.now() - started).toBeLessThan(500);
   });
 
-  it('a leader that never reports is dropped when the longest wait is over', async () => {
-    const sf = make({ lockMs: 100, waitMs: 200 });
+  it('a leader whose request closed without a fill stops renewing, and is dropped within a few lock lifetimes', async () => {
+    const sf = make({ lockMs: 300, waitMs: 20_000 });
+    const key = freshKey();
+    const lead = await sf.acquire(key);
+    if (lead.role !== 'leader') throw new Error('expected a leader');
+    expect((await sf.acquire(key)).role).toBe('follower');
+    await sleep(500); // still open: renewed well past one lock lifetime
+    expect(await redis.exists(`${key}:lock`)).toBe(1);
+    lead.closed(); // the reply is over; finish is never called
+    await sleep(450); // one lock lifetime and a margin
+    expect(await redis.exists(`${key}:lock`)).toBe(0); // nobody renewed it: it lapsed on its own
+    await sleep(400); // twice the lock lifetime in all
+    await sf.idle();
+    expect((await sf.acquire(key)).role).toBe('leader'); // the in-process flight is gone too
+  });
+
+  it('a request that is still open keeps its lock far past the longest wait', async () => {
+    const sf = make({ lockMs: 150, waitMs: 200 });
     const key = freshKey();
     expect((await sf.acquire(key)).role).toBe('leader');
+    await sleep(700); // three waits
+    expect(await redis.exists(`${key}:lock`)).toBe(1);
     expect((await sf.acquire(key)).role).toBe('follower');
-    await sleep(450);
-    await sf.idle();
-    expect((await sf.acquire(key)).role).toBe('leader'); // the next burst gets a leader of its own
+  });
+
+  it('followers in the leader\'s process wait on it without reading Redis', async () => {
+    const sf = make({ pollMs: 30, waitMs: 5_000 });
+    const key = freshKey();
+    const lead = await sf.acquire(key);
+    if (lead.role !== 'leader') throw new Error('expected a leader');
+    const f = await sf.acquire(key);
+    if (f.role !== 'follower') throw new Error('expected a follower');
+    let reads = 0;
+    const waiting = f.wait(async () => {
+      reads++;
+      return { status: 'unavailable' } as const; // a slow or failed GET must not end a local flight early
+    });
+    await sleep(400);
+    expect(reads).toBe(0);
+    await store.set(key, answer('local'));
+    lead.finish('filled');
+    expect(await waiting).toBeUndefined(); // its one look after the fill is the unavailable one
+    expect(reads).toBe(1);
+  });
+
+  it('a remote poller\'s unavailable read ends only that remote flight, which is then gone', async () => {
+    const a = make({ lockMs: 5_000, waitMs: 5_000, pollMs: 40 });
+    const b = make({ lockMs: 5_000, waitMs: 5_000, pollMs: 40 });
+    const key = freshKey();
+    const lead = await a.acquire(key);
+    if (lead.role !== 'leader') throw new Error('expected a leader');
+    const local = await a.acquire(key);
+    const remote = await b.acquire(key);
+    if (local.role !== 'follower' || remote.role !== 'follower') throw new Error('expected followers');
+    const localWait = local.wait(() => look(key));
+    let reads = 0;
+    const remoteResult = await remote.wait(async () => (reads++ === 0 ? { status: 'miss' } : { status: 'unavailable' }));
+    expect(remoteResult).toBeUndefined(); // the early look missed, the first poll was unavailable
+    await store.set(key, answer('for the local one'));
+    lead.finish('filled');
+    expect((await localWait)?.content).toBe('for the local one'); // the other process's failure did not reach it
+    await a.idle();
+    expect((await b.acquire(key)).role).toBe('leader'); // b's flight was removed when it settled
+  });
+
+  it('what the poller finds is handed to the waiter, not read again', async () => {
+    const a = make({ lockMs: 5_000, waitMs: 5_000, pollMs: 40 });
+    const b = make({ lockMs: 5_000, waitMs: 5_000, pollMs: 40 });
+    const key = freshKey();
+    expect((await a.acquire(key)).role).toBe('leader');
+    const f = await b.acquire(key);
+    if (f.role !== 'follower') throw new Error('expected a follower');
+    const found = answer('found by the poller');
+    let reads = 0;
+    const got = await f.wait(async () => {
+      reads++;
+      if (reads === 1) return { status: 'miss' } as const; // before anything landed
+      if (reads === 2) return { status: 'hit', entry: found } as const; // the poller's look
+      return { status: 'miss' } as const; // any read after that would lose the entry
+    });
+    expect(got).toBe(found);
+    expect(reads).toBe(2);
   });
 
   it('a lock that is someone else\'s by the time the old leader finishes is not deleted or renewed by it', async () => {
@@ -284,7 +358,7 @@ describe('single flight', () => {
     expect(waited).toBeLessThan(600 + 100 + 500); // lock lifetime + one look + latency
   });
 
-  it('Redis freezing mid-stampede sends every follower, in both processes, upstream within a timeout and a look', async () => {
+  it('Redis freezing mid-stampede sends the other process\'s followers upstream within a timeout and a look, and the leader\'s own process waits on the leader', async () => {
     const proxy = await freezable();
     try {
       const timeoutMs = 100;
@@ -299,6 +373,7 @@ describe('single flight', () => {
       const lead = await a.acquire(key);
       expect(lead.role).toBe('leader');
       const waits: Promise<number>[] = [];
+      const local: Promise<number>[] = [];
       let frozenAt = 0;
       const join = async (sf: SingleFlight, from: typeof storeA) => {
         const f = await sf.acquire(key);
@@ -307,15 +382,21 @@ describe('single flight', () => {
         expect(entry).toBeUndefined();
         return performance.now() - frozenAt;
       };
-      for (let i = 0; i < 20; i++) waits.push(join(i % 2 ? a : b, i % 2 ? storeA : storeB));
+      for (let i = 0; i < 20; i++) (i % 2 ? local : waits).push(join(i % 2 ? a : b, i % 2 ? storeA : storeB));
       await sleep(300); // everyone is waiting on a healthy Redis, the leader's call still in flight
       proxy.freeze();
       frozenAt = performance.now();
       const took = await Promise.all(waits);
-      expect(took).toHaveLength(20);
+      expect(took).toHaveLength(10);
       // A command times out after timeoutMs, and the look that finds out comes at most pollMs after the freeze.
       expect(Math.max(...took)).toBeLessThan(timeoutMs + pollMs + 400);
+      // The leader's own process does not look at Redis: its followers go when the leader reports.
+      let released = false;
+      void Promise.all(local).then(() => (released = true));
+      await sleep(300);
+      expect(released).toBe(false);
       if (lead.role === 'leader') lead.finish('failed');
+      expect(await Promise.all(local)).toHaveLength(10);
     } finally {
       await proxy.close();
     }
@@ -383,6 +464,47 @@ describe('single flight', () => {
     await store.set(k2, answer('woken'));
     lead2.finish('filled');
     expect((await waiting)?.content).toBe('woken');
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  it('a subscriber that ended later is replaced by the next call', async () => {
+    const made: Redis[] = [];
+    const spying = new Proxy(redis, {
+      get(target, prop) {
+        if (prop === 'duplicate') {
+          return (...args: unknown[]) => {
+            const d = (target.duplicate as (...a: unknown[]) => Redis)(...args);
+            made.push(d);
+            return d;
+          };
+        }
+        const v = Reflect.get(target, prop, target);
+        return typeof v === 'function' ? v.bind(target) : v;
+      },
+    });
+    const leaderSide = make();
+    const follower = make({ redis: spying, pollMs: 30_000, waitMs: 30_000 });
+    const k1 = freshKey();
+    expect((await leaderSide.acquire(k1)).role).toBe('leader');
+    const first = await follower.acquire(k1);
+    if (first.role !== 'follower') throw new Error('expected a follower');
+    void first.wait(() => look(k1)); // makes the subscriber
+    await sleep(100);
+    expect(made).toHaveLength(1);
+    made[0]!.disconnect(); // the subscriber's connection ends after it was ready
+
+    const k2 = freshKey();
+    const lead2 = await leaderSide.acquire(k2);
+    if (lead2.role !== 'leader') throw new Error('expected a leader');
+    const second = await follower.acquire(k2);
+    if (second.role !== 'follower') throw new Error('expected a follower');
+    const waiting = second.wait(() => look(k2));
+    await sleep(100);
+    expect(made).toHaveLength(2);
+    const started = performance.now();
+    await store.set(k2, answer('woken again'));
+    lead2.finish('filled');
+    expect((await waiting)?.content).toBe('woken again');
     expect(performance.now() - started).toBeLessThan(1_000);
   });
 

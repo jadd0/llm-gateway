@@ -185,7 +185,7 @@ const schema = z
     path: ['CACHE_WAIT_MS'],
   })
   .refine((e) => e.CACHE_ENABLED === 'false' || e.CACHE_WAIT_MS >= e.CACHE_LOCK_MS, {
-    message: 'CACHE_WAIT_MS must not be shorter than CACHE_LOCK_MS: a leader is renewing its lock for at least that long',
+    message: 'CACHE_WAIT_MS must not be shorter than CACHE_LOCK_MS: a waiter should outlast one lock lifetime',
     path: ['CACHE_WAIT_MS'],
   })
   .refine((e) => e.BUDGET_ENABLED === 'false' || e.BUDGET_RESERVATION_TTL_S * 1000 > e.UPSTREAM_MAX_DURATION_MS + 30_000, {
@@ -259,10 +259,11 @@ export interface Config {
   cacheMaxEntryBytes: number;
   /** Cache requests that do not set temperature 0 too. */
   cacheAllowNondeterministic: boolean;
-  /** How long the request that leads an identical-miss burst holds the Redis lock. */
+  /** How long the Redis lock of the request that leads an identical-miss burst lasts between renewals; the leader renews it while its request is open, so a dead leader frees it within this. */
   cacheLockMs: number;
-  /** How long a request waits for the leader's fill before going upstream itself. */
+  /** How often a request waiting on a leader in another process looks for the fill and the lock. */
   cachePollMs: number;
+  /** The most a request waits for the leader's fill before going upstream itself. */
   cacheWaitMs: number;
   cacheRedisTimeoutMs: number;
   /** Characters (code points) per content chunk when a cached answer is replayed as a stream. */

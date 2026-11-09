@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { positiveInt } from '../providers/common.ts';
 
 /** Changes whenever `normalise` does, so entries made under old rules are never read under new ones. */
-export const KEY_VERSION = 'v1';
+export const KEY_VERSION = 'v2';
 
 // Fields that do not change the answer. Everything else in the request is part of the key, so a field this
 // file has never heard of can make two requests different but never make different requests the same.
@@ -90,7 +90,7 @@ export const scopeOf = (tenant: { tenantId: string; cacheShared: boolean }): str
   tenant.cacheShared ? 'shared' : tenant.tenantId;
 
 /**
- * `{prefix}cache:v1:{scope}:{sha256}`. The scope is hashed in as well as written out: a key is only ever
+ * `{prefix}cache:v2:{scope}:{sha256}`. The scope is hashed in as well as written out: a key is only ever
  * built for the caller's own scope, there is no lookup-time filter to get wrong.
  */
 export function cacheKey(prefix: string, scope: string, normalised: Record<string, unknown>): string {

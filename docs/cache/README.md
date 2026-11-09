@@ -56,10 +56,12 @@ one request and gives the token estimate back in full.
 ## Identical misses: single-flight
 
 For non-streamed requests, the first miss takes a lock (in-process map, then Redis `SET NX PX CACHE_LOCK_MS`) and goes
-upstream. The lock is short (5 s) and the leader renews it every third of that while its call is in flight, so a
-leader that dies frees it within `CACHE_LOCK_MS` and a slow call never loses it. Identical requests, in this process or
-another, are served as hits when the fill lands: they get the leader's pub/sub message, and also look for themselves
-every `CACHE_POLL_MS`. Entry present is a hit. No entry and no lock, a Redis read that fails or times out, or a failed
+upstream. The lock is short (5 s) and the leader renews it every third of that for as long as its request is open, so a
+leader that dies frees it within `CACHE_LOCK_MS` and a slow call never loses it. When the request closes the renewal
+stops, and a leader that still has not reported is dropped after twice `CACHE_LOCK_MS`. Identical requests in the
+leader's process wait on its in-memory result. Those in another process are served as hits when the fill lands: they
+get the leader's pub/sub message, and one poller per key also looks for itself every `CACHE_POLL_MS`; an entry it
+finds is handed to every waiter. Entry present is a hit. No entry and no lock, a Redis read that fails or times out, or a failed
 subscribe sends the request upstream at once. Nobody waits longer than `CACHE_WAIT_MS` (at most
 `UPSTREAM_MAX_DURATION_MS`). A leader that fails or never answers is never inherited: each waiter goes upstream on its
 own. If the lock's `SET` times out, the request goes upstream alone and takes back the lock by token if it landed.
