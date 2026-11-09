@@ -151,6 +151,8 @@ What the run measures:
   admitted and refused (402) counts, the largest settled spend as a share of the cap, and the largest overshoot in
   micro-USD, read from Postgres. A round's worst case is 312 micro-USD, so a round admits 32 when every decision is made while
   the first calls are still in flight.
+- **What the Postgres mirror costs:** the same overhead pair also covers it, since every request now writes its hold to
+  Postgres as well as Redis.
 - **Redis down:** the same flood (`flood-redis-down.json`) and the instant profile with budgets off and on
   (`gateway-instant-redis-down-budget-{off,on}.json`) against a gateway whose Redis is unreachable, so every decision is
   made on the Postgres path.

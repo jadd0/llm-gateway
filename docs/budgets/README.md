@@ -18,46 +18,60 @@ ends, the reservation is replaced by what was really spent. Over the cap the ans
    Unlike the rate limiter, the output is never trimmed to a per-minute size: money is held for the most the call can cost.
 3. `budget.lua` does the check and the hold in one atomic Redis script: `spent + reserved + estimate > cap` refuses,
    otherwise the estimate is added to `reserved`. Two gateways can never both see "10 cents left" and both spend it.
-   The response carries `x-budget-remaining-usd` (after this reservation).
+   The hold is then **also written to Postgres** (`budget_reservations`). If that write fails the Redis hold is given
+   back and the answer is `503 budget_unavailable`. The response carries `x-budget-remaining-usd` (after this reservation).
 4. When the call ends, one shared step (`usage/settle.ts`) tells the rate limiter and the budget the same thing:
    - **used**: the provider reported usage. The budget charges the actual cost.
    - **refund**: the gateway or the provider did no work (non-2xx before any bytes, upstream unreachable). Nothing is charged.
    - **keep**: no usage was seen (client left, stream cut, a 2xx whose body broke, no usage in the answer). The whole
      reservation is charged and the ledger row is marked `estimated`.
    A request the budget refuses also hands back the tokens the rate limiter had taken for it.
-5. Every charge is written to Postgres after the response (`spend_ledger`, one row per request id, plus `tenant_spend`),
-   with 3 retries. Redis holds the live balance; Postgres is the record the balance can be rebuilt from.
+5. The settle is one Postgres transaction after the response: the hold row is deleted, the `spend_ledger` row is
+   written (one per request id) and `tenant_spend` is increased, with 3 retries. Then the live Redis balance is
+   corrected on the **current** epoch. Each charge is numbered in `tenant_spend.charges` under the row lock and
+   carries the running total, and Redis only takes a total that is ahead of the one it has, so a repeated, reordered
+   or already-rebuilt settle can never count a charge twice or lose one.
 
 Money is integer micro-USD (1 USD = 1,000,000), never a float; the CLI refuses a budget that isn't a plain USD amount.
 `keys set-budget <tenant> --monthly-usd 0.01` and `keys show-spend <tenant> [--period YYYY-MM]`.
 
+**The cost:** one extra Postgres write on every request (the mirrored hold) plus the settle transaction. Its effect on
+latency is measured in the pending quiet benchmark (`gateway-*-budget-{off,on}`).
+
 ## When Redis is down
 
-If Redis doesn't answer within `BUDGET_REDIS_TIMEOUT_MS` the decision moves to Postgres (D-018): one short transaction
-locks the tenant's `tenant_spend` row, adds up unexpired `budget_reservations`, checks the cap and inserts a hold. The lock
-is held for the check only, never across the provider call. The rate limiter fails open (D-016); the budget does not,
-because that would uncap spend. If neither store can decide the answer is `503 budget_unavailable`.
+The cap stays hard (D-024). Every hold is in Postgres as well as Redis, so when Redis is declared down the decision
+moves to Postgres (D-018): one short transaction locks the tenant's `tenant_spend` row, adds up all unexpired
+`budget_reservations` (including the holds Redis admitted a moment before it died), checks the cap and inserts a hold.
+The lock is held for the check only, never across the provider call. The rate limiter fails open (D-016); the budget does
+not, because that would uncap spend. If neither store can decide the answer is `503 budget_unavailable`.
 
-The **epoch** is a number in Postgres that is part of every Redis balance key. An instance that falls back to Postgres
-bumps it once per outage, and every instance re-reads it every `BUDGET_EPOCH_REFRESH_S`. Spend charged on the
-Postgres path never reaches the old Redis balance, so after recovery the new epoch's key doesn't exist and the next
-reserve rebuilds it from `tenant_spend`. Rebuilds are safe to race: the `init` script only creates the balance if it is
-still missing. A reservation also lapses on its own (`BUDGET_RESERVATION_TTL_S`), so a gateway that crashes mid-request
-can't hold money forever.
+Redis is declared down only when a failed call is followed by a failed PING, or after `BUDGET_OUTAGE_FAILURES` (3) failed
+calls in a row: one slow call is retried, it does not move the fleet. The **epoch** is a number in Postgres that is part
+of every Redis balance key. Declaring an outage bumps it with a compare-and-set from the value seen when the failures
+began, so of three gateways that see the same outage one bumps and the other two adopt the new number. After recovery
+the new epoch's key doesn't exist and the next reserve rebuilds it from Postgres in one snapshot: `spent` and the charge
+count from `tenant_spend`, plus every live hold, so the rebuilt balance equals the record and still counts in-flight
+requests. A reservation also lapses on its own (`BUDGET_RESERVATION_TTL_S`, which must exceed `UPSTREAM_TIMEOUT_MS` or
+the gateway won't start), so a gateway that crashes mid-request can't hold money forever.
 
 ## Known limits (documented, not closed here)
 
-- **R6, partial outages.** If some instances are on Redis and some on Postgres, neither sees the other's reservations,
-  so the cap can be exceeded by up to the in-flight worst cases on the minority path. Owned by PR 12, which measures it
-  with 3 instances. The same applies to PG-path holds that are still in flight when an instance returns to Redis.
-- **R7, settled-spend writes are in-process.** After the response the gateway writes the ledger row with retries;
-  a crash between the Redis settle and the Postgres write loses that record. The durable queue is PR 10.
-- **Prompt estimate too low.** The estimate is a heuristic. If the provider reports more prompt tokens than estimated
-  the actual charge exceeds the hold, so settled spend can pass the cap by that request's estimate error (in flight
-  requests × their error, at most). A test covers it; the flood benchmark with the mock cannot show it because the
-  mock counts prompt tokens by the same heuristic.
-- A call that outlives its reservation TTL still has its real cost added when it settles, but money it held may have been
-  given to another request meanwhile.
+- **R6, partial outages.** With some instances on Redis and some on Postgres, the Postgres-path instance sees every
+  hold; Redis-path instances see the Postgres-path holds only when they next rebuild, which happens at the next
+  epoch refresh (`BUDGET_EPOCH_REFRESH_S`). The verifier measured 1.92x the cap with Redis-only holds; the bound with
+  Postgres holds has not been measured yet and is to be measured in PR 12 with 3 instances.
+- **R7, settled-spend writes are in-process.** The Postgres transaction that removes the hold and records the charge
+  runs after the response, with 3 retries. If it still fails, or the process dies before it runs, nothing is written:
+  the hold stays in Redis and Postgres until its TTL and then the whole charge is lost (the tenant is under-billed,
+  never over-capped by this). The durable queue is PR 10.
+- **Prompt estimate too low.** The estimate is a heuristic made before the call. If the provider reports more prompt
+  tokens than estimated, the actual charge exceeds the hold, so settled spend can pass the cap by about the in-flight
+  requests times their estimate error. The verifier measured one concurrent burst with a 10x underestimate reaching
+  3.12x the cap. That bound is inherent to estimating before the call; the flood benchmark with the mock cannot show it
+  because the mock counts prompt tokens by the same heuristic.
+- A call that outlives its reservation TTL still has its real cost added when it settles, but the money it held may
+  have been given to another request meanwhile.
 - Prices exist for `mock-*` models only (a fictitious $1 in / $3 out per million tokens); real prices arrive with the adapters.
 
 ## Numbers
@@ -78,11 +92,14 @@ that fits 7 and exactly 7 are admitted.
 **Why integer micro-dollars?** Floats can't add up cents exactly, and money that drifts can't be audited. Integers add
 exactly; costs round up so rounding never favours the tenant.
 
-**What happens if Redis dies mid-month?** Decisions move to a Postgres row-lock path, so the cap still holds; the epoch
-bumps; on recovery the Redis balance is rebuilt from `tenant_spend`, which has every charge from both paths.
+**What happens if Redis dies mid-month?** The cap still holds. Every hold is also a row in Postgres, so the Postgres
+path counts the requests Redis had already admitted; when Redis returns, the balance is rebuilt from Postgres with
+those holds in it, and settles from before the outage land on the rebuilt balance exactly once. Tests kill Redis with
+holds in flight and flood: exactly the money that fits is admitted.
 
-**What's the epoch for?** Redis keys include it so a balance that missed spend while Redis was unreachable or bypassed is
-never trusted again.
+**What's the epoch for?** Redis keys include it so a balance that missed spend while Redis was unreachable is never
+trusted again. It moves once per outage (compare-and-set), not once per gateway.
 
-**Where can the cap still be broken, and by how much?** R6 (partial outage, bounded by minority-path in-flight worst
-cases), a low prompt estimate (bounded by that request's estimate error), and R7 (a lost ledger write after a crash).
+**Where can the cap still be broken, and by how much?** By a low prompt estimate (about in-flight requests times their
+estimate error; one 10x-underestimate burst reached 3.12x), in a partial outage (R6, to be measured in PR 12), and a lost
+Postgres settle write under-counts a charge (R7).
