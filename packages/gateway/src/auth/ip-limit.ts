@@ -2,26 +2,11 @@ import { readFileSync } from 'node:fs';
 import { isIPv6 } from 'node:net';
 import type { Redis } from 'ioredis';
 import { isStarting } from '../redis.ts';
+import type { PostgresGuard } from './key-store.ts';
 
-// The per-key limiter's bounded-adjust script: delta 0 reads the bucket (after refill), -1 charges a failure.
+// The per-key limiter's bounded-adjust script, used here to hand a token back (delta +1, capped at capacity).
 const ADJUST_LUA = readFileSync(new URL('../ratelimit/token-bucket-adjust.lua', import.meta.url), 'utf8');
-
-export type IpAdmit =
-  | { status: 'allowed' }
-  | { status: 'denied'; retryAfterMs: number }
-  /** Redis could not answer in time: the request goes on to the key check, unlimited. */
-  | { status: 'skipped' };
-
-export interface IpLimiter {
-  /**
-   * Whether the client's bucket still has a token. Read-only: a valid request is never charged, so a busy
-   * legitimate client is not limited however many requests it has in flight. Called before the key is
-   * looked up, so a refused client costs no Postgres query. Never throws.
-   */
-  admit(ip: string, now?: number): Promise<IpAdmit>;
-  /** Charges one failed authentication. Never throws. */
-  failed(ip: string, now?: number): Promise<void>;
-}
+const TAKE_LUA = readFileSync(new URL('./ip-take.lua', import.meta.url), 'utf8');
 
 export interface IpLimiterOptions {
   redis: Redis;
@@ -35,8 +20,19 @@ export interface IpLimiterOptions {
   clock?: () => number;
 }
 
+export interface IpLimiter {
+  /**
+   * Takes one token from the client's bucket, atomically, or refuses when it holds none. A token taken
+   * for a key that then proves valid is handed back through the result's refund(), so only failed
+   * authentications cost anything. When Redis cannot answer in time the request goes on unlimited.
+   * Never throws.
+   */
+  take(ip: string, now?: number): ReturnType<PostgresGuard>;
+}
+
 type Commands = Redis & {
   ipAdjust(k: string, ...args: Array<string | number>): Promise<number>;
+  ipTake(k: string, ...args: Array<string | number>): Promise<[number, number]>;
 };
 
 class RedisTimeout extends Error {
@@ -66,6 +62,7 @@ export function ipBucketId(ip: string): string {
 export function createIpLimiter(opts: IpLimiterOptions): IpLimiter {
   const { redis, keyPrefix, limitPerMin, timeoutMs, log, clock } = opts;
   redis.defineCommand('ipAdjust', { numberOfKeys: 1, lua: ADJUST_LUA });
+  redis.defineCommand('ipTake', { numberOfKeys: 1, lua: TAKE_LUA });
   const cmd = redis as Commands;
   const key = (ip: string) => `${keyPrefix}ipfail:{${ipBucketId(ip)}}`;
 
@@ -99,32 +96,29 @@ export function createIpLimiter(opts: IpLimiterOptions): IpLimiter {
       );
     });
 
-  // Moves the bucket by delta and returns the whole tokens left (negative once failures outrun the refill).
-  const move = (ip: string, delta: number, now?: number): Promise<number> => {
-    const at = now ?? clock?.();
-    return withTimeout(cmd.ipAdjust(key(ip), limitPerMin, delta, ...(at === undefined ? [] : [at])));
+  const at = (now?: number) => now ?? clock?.();
+
+  const refund = async (ip: string, now?: number): Promise<void> => {
+    try {
+      const t = at(now);
+      await withTimeout(cmd.ipAdjust(key(ip), limitPerMin, 1, ...(t === undefined ? [] : [t])));
+      recovered();
+    } catch (err) {
+      outage(err);
+    }
   };
 
   return {
-    async admit(ip, now) {
+    async take(ip: string, now?: number) {
       try {
-        const left = await move(ip, 0, now);
+        const t = at(now);
+        const [taken, waitMs] = await withTimeout(cmd.ipTake(key(ip), limitPerMin, ...(t === undefined ? [] : [t])));
         recovered();
-        if (left >= 1) return { status: 'allowed' };
-        // Time for the bucket to climb back to one token at limitPerMin tokens a minute.
-        return { status: 'denied', retryAfterMs: Math.ceil(((1 - left) * 60_000) / limitPerMin) };
+        if (taken === 1) return { refused: false, refund: () => refund(ip, now) };
+        return { refused: true, retryAfterMs: waitMs };
       } catch (err) {
         outage(err);
-        return { status: 'skipped' };
-      }
-    },
-
-    async failed(ip, now) {
-      try {
-        await move(ip, -1, now);
-        recovered();
-      } catch (err) {
-        outage(err);
+        return { refused: false, refund: async () => {} };
       }
     },
   };

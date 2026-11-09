@@ -53,7 +53,24 @@ export function buildApp(
         commandTimeoutMs: Math.max(500, config.rateLimitRedisTimeoutMs, config.budgetRedisTimeoutMs, config.breakerRedisTimeoutMs),
       })
     : null;
-  const keyStore = keyStoreFromConfig(config, handle.db, config.authCache === 'redis' ? redis : null, app.log);
+  const ipLimiter =
+    redis !== null && config.authFailLimitPerMin > 0
+      ? createIpLimiter({
+          redis,
+          keyPrefix: config.redisKeyPrefix,
+          limitPerMin: config.authFailLimitPerMin,
+          timeoutMs: config.rateLimitRedisTimeoutMs,
+          log: app.log,
+          ...(extra.rateLimitClock ? { clock: extra.rateLimitClock } : {}),
+        })
+      : undefined;
+  const keyStore = keyStoreFromConfig(
+    config,
+    handle.db,
+    config.authCache === 'redis' ? redis : null,
+    app.log,
+    ipLimiter ? (ip) => ipLimiter.take(ip) : undefined,
+  );
   app.addHook('onClose', async () => {
     // Close everything even if one close fails.
     redis?.disconnect();
@@ -79,17 +96,6 @@ export function buildApp(
   app.setNotFoundHandler((_request, reply) =>
     reply.code(404).send(errorBody('unknown route', 'invalid_request_error')),
   );
-  const ipLimiter =
-    redis !== null && config.authFailLimitPerMin > 0
-      ? createIpLimiter({
-          redis,
-          keyPrefix: config.redisKeyPrefix,
-          limitPerMin: config.authFailLimitPerMin,
-          timeoutMs: config.rateLimitRedisTimeoutMs,
-          log: app.log,
-          ...(extra.rateLimitClock ? { clock: extra.rateLimitClock } : {}),
-        })
-      : undefined;
   app.register(auth, { keyStore, pepper: config.apiKeyPepper, ...(ipLimiter ? { ipLimiter } : {}) });
   if (config.rateLimitEnabled && redis !== null) {
     const limiter = createLimiter({

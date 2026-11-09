@@ -20,6 +20,8 @@ interface Gw {
   url: string;
   prefix: string;
   config: ReturnType<typeof testConfig>;
+  /** A valid key the warm-up has cached. */
+  key: string;
 }
 
 async function start(overrides: Record<string, string> = {}): Promise<Gw> {
@@ -31,11 +33,12 @@ async function start(overrides: Record<string, string> = {}): Promise<Gw> {
   await app.listen({ port: 0, host: '127.0.0.1' });
   apps.push(app);
   prefixes.push(config.redisKeyPrefix);
-  const gw = { url: `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`, prefix: config.redisKeyPrefix, config };
+  const gw: Gw = { key: '', url: `http://127.0.0.1:${(app.server.address() as AddressInfo).port}`, prefix: config.redisKeyPrefix, config };
   // Redis commands fail until the app's client has connected (and the limiter then fails open): send one
   // valid request at a time until the key cache holds the key (the same client serves the limiter, a full bucket expires at once).
   const seeded = await seedKey(handle.db, config);
   tenantIds.push(seeded.tenantId);
+  gw.key = seeded.key;
   for (let i = 0; i < 100 && (await redis.keys(`${gw.prefix}apikey:*`)).length === 0; i++) {
     await get(gw, { authorization: `Bearer ${seeded.key}` });
     await new Promise((r) => setTimeout(r, 50));
@@ -65,30 +68,67 @@ afterAll(async () => {
 });
 
 describe('failed-auth limit per address', () => {
-  it('failed auths from one IP are refused after the limit, before Postgres', async () => {
+  it('an exhausted address: cached valid key 200, unknown keys 429, Postgres untouched', async () => {
     const gw = await start();
     // Control: before the limit a bad key is a plain 401 that reached Postgres.
-    expect((await get(gw, bad())).status).toBe(401);
+    const first = bad();
+    expect((await get(gw, first)).status).toBe(401);
     expect(await lookups(gw)).toBe(1);
 
     // The first LIMIT failures, one at a time, are the limit's worth: each reaches Postgres.
     for (let i = 1; i < LIMIT; i++) expect((await get(gw, bad())).status).toBe(401);
     expect(await lookups(gw)).toBe(LIMIT);
-    // Then 10 000 random well-formed keys, 100 in flight at a time: all refused ahead of Postgres.
+
+    // Then 10 000 random well-formed keys, 500 in flight at a time: all refused ahead of Postgres.
     const statuses = new Map<number, number>();
-    for (let i = 0; i < 100; i++) {
-      const batch = await Promise.all(Array.from({ length: 100 }, () => get(gw, bad()).then((r) => r.status)));
+    for (let i = 0; i < 20; i++) {
+      const batch = await Promise.all(Array.from({ length: 500 }, () => get(gw, bad()).then((r) => r.status)));
       for (const s of batch) statuses.set(s, (statuses.get(s) ?? 0) + 1);
     }
     expect(statuses.get(429)).toBe(10_000);
     expect(statuses.get(401)).toBeUndefined();
-    expect(await lookups(gw)).toBe(LIMIT);
+    // The take is one atomic script, so the bound is the limit itself: no concurrent overshoot.
+    expect(await lookups(gw)).toBeLessThanOrEqual(LIMIT);
 
     const refused = await get(gw, bad());
     expect(refused.status).toBe(429);
     expect(refused.headers.get('retry-after')).not.toBeNull();
     expect(((await refused.json()) as { error: { code: string } }).error.code).toBe('auth_rate_limit_exceeded');
-  }, 60_000);
+
+    // A cached "unknown key" answers without Postgres but is still a failed authentication: charged, so 429 now.
+    expect((await get(gw, first)).status).toBe(429);
+    // A key already in the cache is never refused, whatever state the address's bucket is in.
+    for (let i = 0; i < 5; i++) expect((await get(gw, { authorization: `Bearer ${gw.key}` })).status).toBe(200);
+    expect(await lookups(gw)).toBeLessThanOrEqual(LIMIT);
+  }, 120_000);
+
+  it('a negative-cached unknown key is charged to the address without a Postgres query', async () => {
+    const gw = await start();
+    const unknown = bad();
+    expect((await get(gw, unknown)).status).toBe(401); // reaches Postgres, caches "unknown"
+    expect(await lookups(gw)).toBe(1);
+    // LIMIT-1 more hits on the cache drain what is left of the bucket (one token went to the first request).
+    for (let i = 0; i < LIMIT - 1; i++) expect((await get(gw, unknown)).status).toBe(401);
+    expect(await lookups(gw)).toBe(1);
+    expect((await get(gw, unknown)).status).toBe(429);
+  }, 30_000);
+
+  it('a cached valid key makes no call on the address bucket', async () => {
+    const gw = await start();
+    const monitor = await redis.monitor();
+    const seen: string[] = [];
+    monitor.on('monitor', (_t: string, args: string[]) => {
+      if (args.some((a) => typeof a === 'string' && a.includes(`${gw.prefix}ipfail`))) seen.push(args.join(' '));
+    });
+    for (let i = 0; i < 20; i++) expect((await get(gw, { authorization: `Bearer ${gw.key}` })).status).toBe(200);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(seen).toEqual([]);
+    // Control: a failed authentication does reach it, so the monitor sees what it should.
+    expect((await get(gw, bad())).status).toBe(401);
+    await new Promise((r) => setTimeout(r, 100));
+    monitor.disconnect();
+    expect(seen.length).toBeGreaterThan(0);
+  }, 30_000);
 
   it('successful auths never count', async () => {
     const gw = await start();
