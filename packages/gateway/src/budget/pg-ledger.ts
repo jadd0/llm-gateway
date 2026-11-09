@@ -19,6 +19,17 @@ export interface SpendEntry {
   estimated: boolean;
 }
 
+/** One response served from the cache, as recorded in `spend_ledger`: it cost nothing and saved `savedMicros`. */
+export interface HitEntry {
+  requestId: string;
+  tenantId: string;
+  period: Period;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  savedMicros: number;
+}
+
 export interface PgReserveArgs {
   id: string;
   tenantId: string;
@@ -71,6 +82,11 @@ export interface PgLedger {
    * refund.
    */
   settle(id: string, entry: SpendEntry | null): Promise<SettleRecord>;
+  /**
+   * Records a cache hit: one zero-cost ledger row. The tenant's spend and charge count are untouched, so
+   * the balance (and the Redis copy of it) is exactly what it was.
+   */
+  recordHit(entry: HitEntry): Promise<void>;
   /** Creates the single epoch row (at 1) if it is missing. Once, when a budget starts. */
   ensureEpoch(): Promise<void>;
   /** Reads the budget epoch: a plain select, safe to run every few hundred milliseconds. */
@@ -241,6 +257,13 @@ export function createPgLedger(db: Db['db']): PgLedger {
       } catch {
         return { ...rec, epoch: null };
       }
+    },
+
+    async recordHit(e) {
+      await db
+        .insert(spendLedger)
+        .values({ ...e, costMicros: 0, estimated: false, cached: true })
+        .onConflictDoNothing();
     },
 
     async ensureEpoch() {

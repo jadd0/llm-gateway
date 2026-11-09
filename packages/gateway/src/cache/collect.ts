@@ -79,3 +79,23 @@ export class StreamCollector extends Transform {
     };
   }
 }
+
+/**
+ * The answer in a non-streamed OpenAI-format body, or undefined when it is not one to keep: more than one
+ * choice, no text (a tool call, a refusal), or a finish reason other than stop or length (content_filter).
+ */
+export function completionFromBody(body: Buffer): Omit<CachedCompletion, 'model'> | undefined {
+  let json: { choices?: { index?: number; message?: Record<string, unknown>; finish_reason?: unknown }[]; usage?: unknown };
+  try {
+    json = JSON.parse(body.toString('utf8'));
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(json?.choices) || json.choices.length !== 1) return undefined;
+  const choice = json.choices[0]!;
+  const message = choice.message;
+  if (typeof message?.content !== 'string') return undefined;
+  if (message.tool_calls !== undefined || message.function_call !== undefined) return undefined;
+  if (choice.finish_reason !== 'stop' && choice.finish_reason !== 'length') return undefined;
+  return { content: message.content, finishReason: choice.finish_reason, usage: parseUsage(json.usage) ?? null };
+}

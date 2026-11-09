@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { createAnthropicAdapter } from '../providers/anthropic.ts';
 import { createGeminiAdapter } from '../providers/gemini.ts';
 import { clock, fixture, run } from '../providers/test-support.ts';
-import { StreamCollector } from './collect.ts';
+import { StreamCollector, completionFromBody } from './collect.ts';
 
 const collect = async (text: string | Buffer, size?: number) => {
   const c = new StreamCollector(1_000_000);
@@ -62,5 +62,35 @@ describe('stream collector', () => {
     const small = new StreamCollector(3);
     await run(small, Buffer.from(chunk({ content: 'ab' }) + chunk({ content: 'cd' }) + chunk({}, 'stop') + 'data: [DONE]\n\n'));
     expect(small.complete()).toBeUndefined();
+  });
+});
+
+describe('completion from a non-streamed body', () => {
+  const body = (over: Record<string, unknown> = {}) =>
+    Buffer.from(
+      JSON.stringify({
+        choices: [{ index: 0, message: { role: 'assistant', content: 'hi' }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+        ...over,
+      }),
+    );
+
+  it('keeps text, finish reason and usage', () => {
+    expect(completionFromBody(body())).toEqual({ content: 'hi', finishReason: 'stop', usage: { promptTokens: 3, completionTokens: 1, totalTokens: 4 } });
+    expect(completionFromBody(body({ usage: undefined }))).toMatchObject({ usage: null });
+    expect(completionFromBody(fixture('openai-chat.json'))).toMatchObject({ finishReason: 'stop' });
+  });
+
+  it('refuses what is not a plain finished answer', () => {
+    const choice = (message: object, finish_reason: unknown = 'stop') => ({ choices: [{ index: 0, message, finish_reason }] });
+    expect(completionFromBody(body(choice({ role: 'assistant', content: null, tool_calls: [{}] })))).toBeUndefined();
+    expect(completionFromBody(body(choice({ role: 'assistant', content: 'x', tool_calls: [{}] })))).toBeUndefined();
+    expect(completionFromBody(body(choice({ role: 'assistant', content: 'x' }, 'content_filter')))).toBeUndefined();
+    expect(completionFromBody(body(choice({ role: 'assistant', content: 'x' }, null)))).toBeUndefined();
+    expect(completionFromBody(body({ choices: [] }))).toBeUndefined();
+    const two = { index: 0, message: { role: 'assistant', content: 'x' }, finish_reason: 'stop' };
+    expect(completionFromBody(body({ choices: [two, two] }))).toBeUndefined();
+    expect(completionFromBody(Buffer.from('{"error":{"message":"x"}}'))).toBeUndefined();
+    expect(completionFromBody(Buffer.from('not json'))).toBeUndefined();
   });
 });

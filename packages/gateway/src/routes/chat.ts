@@ -3,9 +3,10 @@ import { PassThrough, Transform, type Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { errorBody } from '../errors.ts';
+import { completionFromBody, StreamCollector } from '../cache/collect.ts';
 import { chatRequest } from '../request-body.ts';
 import { usageSettler, type UsageSettler } from '../usage/settle.ts';
-import { SseUsageTap, usageFromBody } from '../usage/sse-usage.ts';
+import { SseUsageTap, usageFromBody, type Usage } from '../usage/sse-usage.ts';
 import { logAuthRejected, providerAuthMessage, tryJson } from '../providers/common.ts';
 import type { Breaker, CallResult, Permit } from '../resilience/breaker.ts';
 import { chainFor, type Chains } from '../resilience/fallback.ts';
@@ -107,7 +108,7 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     done(null, body),
   );
 
-  app.post('/v1/chat/completions', { config: { rateLimited: true, budgeted: true } }, async (request, reply) => {
+  app.post('/v1/chat/completions', { config: { rateLimited: true, budgeted: true, cached: true } }, async (request, reply) => {
     // Every way out of the handler ends the request's up-front charges. keep() is last and counts only
     // if nothing above it (used, refund) already did: it is the case of no usage seen.
     const settle = usageSettler(request);
@@ -118,6 +119,9 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
       clearTimeout(state.deadline);
       clearTimeout(state.drain);
       settle.keep(state.model);
+      // Anything that did not put its answer in the cache (an error, a refusal, a client that left) lets the
+      // identical requests waiting on it go upstream.
+      request.cacheFill?.abandon();
     }
   });
 
@@ -136,7 +140,8 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     }
     const parsed = checked.value;
     // Usage is needed only when something was charged up front (either plugin may be off).
-    const metered = (request.rateLimit ?? null) !== null || (request.budget ?? null) !== null;
+    // The cache needs the answer's usage too, to price what a later hit saves.
+    const metered = (request.rateLimit ?? null) !== null || (request.budget ?? null) !== null || request.cacheFill != null;
     const rawBody = request.body as Buffer;
 
     // Nothing has gone upstream yet, so a request refused here gives back everything it was charged.
@@ -398,6 +403,10 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
         'server-timing': `gw-pre;dur=${ms(dispatched - started)}`,
       });
       reply.raw.flushHeaders();
+      let observedUsage: Usage | undefined;
+      // Reads the events as they pass to the client (and passes them on untouched) when the answer will be cached.
+      const collector = request.cacheFill ? new StreamCollector(request.cacheFill.maxEntryBytes) : undefined;
+      const collecting = collector ? [collector] : [];
       guard = new DeadlineGuard(translated !== undefined || /text\/event-stream/i.test(type ?? ''));
       // The upstream body feeds the response through a relay, so aborting the upstream at the deadline
       // doesn't tear down the response before the cut has been written.
@@ -419,21 +428,30 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
             includeUsage,
             log: reply.log,
             onUsage: (usage) => {
-              if (metered) settle.used(usage, served.model);
+              observedUsage = usage;
+              settle.used(usage, served.model);
             },
           });
-          await pipeline(relay, translator, guard, reply.raw);
+          await pipeline([relay, translator, ...collecting, guard, reply.raw]);
         } else if (metered && forward.tap !== 'none') {
           // Once bytes are flowing a failure keeps the estimate charged: tokens were partly used.
           const tap = new SseUsageTap(
             (usage) => {
-              if (usage) settle.used(usage, served.model);
+              if (usage) {
+                observedUsage = usage;
+                settle.used(usage, served.model);
+              }
             },
             { stripUsageChunk: forward.tap === 'strip' },
           );
-          await pipeline(relay, tap, guard, reply.raw);
+          await pipeline([relay, tap, ...collecting, guard, reply.raw]);
         } else {
-          await pipeline(relay, guard, reply.raw);
+          await pipeline([relay, ...collecting, guard, reply.raw]);
+        }
+        // The whole answer reached the client and ended the way a good one does: it is worth keeping.
+        const answer = collector?.complete();
+        if (request.cacheFill && answer && !deadlineHit) {
+          await request.cacheFill.store({ ...answer, usage: observedUsage ?? answer.usage, model: served.model });
         }
       } catch (err) {
         // Upstream died or the client left mid-stream; pipeline already destroyed both ends.
@@ -473,6 +491,11 @@ export const chatRoutes: FastifyPluginAsync<ChatRouteOptions> = async (app, opts
     if (!translated && metered) {
       const usage = usageFromBody(payload);
       if (usage) settle.used(usage, served.model);
+    }
+    // Written before the reply goes out, so a client that has its answer can count on the entry being there.
+    if (request.cacheFill) {
+      const answer = completionFromBody(payload);
+      if (answer) await request.cacheFill.store({ ...answer, model: served.model });
     }
     const upstreamMs = received - dispatched;
     const preDispatchMs = dispatched - started;

@@ -4,6 +4,7 @@ import { costMicros, formatUsd, priceFor, type Price } from '../pricing/prices.t
 import { chatRequest } from '../request-body.ts';
 import { estimateWorstCase } from '../usage/estimate.ts';
 import type { Usage } from '../usage/sse-usage.ts';
+import type { CacheHit } from '../cache/plugin.ts';
 import { createBudget, type Budget, type BudgetOptions, type Reservation } from './budget.ts';
 
 /** How a request ended, as the budget needs to know. */
@@ -63,6 +64,19 @@ const budgetPlugin: FastifyPluginAsync<BudgetPluginOptions> = async (app, opts) 
   const budget: Budget = await createBudget({ ...opts.budget, log: app.log });
   app.decorateRequest('budget', null);
   app.addHook('onClose', () => budget.close());
+  // A cache hit (which is answered before this plugin's hook runs) leaves a zero-cost row with what it saved.
+  app.decorate('recordCacheHit', async (hit: CacheHit) => {
+    const price = priceFor(hit.model);
+    const u = hit.usage === null ? undefined : hit.usage;
+    const cost = price !== undefined && u !== undefined ? costOfUsage(price, u) : undefined;
+    await budget.recordHit({
+      tenantId: hit.tenantId,
+      model: hit.model,
+      promptTokens: cost?.prompt ?? 0,
+      completionTokens: cost?.completion ?? 0,
+      savedMicros: cost?.cost ?? 0,
+    });
+  });
 
   // preHandler, after the rate limiter: the caller is known, the body is parsed, no upstream work yet.
   app.addHook('preHandler', async (request, reply) => {
