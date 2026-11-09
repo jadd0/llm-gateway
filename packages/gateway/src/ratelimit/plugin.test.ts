@@ -42,6 +42,16 @@ beforeAll(async () => {
     }),
     { rateLimitClock: () => now },
   );
+  // A route that settles twice, to prove only the first settle counts.
+  app.register(async (a) => {
+    // Raw bytes, as the chat route keeps them.
+    a.addContentTypeParser('application/json', { parseAs: 'buffer' }, (_req, body, done) => done(null, body));
+    a.post('/__settle-twice', { config: { rateLimited: true } }, async (request) => {
+      await request.rateLimit!.settle(500);
+      await request.rateLimit!.settle(5);
+      return { estimate: request.rateLimit!.estimate };
+    });
+  });
   await app.ready();
 });
 
@@ -104,6 +114,27 @@ describe('rate limit plugin', { timeout: 30_000 }, () => {
       },
     });
     expect(upstreamHits).toBe(hits); // a rejected request never reaches the provider
+  });
+
+  it('retry-after rounds up to whole seconds', async () => {
+    const s = await fresh({ rpm: 7, tpm: 100_000 });
+    for (let i = 0; i < 7; i++) expect((await chat(s.key)).statusCode).toBe(200);
+    const res = await chat(s.key);
+    expect(res.statusCode).toBe(429);
+    expect(res.headers['retry-after']).toBe('9'); // 60 / 7 = 8.57 s
+  });
+
+  it('only the first settle corrects the charge', async () => {
+    const s = await fresh({ rpm: 100, tpm: 1000 });
+    const res = await app.inject({
+      method: 'POST',
+      url: '/__settle-twice',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${s.key}` },
+      payload: JSON.stringify({ messages: [], max_tokens: 100 }),
+    });
+    expect(res.json()).toEqual({ estimate: 100 });
+    // Charged 100, then corrected to an actual 500 (a 400 debit); the second settle(5) is ignored.
+    expect(await field(s.keyId, 'tok')).toBe(500);
   });
 
   it('a denied request is not charged and a tokens-limited key says tokens', async () => {
