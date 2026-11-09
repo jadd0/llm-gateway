@@ -1,17 +1,22 @@
 # Gateway
 
-Diagram: [chat-passthrough.html](chat-passthrough.html). Code: `packages/gateway/src/`.
+Diagram: [chat-passthrough.html](chat-passthrough.html) (the OpenAI-format path); routing and translation: [../providers/providers.html](../providers/providers.html). Code: `packages/gateway/src/`.
 
 | File | Job |
 |---|---|
 | `config.ts` | Env parsed with zod; a blank value counts as unset |
-| `upstream.ts` | One undici `Pool` per upstream origin, `UPSTREAM_CONNECTIONS` sockets, timeouts from `UPSTREAM_TIMEOUT_MS` |
+| `upstream.ts` | Picks the provider for a model and keeps one undici `Pool` per upstream origin (`UPSTREAM_CONNECTIONS` sockets, timeouts from `UPSTREAM_TIMEOUT_MS`); the base URL's path is joined in front of the request path |
+| `providers/` | Router and one adapter per provider format; see [../providers/README.md](../providers/README.md) |
 | `app.ts` | `buildApp(config)`: Fastify with request logging off, the auth hook, and the Postgres and Redis handles |
 | `routes/chat.ts` | `POST /v1/chat/completions` |
 | `server.ts` | Entry point, graceful shutdown on SIGTERM and SIGINT |
 
 ## Behaviour
 
+- **Providers.** The `model` name picks a provider (`MODEL_ROUTES`). OpenAI-format upstreams (OpenAI, the mock) get the
+  request bytes and the sections below describe them; Anthropic and Gemini are translated both ways, streams included,
+  and their errors are rewritten into the OpenAI shape. An unknown model is 400 `model_not_found`, a provider without a key
+  503 `provider_not_configured`. See [../providers/README.md](../providers/README.md).
 - **Validation.** Only `model` (string), `messages` (array) and optional `stream` (boolean) are checked,
   otherwise 400. Everything else is forwarded as the original bytes. A non-JSON content-type gets 415, in the same error shape.
 - **Streaming.** For `stream: true` the route waits for the upstream status line, hijacks the raw
@@ -32,7 +37,7 @@ Diagram: [chat-passthrough.html](chat-passthrough.html). Code: `packages/gateway
   use the same `invalid_request_error` shape.
 - **Auth.** An `onRequest` hook (`auth/plugin.ts`) runs before the body is read: it takes the bearer key, looks
   it up and either answers 401 or sets `request.tenant`. It covers unknown routes too. The client's
-  `Authorization` header is never forwarded; the upstream key comes from `OPENAI_API_KEY`. Because the hook
+  `Authorization` header is never forwarded; the upstream key is the provider's own (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY` or `GEMINI_API_KEY`). Because the hook
   runs before the route starts its clock, `gw-pre` in `server-timing` does not include the key check.
   See [../auth/README.md](../auth/README.md).
 - **Rate limit.** After auth and before the route, a `preHandler` (`ratelimit/plugin.ts`) charges the request to the
@@ -52,7 +57,7 @@ docker compose up -d --wait && npm run db:migrate
 npm run keys -- create-tenant acme && npm run keys -- create-key acme   # prints a gw_ key once
 npm run dev:mock      # port 9000
 npm run dev:gateway   # port 8080
-curl -N localhost:8080/v1/chat/completions -H "authorization: Bearer $KEY" -H 'content-type: application/json' -d '{"model":"m","stream":true,"messages":[{"role":"user","content":"hi"}]}'
+curl -N localhost:8080/v1/chat/completions -H "authorization: Bearer $KEY" -H 'content-type: application/json' -d '{"model":"mock-m","stream":true,"messages":[{"role":"user","content":"hi"}]}'
 ```
 
 ## Why this design
@@ -75,7 +80,7 @@ streamed byte at 200 req/s. The gateway's own `server-timing` figure, effectivel
    the pooled socket is released. In the adversarial run, 500 simultaneous aborts left no live upstream
    responses within 5 s.
 3. **What happens when the upstream fails?** Connection errors give 502 and timeouts 504, in an OpenAI-shaped
-   body; upstream 4xx and 5xx pass through unchanged. Retries and fallback are later PRs.
+   body; an OpenAI-format upstream's 4xx and 5xx pass through unchanged and the other providers' are mapped to the OpenAI error shape. Retries and fallback are later PRs.
 4. **Why forward the original bytes instead of re-serialising?** It is cheaper, and the gateway only needs
    to know three fields, so everything else stays untouched.
 5. **What does `server-timing` tell you?** Only the gateway's own in-process time. The real overhead is the

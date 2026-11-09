@@ -24,17 +24,20 @@ closed here.
 | `packages/gateway/src/providers/openai.ts` | **new**. Pass-through adapter (no translation; usage via PR 4's tap) |
 | `packages/gateway/src/providers/anthropic.ts` | **new**. Messages API translation |
 | `packages/gateway/src/providers/gemini.ts` | **new**. `generateContent` / `streamGenerateContent?alt=sse` translation |
+| `packages/gateway/src/providers/common.ts`, `packages/gateway/src/providers/test-support.ts` | **new**. Shared translation helpers (unsupported-parameter check, message flattening, OpenAI object builders, error shape); shared test helpers |
 | `packages/gateway/src/providers/sse.ts` | **new**. Incremental SSE parser: events split across chunks, multi-byte UTF-8 split across chunks |
 | `packages/gateway/src/providers/*.test.ts` | **new**. Beside each file above |
 | `packages/gateway/src/providers/fixtures/` | **new**. Recorded real responses (JSON and raw SSE) per provider, ids and headers stripped |
 | `packages/gateway/src/upstream.ts` | one undici Pool per provider origin; base URL path kept and joined (closes R1) |
 | `packages/gateway/src/routes/chat.ts` | route via router → adapter; translated streams piped through the adapter's transform, still unbuffered |
-| `packages/gateway/src/routes/chat.test.ts` | routing, translation and unbuffered-through-translation tests |
+| `packages/gateway/src/routes/chat.test.ts` | existing tests renamed to `mock-*` models and the fake upstream fitted to the new interface |
+| `packages/gateway/src/routes/chat-providers.test.ts` | **new**. Routing, translation, unbuffered-through-translation, key isolation, usage, errors (beside the route, separate from chat.test's shared fixtures) |
+| `packages/gateway/src/{config.test.ts,test-env.ts,auth/plugin.test.ts,ratelimit/*.test.ts,pricing/prices.test.ts}`, `bench/run-{baseline,ratelimit,budget}.sh`, `bench/k6/chat.js` | provider settings tests; test config mirrors OPENAI_BASE_URL into MOCK_BASE_URL; models renamed `mock-*`; bench scripts set MOCK_BASE_URL; k6 takes MODEL |
 | `packages/gateway/src/pricing/prices.ts` | real models added with price, `asOf` date and source URL per row |
 | `packages/gateway/src/config.ts`, `.env.example` | provider rows (Decisions) |
 | `packages/mock-provider/src/server.ts` | add Anthropic-format `POST /v1/messages` and Gemini-format `:generateContent` / `:streamGenerateContent`, same latency/outage controls |
 | `packages/mock-provider/src/server.test.ts` | tests for the two new formats |
-| `scripts/smoke-providers.ts` | **new**. One tiny live call per provider (streamed and non-streamed, `max_tokens` 5); `--record` refreshes fixtures. Never in the gate or CI |
+| `scripts/smoke-providers.ts` | **new**. One tiny live call per provider (streamed and non-streamed, `max_tokens` 5); `--record` saves scrubbed raw answers under `fixtures/recorded/` for review (it does not overwrite the hand-written fixtures the tests assert exact values on). Never in the gate or CI |
 | `package.json` | script `smoke:providers` |
 | `bench/run-providers.sh` | **new**. Realistic streamed scenario through each mock format, vs PR 5's baseline |
 | `bench/results/pr-6/*.json` | **new** |
@@ -42,7 +45,8 @@ closed here.
 | `docs/providers/README.md` | **new**. Adapters, the three formats side by side, routing, error mapping, scope, numbers, interview Qs |
 | `docs/providers/providers.html` | **new**. Archify diagram: request → router → adapter → provider, and the streamed translation path |
 | `docs/README.md`, `docs/architecture/*`, `docs/gateway/README.md`, `docs/mock-provider/README.md`, `docs/budgets/README.md` | providers built; request path and mock formats updated |
-| `docs/diagrams/flows.md` | update the passthrough flow line to name the adapters |
+| `docs/diagrams/flows.md` | add the routing and translation flow; passthrough flow now names the OpenAI adapter |
+| `docs/gateway/chat-passthrough.html`, `README.md`, `BENCHMARKS.md`, `.env.example` | passthrough diagram redrawn; README line; benchmark section (figures pending); provider env |
 | `.product/RESIDUALS.md` | move R1 to Closed |
 
 ## Schema

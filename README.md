@@ -13,7 +13,7 @@ committed run produces it.
 ## v1 scope
 
 - **Unified API:** one OpenAI-compatible `/v1/chat/completions` endpoint routing to Anthropic,
-  OpenAI and one more provider. Server-sent event streams are passed through without buffering.
+  OpenAI and one more provider. Each provider's format and streams are translated to OpenAI's without buffering.
 - **Auth and tenancy:** API keys per tenant, hashed at rest, each with its own limits and budget.
 - **Rate limiting:** token-bucket limits per key in Redis, enforced by atomic Lua scripts so they
   stay correct across many gateway instances.

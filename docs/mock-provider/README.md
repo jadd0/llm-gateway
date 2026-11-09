@@ -2,7 +2,11 @@
 
 Diagram: [mock-provider.html](mock-provider.html). Code: `packages/mock-provider/src/server.ts`.
 
-The mock speaks the OpenAI chat-completions wire format. It exists so benchmarks measure the gateway
+The mock speaks three wire formats, each at the path the real provider uses: OpenAI `POST /v1/chat/completions`,
+Anthropic `POST /v1/messages` (named SSE events from `message_start` to `message_stop`), and Gemini
+`POST /v1beta/models/<model>:generateContent` or `:streamGenerateContent?alt=sse` (CRLF-separated `data:` events, the last with
+`finishReason` and usage). Latency, pacing, error rate and outage modes apply to all three; an outage or error answers in the
+format's own error shape. It exists so benchmarks measure the gateway
 and not a real provider's servers, and so outages can be triggered on demand.
 
 | Setting | Env | Meaning |
