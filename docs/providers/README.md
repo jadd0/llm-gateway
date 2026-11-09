@@ -64,18 +64,25 @@ Each model name is one attempt target: retries, the circuit breaker and fallback
   error that arrives mid-stream is typed by meaning: rate limits are `rate_limit_error`, a request the provider
   called invalid stays `invalid_request_error`, and overload or provider faults are `server_error`.
 - **`OPENAI_BASE_URL` includes its version path** (`https://api.openai.com/v1`). The gateway starts only if it has
-  a path, so an old `http://host:port` fails with a message rather than 404ing every request.
+  a path, so an old `http://host:port` fails with a message rather than 404ing every request; an upstream
+  mounted at the root of its host sets `OPENAI_BASE_URL_ALLOW_ROOT=true`. The real and mock targets of one wire format share one adapter.
 - **Credentials are isolated.** An adapter receives only its own provider's key and builds every header itself; the
   client's `Authorization` is never forwarded. A test sends one request to each provider and checks no header holds
   another provider's key or the client's.
 - **Prices** (`pricing/prices.ts`) are read from each provider's pricing page with the date and URL stored per
-  row. Standard (short-context) rates are used; a prompt past a model's long-context threshold is billed higher by
-  the provider and under-priced here (R12).
+  row. A model whose page lists a long-context tier (Claude Haiku 5.5 over 100,000 prompt tokens, Gemini 3.1 Pro over
+  200,000, GPT-6 Astra over 272,000) carries it: a prompt over the threshold is priced at the higher rates on both
+  input and output, as the provider bills it, in the hold and in the charge. The prompt count is the same one the
+  hold is sized on; the settled charge uses the provider's reported count.
+- **Default output cap per model.** A caller who names no `max_tokens` gets the model's `defaultMaxTokens`
+  (4096 for the thinking models in the table, which spend output tokens on reasoning; `RATE_LIMIT_DEFAULT_MAX_TOKENS`
+  for the rest). The same number is sent to Anthropic and Gemini and used to size the budget hold, per chain model.
+  None of the provider pages documents a default for these models, so 4096 is the gateway's choice.
 
 ## Configuration
 
 `MODEL_ROUTES` (default `claude-=anthropic,gpt-=openai,o1=openai,o3=openai,o4=openai,gemini-=gemini` plus the
-`mock-*` routes), `OPENAI_BASE_URL` (default `https://api.openai.com/v1`; must include a path), `ANTHROPIC_BASE_URL`, `ANTHROPIC_VERSION`,
+`mock-*` routes), `OPENAI_BASE_URL` (default `https://api.openai.com/v1`; must include a path unless `OPENAI_BASE_URL_ALLOW_ROOT=true`), `ANTHROPIC_BASE_URL`, `ANTHROPIC_VERSION`,
 `GEMINI_BASE_URL`, `MOCK_BASE_URL`, and the keys `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`.
 Mock model names: `mock-` and `mock-openai-` use OpenAI format, `mock-anthropic-` and `mock-gemini-` the others.
 

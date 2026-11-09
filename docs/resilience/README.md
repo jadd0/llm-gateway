@@ -15,7 +15,7 @@ is safe to retry, stops calling a provider that is down, and moves to a backup m
 3. For each model in order, the gateway first asks the breaker for one permit. An open breaker skips the model with no network call. The breaker is told how the model's attempts went once, when they are all over (D-038): a success if any attempt succeeded, otherwise one failure, so retries do not amplify a trip.
 4. The attempt runs under three timeouts: connect (`UPSTREAM_CONNECT_TIMEOUT_MS`), time to response headers
    (`UPSTREAM_HEADERS_TIMEOUT_MS`, long because a non-streamed completion sends headers only when it is done) and silence
-   in the body (`UPSTREAM_IDLE_TIMEOUT_MS`). `UPSTREAM_MAX_DURATION_MS` bounds the whole request including every attempt and backoff.
+   in the body (`UPSTREAM_IDLE_TIMEOUT_MS`). `UPSTREAM_MAX_DURATION_MS` bounds the whole request including every attempt and backoff. A provider's error answer is read for its body for at most `UPSTREAM_ERROR_BODY_TIMEOUT_MS` (2 s) once its status and headers are in; a body that stalls is dropped and its connection closed, the status kept, so a provider that sends a 503 and then goes quiet costs the request 2 s, not the idle timeout.
 5. A failure is classified. Retried: connection refused or reset, connect timeout, and 429, 500, 502, 503, 504, 529.
    A 401, 403 or 404 is not retried on the same model but moves on to the next one (D-037): the gateway's credential or
    model name may be wrong for that provider only. Final at once: 400, 413, 422 and any other 4xx, and anything after reply
@@ -42,7 +42,7 @@ is safe to retry, stops calling a provider that is down, and moves to a backup m
    refunded otherwise. A 401, 403 or 404 that moves the request on is logged at warn (model, provider, status).
 
 Every reply carries `x-gateway-model` (the model that served, or the last one tried) and `x-gateway-attempts` (upstream
-calls made; 0 when every breaker was open). The body's `model` is whatever the serving provider returned. Each attempt logs
+calls made; 0 when every breaker was open, and also on a 400, 402 or 429 refused before dispatch, where `x-gateway-model` is the model asked for). The body's `model` is whatever the serving provider returned. Each attempt logs
 one line: model, provider target, outcome, milliseconds, never a body or message.
 
 ## The breaker, line by line

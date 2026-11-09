@@ -11,18 +11,28 @@ only; there is no user login and no admin UI.
 | `db/schema.ts` | `tenants` and `api_keys` tables (Drizzle); SQL migration in `packages/gateway/drizzle/` |
 | `auth/keys.ts` | Generate a key (`gw_` + 32 random bytes, base64url), derive its 12-char display prefix, HMAC-SHA256 it |
 | `auth/key-store.ts` | `lookup(hash)`: Redis, then Postgres on a miss, then fill the cache. `revoke(hash)` |
-| `auth/plugin.ts` | `onRequest` hook: parse the bearer key, look it up, 401 or attach the tenant |
+| `auth/ip-limit.ts` | Per-address bucket of failed authentications, checked before the lookup |
+| `auth/plugin.ts` | `onRequest` hook: address check, parse the bearer key, look it up, 401 or attach the tenant |
 | `cli/keys.ts` | `create-tenant`, `create-key [--rpm --tpm]`, `set-limits <prefix> --rpm --tpm`, `revoke-key <prefix>`, `list-keys` (`npm run keys -- ...`) |
 
 ## How a request is checked
 
+0. Before anything else the client's address is checked (`auth/ip-limit.ts`): a token bucket in Redis, the same
+   script as the per-key limiter, that only **failed** authentications draw from (`AUTH_FAIL_LIMIT_PER_MIN`, 30).
+   An address with an empty bucket gets 429 `auth_rate_limit_exceeded` with `retry-after`, before any Redis key
+   lookup or Postgres query. The check only reads the bucket and a failure charges it afterwards, so a valid key
+   is never charged and a busy client is never limited by it; the cost is that requests already in flight when
+   the bucket empties still reach the lookup. An IPv6 client shares one bucket per /64. The address is the
+   socket peer's, unless the peer is in `TRUSTED_PROXIES` (default `127.0.0.1`), in which case
+   `X-Forwarded-For` is believed. An address refused this way is refused even with a valid key until its bucket
+   refills. If Redis is down the check is skipped (fails open).
 1. Parse `Authorization: Bearer <key>`; anything not shaped like a gateway key gets 401 without a lookup.
 2. Hash the key with `HMAC-SHA256(API_KEY_PEPPER, key)` and look the hash up: Redis `GET apikey:<hash>`.
 3. A cached tenant passes. `"revoked"` and `"unknown"` markers mean 401. A miss reads Postgres
    (`key_hash = $1 and revoked_at is null`) and fills Redis with `SET ... EX ... NX`.
 4. Unknown hashes are negatively cached for `AUTH_NEGATIVE_TTL_S`. That protects Postgres from a
-   misconfigured client repeating one bad key; it does not protect against a flood of distinct random keys, and
-   per-IP limiting is out of scope here (residual R9).
+   misconfigured client repeating one bad key. A flood of distinct random keys is stopped by the per-address
+   limit below.
 5. Missing, malformed, unknown and revoked keys all get the same OpenAI-shaped 401
    (`code: invalid_api_key`), so the response never says which keys exist.
 
@@ -62,7 +72,7 @@ One warn log per outage, not per request. The client reconnects on its own with 
 `API_KEY_PEPPER` (required, 32+ characters; the gateway refuses to start without it), `DATABASE_URL`,
 `DB_POOL_SIZE` (20), `REDIS_URL`, `REDIS_KEY_PREFIX`, `AUTH_CACHE` (`redis` or `none`; `none` exists only so the
 benchmark can show the cost of Postgres on every request), `AUTH_CACHE_TTL_S` (600), `AUTH_NEGATIVE_TTL_S` (60),
-`AUTH_TOMBSTONE_TTL_S` (1200).
+`AUTH_TOMBSTONE_TTL_S` (1200), `AUTH_FAIL_LIMIT_PER_MIN` (30; 0 turns the address limit off), `TRUSTED_PROXIES` (`127.0.0.1`; `none` trusts nobody).
 
 The key CLI and every gateway instance must use the same `REDIS_KEY_PREFIX` (and Redis). If they differ, a
 revoke writes its tombstone where the gateway never looks, and a cached key keeps working for up to
