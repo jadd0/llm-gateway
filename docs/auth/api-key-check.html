@@ -5599,7 +5599,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <h3>Revocation</h3>
         </div>
         <ul>
-          <li>&bull; Postgres is updated first, then a tombstone overwrites the cache entry</li>
+          <li>&bull; Postgres is updated first, then a tombstone overwrites the cache entry once the client is ready</li>
           <li>&bull; Fills use NX, so a racing fill cannot undo the tombstone</li>
           <li>&bull; Tombstone TTL is longer than the cache TTL</li>
         </ul>
@@ -5612,7 +5612,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         </div>
         <ul>
           <li>&bull; Missing, malformed, unknown and revoked keys get the same 401</li>
-          <li>&bull; Redis down: the hook queries Postgres for that request</li>
+          <li>&bull; Redis down or a corrupt cached value: the hook reads Postgres and replaces the entry</li>
           <li>&bull; Unknown hashes are negatively cached for a short time</li>
         </ul>
       </div>
