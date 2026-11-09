@@ -517,7 +517,10 @@ describe('response cache on POST /v1/chat/completions', () => {
       model: 'model-without-a-price',
       usage: { promptTokens: 7, completionTokens: 5, totalTokens: 12 },
     });
-    const [row] = await handle.db.select().from(spendLedger).where(eq(spendLedger.tenantId, t.tenantId));
+    // The row is written by the log worker (the stand-in here) after the hit is queued.
+    const rowsOf = () => handle.db.select().from(spendLedger).where(eq(spendLedger.tenantId, t.tenantId));
+    expect(await until(async () => (await rowsOf()).length === 1)).toBe(true);
+    const [row] = await rowsOf();
     expect(row).toMatchObject({ cached: true, model: 'model-without-a-price', promptTokens: 7, completionTokens: 5, costMicros: 0, savedMicros: 0 });
   });
 
