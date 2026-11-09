@@ -12,23 +12,27 @@ hop (auth, limits, budgets, caching, failover, logging).
   streamed or not. See [../gateway/README.md](../gateway/README.md).
 - **Mock provider** (`packages/mock-provider`): OpenAI-wire-format stand-in with configurable latency,
   errors and outages. See [../mock-provider/README.md](../mock-provider/README.md).
-- **Redis and Postgres+pgvector** (`docker-compose.yml`): started, not yet used by gateway code.
+- **Auth** (`packages/gateway/src/auth`): every request needs `Authorization: Bearer gw_...`. Keys are stored
+  as HMAC-SHA256 hashes in Postgres and cached in Redis. See [../auth/README.md](../auth/README.md).
+- **Redis and Postgres+pgvector** (`docker-compose.yml`): Redis holds the key cache and Postgres holds
+  tenants and API keys. Vectors and the request log are not used yet.
 
 ## Planned (marked dashed in the diagram)
 
-Real provider adapters, per-key auth, Redis token-bucket limits, budgets, exact and semantic caches,
+Real provider adapters, Redis token-bucket limits, budgets, exact and semantic caches,
 retries and circuit breaker, a batched request-log queue into Postgres, and the dashboard.
 
 ## Request flow today
 
-client, then gateway, then the mock, then back. Nothing else sits on the path.
+client, then the gateway's key check (Redis, or Postgres on a miss), then the mock, then back.
 
 ## Why this design
 
 The gateway is a stateless process in front of the providers, so more instances can be added behind a load
 balancer and shared state (limits, caches, logs) lives in Redis and Postgres rather than in the process.
-PR 1 builds only the hop in the middle and measures it first, so every later feature has a baseline to be
-compared against rather than an impression.
+PR 1 built only the hop in the middle and measured it first, so every later feature has a baseline to be
+compared against rather than an impression. PR 3 added the key check and re-measured; the cost is in
+[../auth/README.md](../auth/README.md).
 
 ## Measured today (from [BENCHMARKS.md](../../BENCHMARKS.md))
 
@@ -43,8 +47,8 @@ compared against rather than an impression.
    budgets, caching and failover. The price is an extra hop, which is why the hop is measured: 0.233 ms p50
    non-streamed in the baseline.
 2. **Why is the gateway stateless?** So instances scale horizontally; anything shared goes to Redis or
-   Postgres. PR 1 does not use either yet; they are started so later PRs have them.
-3. **What is built versus planned?** Built: passthrough and the mock. Planned: everything dashed in the
+   Postgres. Auth uses both: Postgres is the source of truth for keys, Redis only caches it.
+3. **What is built versus planned?** Built: passthrough, the mock, tenants and API-key auth. Planned: everything dashed in the
    diagram.
 4. **How do you know the numbers are the gateway's?** The mock removes provider variance, and each figure is
    a difference against a direct-to-mock run at the same rate.
