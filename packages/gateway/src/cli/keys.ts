@@ -189,6 +189,12 @@ async function main(argv: string[]) {
         );
         const show = (n: number | null) => (n === null ? 'default' : String(n));
         console.log(`${r.prefix}: rpm ${show(r.rpm)}, tpm ${show(r.tpm)}`);
+        if (config.authCache === 'redis' && config.redisUrl === undefined) {
+          // The database has the new limits; with no Redis to tell, a cached copy keeps the old ones.
+          throw new CliError(
+            `warning: REDIS_URL is not set, so the key cache was not refreshed. The old limits can stay in effect for up to ${config.authCacheTtlS}s (AUTH_CACHE_TTL_S); set REDIS_URL and run this command again`,
+          );
+        }
         if (redis !== null && !r.cached) {
           // Postgres has the new limits but the cache could not be told; a cached copy keeps the old
           // limits until it expires. Running the same command again, once Redis is up, finishes the job.

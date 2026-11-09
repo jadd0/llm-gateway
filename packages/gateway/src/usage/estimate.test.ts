@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { estimateForLimit, estimateTokens } from './estimate.ts';
+import { estimateForLimit } from './estimate.ts';
+
+// With a key that holds more than any request, the estimate is just prompt + output.
+const estimateTokens = (body: unknown, defaultMaxTokens: number) =>
+  estimateForLimit(body, defaultMaxTokens, Number.MAX_SAFE_INTEGER).cost;
 
 const msg = (content: unknown) => ({ role: 'user', content });
 

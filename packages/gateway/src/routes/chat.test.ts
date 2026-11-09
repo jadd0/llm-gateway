@@ -277,7 +277,7 @@ describe('usage reconcile', { timeout: 30_000 }, () => {
   const TPM = 6000;
   const ESTIMATE = 1 + 1024; // 'hi' is one token, plus the default max_tokens
   const seen: Array<{ raw: string; json: any }> = [];
-  let mode: 'usage' | 'no-usage' | 'slow' | 'status500' | 'status429' | 'reset' | 'midfail' = 'usage';
+  let mode: 'usage' | 'no-usage' | 'slow' | 'status500' | 'status429' | 'reset' | 'midfail' | 'cutbody' = 'usage';
   let up: Server;
   let app3: FastifyInstance;
   let gw3 = '';
@@ -295,6 +295,12 @@ describe('usage reconcile', { timeout: 30_000 }, () => {
         const json = JSON.parse(raw);
         seen.push({ raw, json });
         if (mode === 'reset') return void req.socket.destroy();
+        if (mode === 'cutbody') {
+          // A 200 that promises 1000 bytes, sends a few and dies.
+          res.writeHead(200, { 'content-type': 'application/json', 'content-length': '1000' });
+          res.write('{"id":"x"');
+          return void setTimeout(() => res.destroy(), 20);
+        }
         if (mode === 'status500' || mode === 'status429') {
           res.writeHead(mode === 'status500' ? 500 : 429, { 'content-type': 'application/json' });
           res.end('{"error":{"message":"no","type":"x"}}');
@@ -424,6 +430,15 @@ describe('usage reconcile', { timeout: 30_000 }, () => {
     const res = await send(s.key, payload());
     expect(res.statusCode).toBe(502);
     await vi.waitFor(async () => expect(await tokensOrFull(s.keyId)).toBe(TPM));
+  });
+
+  it('a 200 whose body is cut off keeps the estimate', async () => {
+    const s = await freshKey();
+    mode = 'cutbody';
+    const res = await send(s.key, payload());
+    expect(res.statusCode).toBe(502);
+    await quiet();
+    expect(await tokensOrFull(s.keyId)).toBe(TPM - ESTIMATE);
   });
 
   it('a stream that fails after bytes were sent keeps the estimate', async () => {

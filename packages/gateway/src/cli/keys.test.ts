@@ -98,13 +98,20 @@ describe('keys CLI', { timeout: 30_000 }, () => {
     expect(await store.lookup(hash)).toMatchObject({ rpmLimit: 5, tpmLimit: null });
   });
 
-  it('set-limits needs neither the pepper nor Redis for its database write', async () => {
+  it('set-limits needs no pepper and no Redis for its database write; with a cache configured but no Redis it warns and exits 1', async () => {
     const tenant = await newTenant();
     const key = (await cli('create-key', tenant, '--rpm', '9')).stdout.trim();
-    const out = await cliWith({ API_KEY_PEPPER: '', REDIS_URL: '' }, 'set-limits', key.slice(0, 12), '--tpm', '4000');
-    expect(out.stdout).toContain('rpm 9, tpm 4000');
-    const [row] = await handle.db.select().from(apiKeys).where(eq(apiKeys.keyHash, hashKey(config.apiKeyPepper, key)));
-    expect(row).toMatchObject({ rpmLimit: 9, tpmLimit: 4000 });
+    const row = async () =>
+      (await handle.db.select().from(apiKeys).where(eq(apiKeys.keyHash, hashKey(config.apiKeyPepper, key))))[0];
+    // AUTH_CACHE=none: nothing is cached, so there is nothing to refresh.
+    const none = await cliWith({ API_KEY_PEPPER: '', REDIS_URL: '', AUTH_CACHE: 'none' }, 'set-limits', key.slice(0, 12), '--tpm', '4000');
+    expect(none.stdout).toContain('rpm 9, tpm 4000');
+    expect(await row()).toMatchObject({ rpmLimit: 9, tpmLimit: 4000 });
+    // AUTH_CACHE=redis (the default) but no REDIS_URL: the database is written, the cache could not be.
+    await expect(
+      cliWith({ API_KEY_PEPPER: '', REDIS_URL: '' }, 'set-limits', key.slice(0, 12), '--rpm', '11'),
+    ).rejects.toMatchObject({ stderr: expect.stringContaining('key cache was not refreshed') });
+    expect(await row()).toMatchObject({ rpmLimit: 11, tpmLimit: 4000 });
   });
 
   it('limits that are not whole numbers are refused, and so is a revoked key', async () => {

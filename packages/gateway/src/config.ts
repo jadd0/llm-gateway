@@ -13,6 +13,17 @@ const dbFields = {
 // The server-side secret mixed into every key hash. The gateway refuses to start without it.
 const pepperField = { API_KEY_PEPPER: z.string().min(32) };
 
+// The key cache's settings, shared by the gateway and by set-limits (which reads only these).
+const cacheFields = {
+  REDIS_URL: z.preprocess(blankAsUnset, z.string().optional()),
+  // Prepended to every Redis key so several gateways or test runs can share one Redis.
+  REDIS_KEY_PREFIX: z.preprocess(blankAsUnset, z.string().default('')),
+  AUTH_CACHE: z.preprocess(blankAsUnset, z.enum(['redis', 'none']).default('redis')),
+  AUTH_CACHE_TTL_S: int(600, 1),
+  AUTH_NEGATIVE_TTL_S: int(60, 1),
+  AUTH_TOMBSTONE_TTL_S: int(1200, 1),
+};
+
 const schema = z
   .object({
     GATEWAY_HOST: z.preprocess(blankAsUnset, z.string().default('127.0.0.1')),
@@ -26,14 +37,8 @@ const schema = z
       z.enum(['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent']).default('warn'),
     ),
     ...dbFields,
-    REDIS_URL: z.preprocess(blankAsUnset, z.string().optional()),
-    // Prepended to every Redis key so several gateways or test runs can share one Redis.
-    REDIS_KEY_PREFIX: z.preprocess(blankAsUnset, z.string().default('')),
+    ...cacheFields,
     ...pepperField,
-    AUTH_CACHE: z.preprocess(blankAsUnset, z.enum(['redis', 'none']).default('redis')),
-    AUTH_CACHE_TTL_S: int(600, 1),
-    AUTH_NEGATIVE_TTL_S: int(60, 1),
-    AUTH_TOMBSTONE_TTL_S: int(1200, 1),
     RATE_LIMIT_ENABLED: z.preprocess(blankAsUnset, z.enum(['true', 'false']).default('true')),
     RATE_LIMIT_DEFAULT_RPM: int(600, 1),
     RATE_LIMIT_DEFAULT_TPM: int(200_000, 1),
@@ -123,15 +128,7 @@ export function loadCacheConfig(env: NodeJS.ProcessEnv = process.env): Pick<
   'databaseUrl' | 'redisUrl' | 'redisKeyPrefix' | 'authCache' | 'authCacheTtlS' | 'authNegativeTtlS' | 'authTombstoneTtlS'
 > {
   const e = z
-    .object({
-      ...dbFields,
-      REDIS_URL: z.preprocess(blankAsUnset, z.string().optional()),
-      REDIS_KEY_PREFIX: z.preprocess(blankAsUnset, z.string().default('')),
-      AUTH_CACHE: z.preprocess(blankAsUnset, z.enum(['redis', 'none']).default('redis')),
-      AUTH_CACHE_TTL_S: int(600, 1),
-      AUTH_NEGATIVE_TTL_S: int(60, 1),
-      AUTH_TOMBSTONE_TTL_S: int(1200, 1),
-    })
+    .object({ ...dbFields, ...cacheFields })
     .parse(env);
   return {
     databaseUrl: e.DATABASE_URL,

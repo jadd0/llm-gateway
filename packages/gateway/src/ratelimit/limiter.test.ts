@@ -254,6 +254,38 @@ describe('fail open', { timeout: 30_000 }, () => {
     expect((await fast.take(keyId, 10, 1000, 100)).status).toBe('denied');
   });
 
+  it('a refund that fails is logged once and leaves the outage state alone', async () => {
+    const warns: Array<{ msg: string }> = [];
+    const infos: object[] = [];
+    const limiter = newLimiter({
+      timeoutMs: 20,
+      log: { warn: (_o: object, msg: string) => warns.push({ msg }), info: (o: object) => infos.push(o) },
+    });
+    const adjust = (redis as unknown as { rlAdjust: unknown }).rlAdjust;
+    const take = (redis as unknown as { rlTake: (...a: unknown[]) => Promise<unknown> }).rlTake.bind(redis);
+    let ran: Promise<unknown> = Promise.resolve();
+    (redis as unknown as { rlTake: unknown }).rlTake = (...a: unknown[]) => {
+      ran = new Promise((r) => setTimeout(r, 60)).then(() => take(...a));
+      return ran;
+    };
+    (redis as unknown as { rlAdjust: unknown }).rlAdjust = () => new Promise(() => {}); // never answers
+    try {
+      for (let i = 0; i < 2; i++) {
+        expect((await limiter.take(id(), 10, 1000, 100)).status).toBe('skipped');
+        await ran;
+      }
+      await vi.waitFor(() => expect(warns.map((w) => w.msg)).toContain('rate limit refund failed'));
+      await new Promise((r) => setTimeout(r, 100));
+      // One warning for the outage the timeouts caused, one for the failed refunds, however many failed.
+      expect(warns.map((w) => w.msg).filter((m) => m === 'rate limit refund failed')).toHaveLength(1);
+      expect(warns).toHaveLength(2);
+      expect(infos).toHaveLength(0);
+    } finally {
+      (redis as unknown as { rlTake: unknown }).rlTake = take;
+      (redis as unknown as { rlAdjust: unknown }).rlAdjust = adjust;
+    }
+  });
+
   it('an unreachable Redis serves the request and a client still connecting is not logged as down', async () => {
     const warns: object[] = [];
     const dead = createRedis('redis://127.0.0.1:1', { startupGraceMs: 0 });

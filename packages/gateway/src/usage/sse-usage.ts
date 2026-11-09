@@ -39,15 +39,34 @@ const MAX_LINE = 1024 * 1024;
 
 const EMPTY = Buffer.alloc(0);
 
-// Index just past the first blank line (the end of an SSE event), or -1 while the event is incomplete.
+// Index just past the end of the first SSE event, or -1 while it is incomplete. A line ends with \n, \r
+// or \r\n, and an event ends at an empty line, so any two line endings in a row close it (\n\n, \r\r,
+// \r\n\r\n, \n\r\n, \r\n\n, ...). The bytes are only inspected here, never changed. A lone \r at the
+// very end of the data might be the start of \r\n, so after content it waits for the next byte; after a
+// line ending it closes the event at once (a following \n becomes an empty line at the start of the next).
 function eventEnd(buf: Buffer): number {
-  const lf = buf.indexOf('\n\n');
-  const crlf = buf.indexOf('\r\n\r\n');
-  const a = lf < 0 ? Infinity : lf + 2;
-  const b = crlf < 0 ? Infinity : crlf + 4;
-  const end = Math.min(a, b);
-  return end === Infinity ? -1 : end;
+  let afterEol = false;
+  let i = 0;
+  while (i < buf.length) {
+    const c = buf[i]!;
+    if (c !== 10 && c !== 13) {
+      afterEol = false;
+      i++;
+      continue;
+    }
+    let len = 1;
+    if (c === 13) {
+      if (i + 1 >= buf.length) return afterEol ? i + 1 : -1;
+      if (buf[i + 1] === 10) len = 2;
+    }
+    i += len;
+    if (afterEol) return i;
+    afterEol = true;
+  }
+  return -1;
 }
+
+const LINE_END = /\r\n|\r|\n/;
 
 export interface SseUsageTapOptions {
   /**
@@ -131,7 +150,7 @@ export class SseUsageTap extends Transform {
   // Reads the usage in a complete event. True when the event is the usage-only chunk.
   private inspect(text: string): boolean {
     let usageOnly = false;
-    for (const l of text.split(/\r?\n/)) {
+    for (const l of text.split(LINE_END)) {
       const parsed = this.parseLine(l);
       if (parsed === undefined) continue;
       this.last = parsed.usage;
@@ -141,7 +160,7 @@ export class SseUsageTap extends Transform {
   }
 
   private scan(text: string): void {
-    const parts = (this.carry + text).split('\n');
+    const parts = (this.carry + text).split(LINE_END);
     this.carry = parts.pop() ?? '';
     for (const l of parts) {
       if (this.skipping) {

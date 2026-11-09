@@ -79,6 +79,10 @@ export function createLimiter(opts: LimiterOptions): Limiter {
     log?.info({}, 'redis available again, rate limiting resumed');
   };
 
+  // A refund that fails is logged once and does not touch the outage state above: the take that
+  // prompted it already did.
+  let refundFailing = false;
+
   const withTimeout = <T>(p: Promise<T>): Promise<T> =>
     new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new RedisTimeout('no reply in time')), timeoutMs);
@@ -131,9 +135,18 @@ export function createLimiter(opts: LimiterOptions): Limiter {
       async function refundBoth(): Promise<void> {
         try {
           const extra: Array<string | number> = clock ? [clock()] : [];
-          await Promise.all([cmd.rlAdjust(kReq, rpm, 1, ...extra), cmd.rlAdjust(kTok, tpm, cost, ...extra)]);
+          await Promise.all([
+            withTimeout(cmd.rlAdjust(kReq, rpm, 1, ...extra)),
+            withTimeout(cmd.rlAdjust(kTok, tpm, cost, ...extra)),
+          ]);
+          refundFailing = false;
         } catch (err) {
-          failed(err);
+          if (refundFailing) return;
+          refundFailing = true;
+          log?.warn(
+            { errClass: (err as Error).name, code: (err as { code?: string }).code },
+            'rate limit refund failed',
+          );
         }
       }
     },

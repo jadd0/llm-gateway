@@ -185,7 +185,9 @@ export const chatRoutes: FastifyPluginAsync<{ upstream: Upstream }> = async (app
       payload = Buffer.from(await res.body.arrayBuffer());
     } catch (err) {
       if (abort.signal.aborted) return reply;
-      return upstreamFailure(reply, err, charge);
+      // The provider answered 2xx and the body then broke: it did the work, so the estimate stays (as for a
+      // stream that fails after bytes were sent). A non-2xx answer was already refunded above.
+      return upstreamFailure(reply, err, null);
     }
     const received = performance.now();
     if (charge !== null && res.statusCode < 300) {

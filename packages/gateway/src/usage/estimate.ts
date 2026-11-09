@@ -25,10 +25,14 @@ function promptChars(messages: unknown): number {
   return chars;
 }
 
-export function estimateTokens(body: unknown, defaultMaxTokens: number): number {
+// The two halves of an estimate: the prompt in tokens, and the output the caller allowed (undefined when it
+// named none).
+function splitRequest(body: unknown): { prompt: number; explicitOutput: number | undefined } {
   const b = (body ?? {}) as { messages?: unknown; max_tokens?: unknown; max_completion_tokens?: unknown };
-  const output = [b.max_tokens, b.max_completion_tokens].find(isPositiveInt) ?? defaultMaxTokens;
-  return Math.ceil(promptChars(b.messages) / CHARS_PER_TOKEN) + output;
+  return {
+    prompt: Math.ceil(promptChars(b.messages) / CHARS_PER_TOKEN),
+    explicitOutput: [b.max_tokens, b.max_completion_tokens].find(isPositiveInt),
+  };
 }
 
 export interface LimitEstimate {
@@ -45,9 +49,7 @@ export interface LimitEstimate {
  * request is not refused because of a guess the caller never made.
  */
 export function estimateForLimit(body: unknown, defaultMaxTokens: number, tpm: number): LimitEstimate {
-  const b = (body ?? {}) as { messages?: unknown; max_tokens?: unknown; max_completion_tokens?: unknown };
-  const prompt = Math.ceil(promptChars(b.messages) / CHARS_PER_TOKEN);
-  const explicit = [b.max_tokens, b.max_completion_tokens].find(isPositiveInt);
+  const { prompt, explicitOutput: explicit } = splitRequest(body);
   if (explicit !== undefined) {
     const cost = prompt + explicit;
     return { cost, tooLarge: cost > tpm };

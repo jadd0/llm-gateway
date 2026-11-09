@@ -133,6 +133,39 @@ describe('SseUsageTap with stripping', () => {
   });
 });
 
+describe('event terminators', () => {
+  const body = (eol: string) => `data: {"choices":[{"delta":{"content":"a"}}],"usage":null}${eol}`;
+
+  it.each(['\n\n', '\r\r', '\r\n\r\n', '\n\r\n', '\r\n\n', '\r\n\r', '\n\r'])(
+    'terminator %j closes an event: events pass through one at a time and the bytes are untouched',
+    async (eol) => {
+      const tap = new SseUsageTap(() => {}, { stripUsageChunk: true });
+      const seen: string[] = [];
+      tap.on('data', (c: Buffer) => seen.push(c.toString()));
+      let sent = '';
+      for (let i = 0; i < 3; i++) {
+        tap.write(Buffer.from(body(eol)));
+        sent += body(eol);
+        await new Promise((r) => setImmediate(r));
+        expect(seen.join('')).toBe(sent); // out now, not held until 1 MiB
+      }
+      tap.end();
+    },
+  );
+
+  it('strips the usage-only event whatever ends it, and still reads the usage', async () => {
+    for (const eol of ['\r\r', '\r\n\r\n', '\n\r\n']) {
+      const tap = new SseUsageTap(() => {}, { stripUsageChunk: true });
+      const out: Buffer[] = [];
+      tap.on('data', (c: Buffer) => out.push(c));
+      const keep = body(eol);
+      const only = `data: ${JSON.stringify({ choices: [], usage })}${eol}`;
+      await pipeline(Readable.from([Buffer.from(keep + only + `data: [DONE]${eol}`)]), tap);
+      expect(Buffer.concat(out).toString()).toBe(keep + `data: [DONE]${eol}`);
+    }
+  });
+});
+
 describe('multi-byte characters', () => {
   it('a character split across chunks inside the usage event still settles', async () => {
     const ev = event({ model: 'é€😀', choices: [], usage });
