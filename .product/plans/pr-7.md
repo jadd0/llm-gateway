@@ -130,7 +130,7 @@ none.
 1. `bash scripts/gate.sh` → PASS.
 2. By hand: two mocks (`:9000`, `:9001`), chain `mock-openai-1>mock-anthropic-1`; `POST /__control
    {"outage":"error"}` on A; curl → 200 from B, `x-gateway-model: mock-anthropic-1`,
-   `x-gateway-attempts: 3`; repeat 5× → breaker opens, `x-gateway-attempts: 1` (A skipped); wait
+   `x-gateway-attempts: 4` (three tries on A, one on B); repeat → breaker opens, `x-gateway-attempts: 1` (A skipped); wait
    15 s, restore A → probe, back to A. Hops: `chat.ts` → `fallback.ts` → `breaker.ts`/`breaker.lua`
    → `retry.ts` → `upstream.ts` → mock.
 3. `bash bench/quiet.sh bench/results/pr-7 && bash bench/run-chaos.sh` (orchestrator) → per-phase
@@ -144,7 +144,7 @@ none.
 3. Redis paused (`DEBUG SLEEP` or stop) during an outage: requests still fall back, p95 stays
    within backoff + 50 ms timeout, no request hangs.
 4. Chain where B is dearer than A: tenant with budget for A but not B is refused up front
-   (`budget_exceeded`), never charged above cap.
+   (`budget_exhausted`), never charged above cap.
 5. Retry-after of 3600 s from A: no wait, next model immediately.
 6. Every figure in BENCHMARKS.md and docs/resilience traces to `bench/results/pr-7/` (R3).
 

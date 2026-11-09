@@ -5162,8 +5162,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <path data-edge-from="auth" data-edge-to="est" data-edge-key="0" data-edge-id="a-e" data-composition-points="190,152;290,152" d="M 190 152 L 290 152" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="est" data-edge-to="lua" data-edge-label="EVALSHA" data-edge-key="1" data-edge-id="e-l" data-composition-points="440,152;540,152" d="M 440 152 L 540 152" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <path data-edge-from="lua" data-edge-to="route" data-edge-label="allow, 429, 400" data-edge-key="2" data-edge-id="l-r" data-composition-points="620,184;620,208;464,208;464,332;440,332" d="M 620 184 L 620 200 Q 620 208 612 208 L 472 208 Q 464 208 464 216 L 464 324 Q 464 332 456 332 L 440 332" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="route" data-edge-to="prov" data-edge-label="forward" data-edge-key="3" data-edge-id="r-p" data-composition-points="290,332;190,332" d="M 290 332 L 190 332" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
-        <path data-edge-from="route" data-edge-to="settle" data-edge-label="used, refund, keep" data-edge-key="4" data-edge-id="r-s" data-composition-points="365,364;365,480" d="M 365 364 L 365 480" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="route" data-edge-to="prov" data-edge-label="attempts" data-edge-key="3" data-edge-id="r-p" data-composition-points="290,332;190,332" d="M 290 332 L 190 332" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
+        <path data-edge-from="route" data-edge-to="settle" data-edge-label="used (serving model), refund, keep" data-edge-key="4" data-edge-id="r-s" data-composition-points="365,364;365,480" d="M 365 364 L 365 480" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="settle" data-edge-to="adj" data-edge-label="tokens" data-edge-key="5" data-edge-id="s-a" data-composition-points="440,512;540,512" d="M 440 512 L 540 512" class="a-default" stroke-width="1.5" marker-end="url(#arrowhead)"/>
         <path data-edge-from="settle" data-edge-to="bud" data-edge-label="money" data-edge-key="6" data-edge-id="s-b" data-composition-points="290,512;190,512" d="M 290 512 L 190 512" class="a-dashed" stroke-width="1.5" marker-end="url(#arrowhead-dashed)"/>
 
@@ -5213,8 +5213,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <text data-detail="context" x="365" y="346" class="t-muted" font-size="9" text-anchor="middle">429 or forward</text>
         </g>
 
-        <g id="node-prov" data-node-id="prov" data-node-label="Provider" tabindex="0" role="button" aria-label="Focus Provider, any format, with usage, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="any format, with usage" data-node-context="Architecture component">
-          <title>Provider · any format, with usage · Architecture component</title>
+        <g id="node-prov" data-node-id="prov" data-node-label="Provider" tabindex="0" role="button" aria-label="Focus Provider, answers with usage, Architecture component" aria-pressed="false" data-node-kind="external" data-node-sublabel="answers with usage" data-node-context="Architecture component">
+          <title>Provider · answers with usage · Architecture component</title>
           <rect x="40" y="300" width="150" height="64" rx="6" class="c-mask"/>
           <rect x="40" y="300" width="150" height="64" rx="6" class="c-external" stroke-width="1.5"/>
           <g aria-hidden="true" data-semantic-sigil="external" class="semantic-sigil s-external" transform="translate(46 306) scale(0.6875)">
@@ -5222,7 +5222,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
             <path d="M8 2.5h5.5V8M13.5 2.5 7.5 8.5"/>
           </g>
           <text data-node-label="" data-detail-anchor="" x="115" y="330" class="t-primary" font-size="11" font-weight="600" text-anchor="middle">Provider</text>
-        <text data-detail="context" x="115" y="346" class="t-muted" font-size="9" text-anchor="middle">any format, with usage</text>
+        <text data-detail="context" x="115" y="346" class="t-muted" font-size="9" text-anchor="middle">answers with usage</text>
         </g>
 
         <g id="node-settle" data-node-id="settle" data-node-label="Settle step" tabindex="0" role="button" aria-label="Focus Settle step, usage/settle.ts, Architecture component" aria-pressed="false" data-node-kind="backend" data-node-sublabel="usage/settle.ts" data-node-context="Architecture component">
@@ -5269,13 +5269,13 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <rect x="501" y="188" width="82" height="14" rx="3" class="c-mask"/>
           <text x="542" y="198" class="t-muted" font-size="8" text-anchor="middle">allow, 429, 400</text>
         </g>
-        <g data-detail="context" data-edge-from="route" data-edge-to="prov" data-edge-label="forward" data-edge-key="3" data-edge-id="r-p">
-          <rect x="218.2" y="312" width="43.6" height="14" rx="3" class="c-mask"/>
-          <text x="240" y="322" class="t-muted" font-size="8" text-anchor="middle">forward</text>
+        <g data-detail="context" data-edge-from="route" data-edge-to="prov" data-edge-label="attempts" data-edge-key="3" data-edge-id="r-p">
+          <rect x="215.8" y="312" width="48.4" height="14" rx="3" class="c-mask"/>
+          <text x="240" y="322" class="t-muted" font-size="8" text-anchor="middle">attempts</text>
         </g>
-        <g data-detail="context" data-edge-from="route" data-edge-to="settle" data-edge-label="used, refund, keep" data-edge-key="4" data-edge-id="r-s">
-          <rect x="316.8" y="402" width="96.39999999999999" height="14" rx="3" class="c-mask"/>
-          <text x="365" y="412" class="t-muted" font-size="8" text-anchor="middle">used, refund, keep</text>
+        <g data-detail="context" data-edge-from="route" data-edge-to="settle" data-edge-label="used (serving model), refund, keep" data-edge-key="4" data-edge-id="r-s">
+          <rect x="278.4" y="402" width="173.2" height="14" rx="3" class="c-mask"/>
+          <text x="365" y="412" class="t-muted" font-size="8" text-anchor="middle">used (serving model), refund, keep</text>
         </g>
         <g data-detail="context" data-edge-from="settle" data-edge-to="adj" data-edge-label="tokens" data-edge-key="5" data-edge-id="s-a">
           <rect x="470.6" y="492" width="38.8" height="14" rx="3" class="c-mask"/>

@@ -4,7 +4,7 @@ Diagram: [architecture.html](architecture.html).
 
 An LLM gateway is one HTTP endpoint that apps call instead of calling model providers directly.
 It forwards each request to the provider its model name selects and relays the answer, translated to OpenAI's format where the provider has its own, and later PRs add the policy around that
-hop (auth, limits, budgets, caching, failover, logging).
+hop (auth, limits, budgets, resilience, caching, logging).
 
 ## Built
 
@@ -55,7 +55,7 @@ compared against rather than an impression. PR 3 added the key check and re-meas
    non-streamed in the baseline.
 2. **Why is the gateway stateless?** So instances scale horizontally; anything shared goes to Redis or
    Postgres. Auth uses both: Postgres is the source of truth for keys, Redis only caches it.
-3. **What is built versus planned?** Built: passthrough, provider adapters (Anthropic, OpenAI, Gemini), the mock, tenants and API-key auth, per-key rate limits, per-tenant monthly budgets (see [../budgets/](../budgets/README.md)). Planned: everything dashed in the
+3. **What is built versus planned?** Built: passthrough, provider adapters (Anthropic, OpenAI, Gemini), the mock, tenants and API-key auth, per-key rate limits, per-tenant monthly budgets (see [../budgets/](../budgets/README.md)), resilience: timeouts, retries, a Redis-shared circuit breaker and model fallback chains (see [../resilience/](../resilience/README.md)). Planned: everything dashed in the
    diagram.
 4. **How do you know the numbers are the gateway's?** The mock removes provider variance, and each figure is
    a difference against a direct-to-mock run at the same rate.

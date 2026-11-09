@@ -16,6 +16,8 @@ ends, the reservation is replaced by what was really spent. Over the cap the ans
 2. The worst case is `ceil(prompt chars / 4)` prompt tokens plus `max_tokens` (or `RATE_LIMIT_DEFAULT_MAX_TOKENS`
    when the caller set none), priced from the static table in `pricing/prices.ts`, rounded up in micro-USD.
    Unlike the rate limiter, the output is never trimmed to a per-minute size: money is held for the most the call can cost.
+   With a fallback chain (see [../resilience/](../resilience/README.md)) the hold is priced at the **dearest model in the chain**, so a
+   fallback can never push a tenant past its cap; the final charge is at the price of the model that served, and the ledger row names it.
 3. The hold is **written to Postgres first** (`budget_reservations`), then `budget.lua` does the check and the hold in
    one atomic Redis script: `spent + reserved + estimate > cap` refuses, otherwise the estimate is added to `reserved`.
    Two gateways can never both see "10 cents left" and both spend it. Postgres goes first so a rebuild or a
