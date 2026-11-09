@@ -58,6 +58,9 @@ function fixture(): string {
     w(`correctness/budget-failover-${run}.json`, { rounds: 10, requestsPerRound: 50, admitted: 210, ledgerRows: 210, roundsOverCap: 0, maxOvershootMicros: 0 });
   }
   w('logging/summary.md', '# Request logging\n\n| a |\n');
+  mkdirSync(join(dir, 'cache/rep-1'), { recursive: true });
+  w('cache/rep-1/summary.md', '# Cache\n');
+  w('hardware.txt', 'cpu: test cpu\n');
   w('skipped.txt', 'frameworks: bench/frameworks is not on this base\n');
   for (const rep of [1, 2]) {
     mkdirSync(join(dir, `overhead/rep-${rep}`), { recursive: true });
@@ -85,6 +88,8 @@ describe('final summary', () => {
     // The appended per-scenario summary has its headings demoted under the scenario heading.
     expect(first).toContain('## Scenario: logging');
     expect(first).toContain('### Request logging');
+    expect(first).toContain('## Scenario: cache/rep-1');
+    expect(first).toContain('cpu: test cpu\n\nloadavg: { 1.20 }');
     // No clock reading in the file.
     expect(first).not.toMatch(/20\d\d-\d\d-\d\d/);
   });

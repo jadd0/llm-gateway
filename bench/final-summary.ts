@@ -7,7 +7,7 @@
 //                                                      the ramp files of that instance count give (run-all uses it)
 // Layout it reads (run-all writes it):
 //   params.json                          the run's timings: rampMeasureS, spikeWindowS
-//   conditions.txt                       quiet.sh's record, quoted
+//   hardware.txt, conditions.txt         the machine and quiet.sh's record of its state, quoted
 //   overhead/rep-<n>/{direct,gateway}-{instant,realistic}.json   k6 exports of bench/run-baseline.sh, one folder per repeat
 //   skipped.txt                          optional: scenarios run-all could not run on this base, one per line
 //   cluster/ramp-<n>i-<rep>.json         k6 export of bench/k6/ramp.js against n gateway instances
@@ -394,13 +394,16 @@ export function load(dir: string): Data {
   const cluster = join(dir, 'cluster');
   const corr = join(dir, 'correctness');
   const jsons = <T>(re: RegExp) => files(corr, re).map((f) => readJson<T>(join(corr, f)));
+  // Each scenario folder may hold its summary at the top or one per repeat (rep-<n>/).
   const appendices = readdirSync(dir)
     .sort()
     .filter((n) => statSync(join(dir, n)).isDirectory())
     .flatMap((n) =>
-      ['summary.md', 'latency.md']
-        .filter((f) => existsSync(join(dir, n, f)))
-        .map((f) => ({ name: f === 'summary.md' ? n : `${n} (${f})`, text: readFileSync(join(dir, n, f), 'utf8') })),
+      [n, ...files(join(dir, n), /^rep-\d+$/).map((r) => `${n}/${r}`)].flatMap((rel) =>
+        ['summary.md', 'latency.md']
+          .filter((f) => existsSync(join(dir, rel, f)))
+          .map((f) => ({ name: f === 'summary.md' ? rel : `${rel} (${f})`, text: readFileSync(join(dir, rel, f), 'utf8') })),
+      ),
     );
   const overhead = { instant: [], realistic: [] } as Record<Profile, OverheadRep[]>;
   const overheadDir = join(dir, 'overhead');
@@ -417,7 +420,7 @@ export function load(dir: string): Data {
     overhead,
     skipped: existsSync(join(dir, 'skipped.txt')) ? readFileSync(join(dir, 'skipped.txt'), 'utf8').split('\n').filter((l) => l !== '') : [],
     params: readJson<Params>(join(dir, 'params.json')),
-    conditions: existsSync(join(dir, 'conditions.txt')) ? readFileSync(join(dir, 'conditions.txt'), 'utf8') : null,
+    conditions: ['hardware.txt', 'conditions.txt'].filter((f) => existsSync(join(dir, f))).map((f) => readFileSync(join(dir, f), 'utf8').trimEnd()).join('\n\n') || null,
     ramps: groupBy(cluster, /^ramp-(\d+)i-\d+\.json$/, (m) => Number(m[1])),
     steady: groupBy(cluster, /^steady-(\d+)i-(\d+)-\d+\.json$/, (m) => steadyKey(Number(m[1]), Number(m[2]))),
     spikes: groupBy(cluster, /^spike-(\d+)i-\d+\.json$/, (m) => Number(m[1])),

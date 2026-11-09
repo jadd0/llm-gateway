@@ -7,6 +7,8 @@
 # script kills A with SIGKILL at KILL_AT_S and starts a fresh A at RESTART_AT_S. The run is done twice, with
 # the fallback chain mock-openai-1>mock-anthropic-1 and without it. k6 tags each request with the phase it was
 # sent in (before, outage, after); bench/chaos-summary.ts turns the two k6 summaries into summary.md.
+# FRONT_PORT=<port>: nginx (bench/cluster.sh nginx) listens there in front of the gateway for each run, and k6 sends
+# its load through it; the final suite sets it so the outage is measured through the same front as the cluster runs.
 # Run it behind `bash bench/quiet.sh <OUT>`; a build running alongside invalidates the latency numbers.
 set -euo pipefail
 
@@ -69,10 +71,17 @@ start_gateway() { # fallback chain ("" for none), run name
   GW_PID=$!; PIDS+=("$GW_PID")
   wait_up "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" 401 "$GW_PID"
 }
+FRONT_PORT="${FRONT_PORT:-}"
+start_front() { # nginx in front of the gateway, when FRONT_PORT is set; waits until it answers
+  [ -n "$FRONT_PORT" ] || return 0
+  CLUSTER_DIR="$(mktemp -d)" NGINX_PORT="$FRONT_PORT" bash "$ROOT/bench/cluster.sh" nginx "$FRONT_PORT" "$GATEWAY_PORT" >/dev/null &
+  FRONT_PID=$!; PIDS+=("$FRONT_PID")
+  wait_up "http://127.0.0.1:$FRONT_PORT/v1/chat/completions" 401 "$FRONT_PID"
+}
 stop_all() {
-  kill "${GW_PID:-}" "${MOCK_A_PID:-}" "${MOCK_B_PID:-}" 2>/dev/null || true
-  wait "${GW_PID:-}" "${MOCK_A_PID:-}" "${MOCK_B_PID:-}" 2>/dev/null || true
-  GW_PID=""; MOCK_A_PID=""; MOCK_B_PID=""
+  kill "${FRONT_PID:-}" "${GW_PID:-}" "${MOCK_A_PID:-}" "${MOCK_B_PID:-}" 2>/dev/null || true
+  wait "${FRONT_PID:-}" "${GW_PID:-}" "${MOCK_A_PID:-}" "${MOCK_B_PID:-}" 2>/dev/null || true
+  FRONT_PID=""; GW_PID=""; MOCK_A_PID=""; MOCK_B_PID=""
 }
 
 run_once() { # name fallback-chain
@@ -81,9 +90,10 @@ run_once() { # name fallback-chain
   start_mock "$MOCK_A_PORT"; MOCK_A_PID=$LAST_PID
   start_mock "$MOCK_B_PORT"; MOCK_B_PID=$LAST_PID
   start_gateway "$chain" "$name"
+  start_front
   rm -f "${OUT:?}/$name.json"
   t0=$(( $(date +%s) * 1000 + 3000 ))
-  API_KEY="$KEY" TARGET_URL="http://127.0.0.1:$GATEWAY_PORT" T0="$t0" KILL_AT_S="$KILL_AT_S" RESTART_AT_S="$RESTART_AT_S" \
+  API_KEY="$KEY" TARGET_URL="http://127.0.0.1:${FRONT_PORT:-$GATEWAY_PORT}" T0="$t0" KILL_AT_S="$KILL_AT_S" RESTART_AT_S="$RESTART_AT_S" \
     DURATION_S="$DURATION_S" RATE_JSON="$RATE_JSON" RATE_STREAM="$RATE_STREAM" \
     k6 run --quiet --summary-export "$OUT/$name.json" "$ROOT/bench/k6/chaos.js" >"$OUT/$name.log" 2>&1 &
   K6_PID=$!
