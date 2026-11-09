@@ -4,7 +4,7 @@ import { chatRequest } from '../request-body.ts';
 import type { Usage } from '../usage/sse-usage.ts';
 import { splitForSemantic } from '../semantic/context.ts';
 import type { SemanticFill } from '../semantic/fill.ts';
-import type { SemanticLookup } from '../semantic/lookup.ts';
+import type { SemanticHit, SemanticLookup } from '../semantic/lookup.ts';
 import { cacheKey, isCacheable, normalise, scopeOf } from './key.ts';
 import { replayBody, replayStream, type CachedCompletion } from './replay.ts';
 import type { SingleFlight } from './single-flight.ts';
@@ -110,25 +110,40 @@ const cachePlugin: FastifyPluginAsync<CachePluginOptions> = async (app, opts) =>
       const found = await lookup();
       if (found.status === 'unavailable') return void reply.header('x-gateway-cache', 'unavailable');
       if (found.status === 'hit') return hit(request, reply, found.entry, streamed, includeUsage);
-      // After an exact miss only. Anything but a hit (no embedding in time, Postgres or Redis slow) is a plain miss.
-      if (semantic) {
-        const near = await opts.semantic!.lookup.find(scope, semantic);
-        if (near.status === 'hit') return hit(request, reply, near.entry.entry, streamed, includeUsage, near.entry.similarity);
-      }
     }
 
     // A miss. The first of several identical non-streamed misses leads; the rest wait for its fill. A stream
     // cannot be shared without holding it, so streamed misses neither lead nor wait.
     let leader: Extract<Awaited<ReturnType<SingleFlight['acquire']>>, { role: 'leader' }> | undefined;
+    let follower = false;
     if (!streamed && !refresh) {
       const role = await opts.singleFlight.acquire(key);
       if (role.role === 'follower') {
+        follower = true;
         const entry = await role.wait(lookup);
         if (entry) return hit(request, reply, entry, streamed, includeUsage);
+        // The leader of this process may have been served by a similar prompt instead. That is shared only with a
+        // follower that is itself on the semantic cache; nothing is written under the exact key, where a request
+        // that opted out, or a tenant that is off, would read it as an exact answer.
+        const shared = role.shared() as SemanticHit | undefined;
+        if (shared && semantic) return hit(request, reply, shared.entry, streamed, includeUsage, shared.similarity);
       } else if (role.role === 'leader') {
         leader = role;
       }
     }
+    // After an exact miss, once per burst: the leader (or a request that cannot lead) asks the semantic cache,
+    // and the followers take its answer above. Anything but a hit (no embedding in time, Postgres or Redis
+    // slow, a guard that refused the nearest prompt) is a plain miss.
+    let refusedBy: string | undefined;
+    if (semantic && !refresh && !follower) {
+      const near = await opts.semantic!.lookup.find(scope, semantic);
+      if (near.status === 'hit') {
+        leader?.finish('failed', near.entry);
+        return hit(request, reply, near.entry.entry, streamed, includeUsage, near.entry.similarity);
+      }
+      if (near.status === 'miss') refusedBy = near.guard;
+    }
+    if (refusedBy) reply.header('x-gateway-semantic-guard', refusedBy);
     reply.header('x-gateway-cache', refresh ? 'refresh' : 'miss');
 
     let state: 'open' | 'storing' | 'ended' = 'open';

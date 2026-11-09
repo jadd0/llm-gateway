@@ -382,4 +382,64 @@ describe('semantic cache on POST /v1/chat/completions', () => {
     expect(img.headers.get('x-gateway-cache')).toBe('miss');
     expect(stub.calls.length).toBe(before);
   });
+
+  it('a tenant that never opted in is not embedded, stored or matched', async () => {
+    // seedKey makes the tenant exactly as `keys create-tenant` does: nothing is switched on.
+    const t = await seedKey(handle.db, base);
+    tenantIds.push(t.tenantId);
+    expect((await handle.db.select().from(tenants).where(eq(tenants.id, t.tenantId)))[0]!.semanticCache).toBe(false);
+    const [a, b] = pair();
+    expect((await post(t.key, req(a))).headers.get('x-gateway-cache')).toBe('miss');
+    expect((await post(t.key, req(a))).headers.get('x-gateway-cache')).toBe('hit');
+    const before = calls;
+    expect((await post(t.key, req(b))).headers.get('x-gateway-cache')).toBe('miss');
+    expect(calls).toBe(before + 1);
+    expect(stub.calls.filter((c) => c.text === a || c.text === b)).toHaveLength(0);
+    expect(await rowsOf(t.tenantId)).toHaveLength(0);
+  });
+
+  it('a close prompt with a different number is a miss that names the guard, and is not served', async () => {
+    const t = await tenant();
+    const id = uniq();
+    const a = `refund order number 1234 for ${id}`;
+    const b = `refund order number 1235 for ${id}`;
+    table[a] = angle(1);
+    table[b] = angle(1 + (Math.acos(0.982) * 180) / Math.PI);
+    await seed(t, req(a));
+    const before = calls;
+    const res = await post(t.key, req(b));
+    expect(res.headers.get('x-gateway-cache')).toBe('miss');
+    expect(res.headers.get('x-gateway-semantic-guard')).toBe('numbers');
+    expect(res.headers.get('x-gateway-similarity')).toBeNull();
+    expect(calls).toBe(before + 1);
+    // Its own answer is what the next ask gets, and nothing was refused there.
+    const again = await post(t.key, req(b));
+    expect(again.headers.get('x-gateway-cache')).toBe('hit');
+    expect(again.headers.get('x-gateway-semantic-guard')).toBeNull();
+  });
+
+  it('a burst of identical paraphrases asks the semantic cache once; followers that are off go upstream', async () => {
+    const on = await tenant({ shared: true });
+    const off = await tenant({ shared: true, semantic: false });
+    const [a, b] = pair();
+    await handle.db.delete(semanticCache).where(eq(semanticCache.scope, 'shared'));
+    expect((await post(on.key, req(a))).headers.get('x-gateway-cache')).toBe('miss');
+    expect(await until(async () => (await rowsOf('shared')).length > 0)).toBe(true);
+    const before = calls;
+    stub.hold();
+    const leader = post(on.key, req(b));
+    await new Promise((r) => setTimeout(r, 150));
+    // Same key, same process: followers. Two are on the semantic cache, one has opted out per request, one is a
+    // tenant that is off. They must not be handed the leader's semantic answer.
+    const followers = [post(on.key, req(b)), post(on.key, req(b)), post(on.key, req(b), { 'x-gateway-semantic': 'off' }), post(off.key, req(b))];
+    await new Promise((r) => setTimeout(r, 150));
+    stub.release();
+    const results = await Promise.all([leader, ...followers]);
+    expect(results.map((r) => r.headers.get('x-gateway-cache'))).toEqual(['semantic-hit', 'semantic-hit', 'semantic-hit', 'miss', 'miss']);
+    // One embedding of b (the leader's), and only the two that went upstream called the provider.
+    expect(stub.calls.filter((c) => c.text === b)).toHaveLength(1);
+    expect(calls - before).toBe(2);
+    await handle.db.delete(semanticCache).where(eq(semanticCache.scope, 'shared'));
+    for (const k of await redis.keys(`${prefix}cache:${KEY_VERSION}:shared:*`)) await redis.del(k);
+  });
 });

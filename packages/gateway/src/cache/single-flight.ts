@@ -13,12 +13,20 @@ const BACKSTOP_LOCKS = 2;
 export type Acquired =
   /**
    * This request goes upstream for everyone. `finish` must be called when its fill is written or abandoned.
+   * A leader that ends with an answer of its own that is not in the cache under this key (a semantic hit) passes
+   * it as `shared`: followers in this process can read it with `shared()`. Followers in other processes only
+   * learn that the leader gave up and go upstream.
    * `closed` says the request is over (the reply finished or the client left): the lock stops being renewed,
    * and a leader that still has not finished is dropped after a few lock lifetimes.
    */
-  | { role: 'leader'; finish(outcome: 'filled' | 'failed'): void; closed(): void }
+  | { role: 'leader'; finish(outcome: 'filled' | 'failed', shared?: unknown): void; closed(): void }
   /** An identical request is already going upstream. `wait` resolves with the entry, or undefined when this request should go upstream itself. */
-  | { role: 'follower'; wait<T>(read: () => Promise<Lookup<T>>): Promise<T | undefined> }
+  | {
+      role: 'follower';
+      wait<T>(read: () => Promise<Lookup<T>>): Promise<T | undefined>;
+      /** After `wait` came back empty: what a leader of this process handed to `finish`, if anything. */
+      shared(): unknown;
+    }
   /** Redis could not say who leads: go upstream alone. */
   | { role: 'solo' };
 
@@ -56,9 +64,11 @@ interface Flight {
   settled: Promise<Outcome>;
   /** The entry the poller found, handed to every waiter so none has to read it again. */
   entry?: unknown;
+  /** What a leader of this process passed to `finish` besides its outcome. */
+  shared?: unknown;
   done: boolean;
   polling: boolean;
-  settle(outcome: Outcome, entry?: unknown): void;
+  settle(outcome: Outcome, entry?: unknown, shared?: unknown): void;
   /** Called once the kind is decided and, for 'remote', the channel is subscribed. */
   decided(): void;
 }
@@ -124,10 +134,11 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
       settled,
       done: false,
       polling: false,
-      settle: (o, entry) => {
+      settle: (o, entry, shared) => {
         if (flight.done) return;
         flight.done = true;
         flight.entry = entry;
+        flight.shared = shared;
         settle(o);
       },
       decided,
@@ -196,7 +207,7 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
   return {
     async acquire(key) {
       const existing = flights.get(key);
-      if (existing) return { role: 'follower', wait: wait(key, existing) };
+      if (existing) return { role: 'follower', wait: wait(key, existing), shared: () => existing.shared };
 
       const flight = newFlight();
       flights.set(key, flight);
@@ -249,12 +260,12 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
           );
         }, Math.max(1, Math.floor(opts.lockMs / 3)));
         renewing.unref();
-        const finish = (outcome: 'filled' | 'failed') => {
+        const finish = (outcome: 'filled' | 'failed', shared?: unknown) => {
           if (finished) return;
           finished = true;
           stop();
           drop();
-          flight.settle(outcome);
+          flight.settle(outcome, undefined, shared);
           // Lock first, then the notification, so a waiter that wakes can lead the next burst at once.
           track(
             (async () => {
@@ -299,7 +310,7 @@ export function createSingleFlight(opts: SingleFlightOptions): SingleFlight {
         clearTimeout(giveUp);
         drop();
       });
-      return { role: 'follower', wait: wait(key, flight) };
+      return { role: 'follower', wait: wait(key, flight), shared: () => flight.shared };
     },
 
     async idle() {

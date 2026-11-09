@@ -233,6 +233,34 @@ describe('single flight', () => {
     expect((await sf.acquire(key)).role).toBe('follower');
   });
 
+  it('what a leader hands to finish reaches its own process\'s followers, and no one else', async () => {
+    const sf = make({ waitMs: 5_000 });
+    const other = make({ waitMs: 300, pollMs: 50 });
+    const key = freshKey();
+    const lead = await sf.acquire(key);
+    if (lead.role !== 'leader') throw new Error('expected a leader');
+    const f = await sf.acquire(key);
+    const remote = await other.acquire(key);
+    if (f.role !== 'follower' || remote.role !== 'follower') throw new Error('expected followers');
+    const reads = async () => ({ status: 'miss' }) as const;
+    const waiting = Promise.all([f.wait(reads), remote.wait(reads)]);
+    await sleep(50);
+    lead.finish('failed', { semantic: 'hit' });
+    // Neither found an entry under the key; the follower in the leader's process was handed the leader's answer.
+    expect(await waiting).toEqual([undefined, undefined]);
+    expect(f.shared()).toEqual({ semantic: 'hit' });
+    expect(remote.shared()).toBeUndefined();
+    // Without one, nothing is shared.
+    const key2 = freshKey();
+    const lead2 = await sf.acquire(key2);
+    const f2 = await sf.acquire(key2);
+    if (lead2.role !== 'leader' || f2.role !== 'follower') throw new Error('expected leader and follower');
+    const w2 = f2.wait(reads);
+    lead2.finish('failed');
+    await w2;
+    expect(f2.shared()).toBeUndefined();
+  });
+
   it('followers in the leader\'s process wait on it without reading Redis', async () => {
     const sf = make({ pollMs: 30, waitMs: 5_000 });
     const key = freshKey();
