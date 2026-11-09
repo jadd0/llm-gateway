@@ -7,9 +7,10 @@ for every figure below are committed in [bench/results/pr-1/](bench/results/pr-1
 
 The gateway-timing metric is named `gw_server_timing_ms` in the committed JSON. It was read from the
 `server-timing` header as it was when these runs were recorded: for the non-streamed (instant) runs the `gw`
-field, which is the gateway's in-process time, **pre-dispatch plus post-receipt** (request received to upstream
-dispatched, plus body received to reply built); for the streamed (realistic) runs the `gw-pre` field, which is
-**pre-dispatch only**. The gateway now reports `gw-pre` and `gw-post` separately on non-streamed responses, and
+field, computed as total minus upstream. In practice that is **pre-dispatch time** (request received to upstream
+request dispatched): the post-receipt span it also covered contained no work, because copying the upstream body
+into memory was counted under `upstream` and the reply was serialised and written after the measurement. For the
+streamed (realistic) runs the `gw-pre` field, which is **pre-dispatch only**. The gateway now reports `gw-pre` and `gw-post` separately on non-streamed responses, and
 the k6 script records them as `gw_pre_server_timing_ms` and `gw_post_server_timing_ms`. The committed
 results were not re-run.
 
@@ -49,7 +50,7 @@ as an overhead figure. Time to first byte is the streamed measure.
 ### Cross-check against the gateway's own timing
 
 The gateway reports `server-timing`. As recorded, that is its in-process time: 0.008 ms p50 / 0.010 ms p95
-for the instant run (pre-dispatch plus post-receipt) and 0.010 ms p50 / 0.018 ms p95 for the realistic run
+for the instant run (effectively pre-dispatch) and 0.010 ms p50 / 0.018 ms p95 for the realistic run
 (pre-dispatch only). It is not the overhead figure. k6's direct-versus-gateway difference, about 0.23 ms at p50, is
 the real overhead, because it includes the extra HTTP hop (parsing the request, an extra socket round trip,
 writing the response) that the header cannot see. The plan's check was that the two must not differ by more

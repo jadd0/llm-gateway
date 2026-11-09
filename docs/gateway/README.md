@@ -23,7 +23,8 @@ Diagram: [chat-passthrough.html](chat-passthrough.html). Code: `packages/gateway
   `{"error":{"message":..., "type":"gateway_error"}}`. An upstream 4xx or 5xx is passed through unchanged.
 - **Timing.** Non-streamed responses carry `server-timing: gw-pre;dur=<ms>, gw-post;dur=<ms>, upstream;dur=<ms>`;
   streamed responses carry `server-timing: gw-pre;dur=<ms>`. `gw-pre` is request received to upstream request
-  dispatched, `upstream` is dispatch to body received, `gw-post` is body received to reply built.
+  dispatched, `upstream` is dispatch to the upstream body fully copied into memory, `gw-post` is that point to the reply being
+  handed to Fastify. Serialising and writing the reply happen after `gw-post` and are not in any field.
 - **Upstream headers.** `retry-after`, `x-request-id`, `openai-processing-ms` and every `x-ratelimit-*`
   header are passed through, streamed and not; other upstream headers are dropped.
 - **Errors.** Fastify's own errors (415 unsupported content-type, oversized body) and unknown routes (404)
@@ -50,7 +51,7 @@ deliberately the least clever code in the file: hijack and pipe, so there is not
 ## Measured (from [BENCHMARKS.md](../../BENCHMARKS.md))
 
 0.233 ms p50 / 0.982 ms p95 added, non-streamed at 1000 req/s; 0.238 ms p50 / 0.254 ms p95 added to first
-streamed byte at 200 req/s. The gateway's in-process time (pre-dispatch plus post-receipt) was 0.008 ms p50 in the instant run (`server-timing`).
+streamed byte at 200 req/s. The gateway's own `server-timing` figure, effectively its pre-dispatch time, was 0.008 ms p50 in the instant run; the rest of the 0.233 ms is the extra HTTP hop and reply write, which only the k6 difference captures.
 
 ## Questions you should be able to answer
 
