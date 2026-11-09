@@ -46,7 +46,13 @@ One warn log per outage, not per request. The client reconnects on its own with 
 benchmark can show the cost of Postgres on every request), `AUTH_CACHE_TTL_S` (600), `AUTH_NEGATIVE_TTL_S` (60),
 `AUTH_TOMBSTONE_TTL_S` (1200).
 
+The key CLI and every gateway instance must use the same `REDIS_KEY_PREFIX` (and Redis). If they differ, a
+revoke writes its tombstone where the gateway never looks, and a cached key keeps working for up to
+`AUTH_CACHE_TTL_S`.
+
 ## Measured (from [BENCHMARKS.md](../../BENCHMARKS.md), "Auth overhead")
+
+Provisional: measured on a busy shared laptop; PR 12 re-runs it on a quiet machine (residual R8).
 
 With auth and the Redis cache: 0.617 ms p50 / 0.372 ms p95 over a direct run at 1000 req/s non-streamed, and
 1.054 ms p50 / 1.447 ms p95 to first streamed byte at 200 req/s. Without the cache: 0.774 ms / 0.482 ms and

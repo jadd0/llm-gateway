@@ -88,6 +88,10 @@ Direct-to-mock reference: the mock alone sustained every step with p95 at most 1
 
 ## Auth overhead (PR 3)
 
+> **Provisional.** These runs shared the laptop with other builds and other projects' test suites (load
+> around 11 on 10 cores was observed the same day), so the overhead figures are noisy and not comparable with
+> PR 1's. They are kept as recorded; the quiet re-run in PR 12 (residual R8) replaces them.
+
 Raw k6 summaries: [bench/results/pr-3/](bench/results/pr-3/), produced by `bash bench/run-baseline.sh` with
 `STEP_RATES=""` (the throughput sweep was not re-run for auth). Same machine, method and rates as the PR 1 runs
 above, with every gateway request sending `Authorization: Bearer gw_...`. "Redis" is `AUTH_CACHE=redis`, one
