@@ -41,11 +41,13 @@ so the balance is exactly what it was. A hit found by meaning has the same row w
    - **keep**: no usage was seen (client left, stream cut, a 2xx whose body broke, no usage in the answer). The whole
      reservation is charged and the ledger row is marked `estimated`.
    A request the budget refuses also hands back the tokens the rate limiter had taken for it.
-5. The settle is one Postgres transaction after the response: the hold row is deleted, the `spend_ledger` row is
-   written (one per request id) and `tenant_spend` is increased, with 3 retries. Then the live Redis balance is
-   corrected on the **current** epoch. Each charge is numbered in `tenant_spend.charges` under the row lock and
-   carries the running total, and Redis only takes a total that is ahead of the one it has, so a repeated, reordered
-   or already-rebuilt settle can never count a charge twice or lose one.
+5. The settle runs after the response. With Redis up, one `budget.lua` call appends the spend entry to the request-log
+   stream and moves the live balance on the **current** epoch; the log worker then writes Postgres (the `spend_ledger`
+   row, one per request id, `tenant_spend` and the hold row's deletion; see [../request-log/README.md](../request-log/README.md)).
+   If the script cannot run, or Redis is down, the gateway writes that Postgres transaction itself (3 retries) and then
+   corrects the live balance. Each charge is numbered in `tenant_spend.charges` under the row lock and carries the
+   running total, and Redis only takes a total that is ahead of the one it has, so a repeated, reordered or
+   already-rebuilt settle can never count a charge twice or lose one.
 
 Money is integer micro-USD (1 USD = 1,000,000), never a float; the CLI refuses a budget that isn't a plain USD amount.
 `keys set-budget <tenant> --monthly-usd 0.01` and `keys show-spend <tenant> [--period YYYY-MM]`.
@@ -127,10 +129,12 @@ gateway that crashes mid-request holds the money until then and then pays for it
   admitted where 99 fit), with the accounting exact every time. The overshoot comes from the window above, which the
   250 ms refresh and the rebuild bump shrink. The final suite then ran 10 budget floods on 3 instances with Redis restarted
   mid-run: 0 tenants over the cap, largest overshoot 0 micro-USD. The mechanism remains, bounded and not seen there.
-- **R7, settled-spend writes are in-process.** The Postgres transaction that removes the hold and records the charge
-  runs after the response, with 3 retries. If it still fails, or the process dies before it runs, nothing is written:
-  the hold stays in Redis and Postgres until its TTL and then the whole charge is lost (the tenant is under-billed,
-  never over-capped by this). The durable queue is PR 10.
+- **R7, settled spend is recorded after the response.** With Redis up the settle is a queued stream entry the log worker
+  writes to Postgres, so it survives the gateway dying after the script ran. Only the Redis-down path writes Postgres
+  in-process, with 3 retries. If that still fails, or the process dies before it runs, nothing is recorded for that
+  request: the hold stays in Postgres until it lapses and the worker's sweeper then charges its estimate (recorded
+  `estimated`), so the money is not lost, but the charge is the estimate and not the real cost, which can be higher or
+  lower.
 - **Prompt estimate too low.** The estimate is a heuristic made before the call. If the provider reports more prompt
   tokens than estimated, the actual charge exceeds the hold, so settled spend can pass the cap by about the in-flight
   requests times their estimate error. The verifier measured one concurrent burst with a 10x underestimate reaching
