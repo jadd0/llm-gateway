@@ -84,6 +84,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
   stopWorker();
+  // The aborted fetch in the last test leaves the client holding a fresh keep-alive socket that never sends a
+  // request. On Node 24, close() does not count such a socket as idle and waits on it forever; nothing is in
+  // flight by now, so every connection is closed first.
+  app.server.closeAllConnections();
   await app.close();
   upstream.closeAllConnections();
   await new Promise((resolve) => upstream.close(resolve));
