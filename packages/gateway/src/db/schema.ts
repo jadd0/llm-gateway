@@ -79,6 +79,9 @@ export const spendLedger = pgTable(
   // The month's spend and savings are summed per tenant and period.
   (t) => [
     index('spend_ledger_tenant_period_idx').on(t.tenantId, t.period),
+    // A budget rebuild reads only the month's estimated charges (pg-ledger snapshot). Without this it filters
+    // every row of the tenant's month: a seq scan of the table once a busy tenant has millions (PR 12b ramp).
+    index('spend_ledger_estimated_idx').on(t.tenantId, t.period).where(sql`${t.estimated}`),
     check('spend_ledger_cache_kind_check', sql`${t.cacheKind} IN ('exact', 'semantic')`),
   ],
 );

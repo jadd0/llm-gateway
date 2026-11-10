@@ -64,6 +64,13 @@
       "when": 1794259368472,
       "tag": "0008_rollups",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1794284867142,
+      "tag": "0009_estimated_index",
+      "breakpoints": true
     }
   ]
 }
