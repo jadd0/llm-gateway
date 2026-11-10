@@ -39,8 +39,8 @@ beforeAll(async () => {
   const journalPath = join(tmp, 'meta/_journal.json');
   const full = readFileSync(journalPath, 'utf8');
   const journal = JSON.parse(full) as { entries: Array<{ tag: string }> };
-  expect(journal.entries.some((e) => e.tag.endsWith('_rollups'))).toBe(true);
   const rollupsAt = journal.entries.findIndex((e) => e.tag.endsWith('_rollups'));
+  expect(rollupsAt).toBeGreaterThanOrEqual(0);
   writeFileSync(journalPath, JSON.stringify({ ...journal, entries: journal.entries.slice(0, rollupsAt) }));
   await migrate(drizzle(pool), { migrationsFolder: tmp, migrationsSchema: schema });
   expect((await pool.query('SELECT to_regclass($1) AS t', [`${schema}.rollup_hour`])).rows[0]).toEqual({ t: null });

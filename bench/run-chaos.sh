@@ -75,6 +75,7 @@ start_gateway() { # fallback chain ("" for none), run name
   # The log worker applies the spend stream (settles); without it every hold lapses and budget rebuilds slow to a stall.
   env REDIS_KEY_PREFIX="chaos-$RUN-$2:" LOG_LEVEL=warn node --env-file-if-exists="$ROOT/.env.local" "$ROOT/packages/log-worker/src/worker.ts" >/dev/null &
   WORKER_PID=$!; PIDS+=("$WORKER_PID")
+  sleep 1; kill -0 "$WORKER_PID" 2>/dev/null || { echo "the log worker exited at start" >&2; exit 1; }
 }
 FRONT_PORT="${FRONT_PORT:-}"
 start_front() { # nginx in front of the gateway, when FRONT_PORT is set; waits until it answers

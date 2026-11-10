@@ -105,6 +105,7 @@ run_once() { # mode repeat
   env REDIS_KEY_PREFIX="$prefix" LOG_GROUP="$group" LOG_LEVEL=warn \
     node --env-file-if-exists="$ROOT/.env.local" "$ROOT/packages/log-worker/src/worker.ts" >/dev/null &
   worker_pid=$!; PIDS+=("$worker_pid")
+  sleep 1; kill -0 "$worker_pid" 2>/dev/null || { echo "the log worker exited at start" >&2; exit 1; }
   if [ "$mode" = stream ]; then
     local csv="$OUT/worker-stream-$rep.csv"
     echo "t_ms,lag,pending,rows" >"$csv"

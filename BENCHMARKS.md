@@ -215,7 +215,9 @@ was changed:
 2. **One tenant for the whole suite.** By the end of the first run the bench tenant had 3.2M ledger rows, and the
    rebuild's seq scan saturated Postgres. That is the index above.
 
-`final-worker/` repeated those three scenarios with both fixes; every one of its runs is valid.
+`final-worker/` repeated those three scenarios with both fixes; every one of its runs is valid. With the worker
+on, those scenarios also carry its Postgres writes (request-log batches, sweeps, rollups), as a deployment does,
+so they are not like-for-like with the per-PR figures, which had no worker.
 
 ## Superseded figures
 
