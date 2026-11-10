@@ -10,6 +10,8 @@
 # bench/logging-summary.ts then writes summary.md from the k6 JSON and the samples alone.
 # Run it behind `bash bench/quiet.sh <OUT>`; a build running alongside invalidates the latency numbers.
 set -euo pipefail
+# Every client is 127.0.0.1, so the per-address failed-auth limiter would throttle the load; it is not what is measured.
+export AUTH_FAIL_LIMIT_PER_MIN="${AUTH_FAIL_LIMIT_PER_MIN:-0}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PR="${PR:-10}"
@@ -98,10 +100,13 @@ run_once() { # mode repeat
   local worker_pid="" sampler_pid=""
   wait_up "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" 401 "$gw_pid"
   local start_ms; start_ms="$(node -e 'console.log(Date.now())')"
+  # The worker runs in both modes: it applies the spend stream (budget settles) whichever way the log is written.
+  # Without it every hold lapses and budget rebuilds slow the gateway to a stall.
+  env REDIS_KEY_PREFIX="$prefix" LOG_GROUP="$group" LOG_LEVEL=warn \
+    node --env-file-if-exists="$ROOT/.env.local" "$ROOT/packages/log-worker/src/worker.ts" >/dev/null &
+  worker_pid=$!; PIDS+=("$worker_pid")
+  sleep 1; kill -0 "$worker_pid" 2>/dev/null || { echo "the log worker exited at start" >&2; exit 1; }
   if [ "$mode" = stream ]; then
-    env REDIS_KEY_PREFIX="$prefix" LOG_GROUP="$group" LOG_LEVEL=warn \
-      node --env-file-if-exists="$ROOT/.env.local" "$ROOT/packages/log-worker/src/worker.ts" >/dev/null &
-    worker_pid=$!
     local csv="$OUT/worker-stream-$rep.csv"
     echo "t_ms,lag,pending,rows" >"$csv"
     ( while kill -0 "$gw_pid" 2>/dev/null; do sample "$prefix" "$group" "$start_ms" >>"$csv" || true; sleep 1; done ) &
@@ -113,12 +118,12 @@ run_once() { # mode repeat
     k6 run --quiet --summary-export "$OUT/logging-$mode-$rep.json" "$ROOT/bench/k6/logging.js" >"$OUT/logging-$mode-$rep.log" 2>&1 || rc=$?
   if [ "$rc" -ne 0 ] && [ "$rc" -ne 99 ]; then echo "k6 exited $rc for $mode #$rep; see $OUT/logging-$mode-$rep.log" >&2; exit 1; fi
   if [ ! -s "$OUT/logging-$mode-$rep.json" ]; then echo "k6 did not write $OUT/logging-$mode-$rep.json" >&2; exit 1; fi
-  if [ -n "$worker_pid" ]; then
+  if [ -n "$sampler_pid" ]; then
     # Let the worker drain what is queued before measuring stops, so lag shows how long that took.
     for _ in $(seq 1 60); do sleep 1; if grep -q ",0,0," <(tail -n 1 "$OUT/worker-stream-$rep.csv"); then break; fi; done
     kill "$sampler_pid" 2>/dev/null || true
-    kill -TERM "$worker_pid" 2>/dev/null || true; wait "$worker_pid" 2>/dev/null || true
   fi
+  kill -TERM "$worker_pid" 2>/dev/null || true; wait "$worker_pid" 2>/dev/null || true
   kill -TERM "$gw_pid" 2>/dev/null || true; wait "$gw_pid" 2>/dev/null || true
 }
 

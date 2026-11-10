@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T00:37:04Z
+loadavg: { 1.23 2.23 2.59 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   51.8 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    2.1 /Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)
+    0.7 ssh: /Users/jaddal-khabbaz/.colima/_lima/colima/ssh.sock [mux]
+    0.7 /opt/homebrew/bin/limactl
+    0.6 /bin/zsh

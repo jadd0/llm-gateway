@@ -16,7 +16,8 @@ Run it: set `DASHBOARD_TOKEN`, `DASHBOARD_SESSION_SECRET` and `DASHBOARD_DATABAS
 A chart over the raw log reads every row in its range, so it gets slower as the log grows. The log worker therefore also keeps
 **rollups**: one row per minute (recent) or hour (history) holding counts, spend and a latency histogram. A chart reads buckets, not
 requests. `npm run bench:dashboard` measures this: each dashboard query on the rollups against the same answer computed from the raw
-log, at 10k to 5M log rows. Figures are pending the quiet run (R4); see [../../BENCHMARKS.md](../../BENCHMARKS.md).
+log, at 10k to 5M log rows. At 5M rows the 30-day overview takes 23.5 ms on the rollups against 2708 ms from the raw log, with the same
+counts and spend ([../../BENCHMARKS.md](../../BENCHMARKS.md)).
 
 ## How the rollups are written
 

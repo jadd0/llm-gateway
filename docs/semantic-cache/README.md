@@ -134,5 +134,7 @@ report there is published whatever it shows.
 size at 10 000 and 100 000 vectors, with the scope-and-context filter (1 context, and 1 row in 50) as well as without.
 The migration builds an HNSW index provisionally; the index bench decides.
 
-Pending quiet run: `npm run bench:vector-index`. Request latency of a semantic hit against an exact hit and a miss:
-`npm run bench:semantic`. See [../../BENCHMARKS.md](../../BENCHMARKS.md).
+Not run in the final suite: `npm run bench:vector-index`. Measured ([../../BENCHMARKS.md](../../BENCHMARKS.md)): a semantic hit answers in 37.6 ms
+p50 against 443 ms for a miss. On held-out QQP and PAWS pairs no threshold keeps wrong answers under 1% with the
+local embedder (best 0.88: 55.89% of served answers wrong), so the cache stays off by default and per-tenant
+opt-in (D-061); the Voyage API embedder is not evaluated yet.

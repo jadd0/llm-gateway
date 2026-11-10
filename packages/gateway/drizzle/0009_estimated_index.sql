@@ -1,0 +1,1 @@
+CREATE INDEX "spend_ledger_estimated_idx" ON "spend_ledger" USING btree ("tenant_id","period") WHERE "spend_ledger"."estimated";

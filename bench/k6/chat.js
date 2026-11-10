@@ -43,6 +43,8 @@ export const options = {
   // Thresholds that never fail exist so the measured-phase sub-metrics reach the summary export.
   thresholds: {
     'http_req_duration{phase:measure}': ['max>=0'],
+    // Percentiles of successful responses only: a fast refusal must not pull them down.
+    'http_req_duration{phase:measure,expected_response:true}': ['max>=0'],
     'http_req_waiting{phase:measure}': ['max>=0'],
     'http_req_failed{phase:measure}': ['rate>=0'],
     'http_reqs{phase:measure}': ['count>=0'],

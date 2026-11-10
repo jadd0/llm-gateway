@@ -155,7 +155,8 @@ brings it back.
   two numbers per bucket instead of a log of timestamps.
 - **The estimate is characters / 4, not a tokenizer**: it is corrected after every call, so it only has to be roughly
   right for one request, and a tokenizer would cost CPU on every request. Estimate-versus-actual error from a real
-  run: pending quiet run (see [BENCHMARKS.md](../../BENCHMARKS.md)).
+  run: not measured. The final suite measured the limit itself: 0 admissions over the limit in 10 runs on 3 instances
+  (see [BENCHMARKS.md](../../BENCHMARKS.md)).
 - **A rejected request is never charged**, and a limited response replaces the upstream's own `x-ratelimit-*`
   headers (they describe the gateway's account, not the caller's key).
 - **Limits are per key**, set with `npm run keys -- create-key <tenant> --rpm 100 --tpm 50000` or

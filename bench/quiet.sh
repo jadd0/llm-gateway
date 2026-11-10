@@ -7,13 +7,15 @@
 #   Run it immediately before a benchmark, never during a build: other work on the machine
 #   (test suites, Docker VMs, other projects) inflates latency and flattens ceilings.
 set -euo pipefail
+# No "| head" or "grep -q" in a pipeline here: they close the pipe early, the writer dies of SIGPIPE (141)
+# and pipefail turns that into an exit.
 OUT="${1:?Usage: bench/quiet.sh <results-dir> [max-load] [settle-minutes]}"
 MAX="${2:-2.0}"
 SETTLE="${3:-2}"
 mkdir -p "$OUT"
 
 load1() { sysctl -n vm.loadavg | awk '{print $2}'; }
-on_mains() { pmset -g batt | grep -q "AC Power"; }
+on_mains() { pmset -g batt | grep "AC Power" >/dev/null; }
 
 quiet_for=0
 while [ "$quiet_for" -lt "$SETTLE" ]; do
@@ -30,8 +32,8 @@ done
 {
   echo "recorded_at: $(date -u +%FT%TZ)"
   echo "loadavg: $(sysctl -n vm.loadavg)"
-  echo "power: $(pmset -g batt | head -1)"
+  echo "power: $(pmset -g batt | sed -n 1p)"
   echo "top_cpu:"
-  ps -Ao %cpu,comm -r | head -6 | sed 's/^/  /'
+  ps -Ao %cpu,comm -r | sed -n '1,6s/^/  /p'
 } >"$OUT/conditions.txt"
 echo "bench/quiet: quiet (load $(load1)); conditions in $OUT/conditions.txt"

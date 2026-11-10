@@ -271,11 +271,12 @@ export function createPgLedger(db: Db['db']): PgLedger {
             .from(budgetReservations)
             .where(and(eq(budgetReservations.tenantId, tenantId), eq(budgetReservations.period, period), eq(budgetReservations.refused, false)));
           // Charges made at the estimate: a balance rebuilt now counts them, and the real cost, if it arrives
-          // later, is a correction to apply (see budget.lua).
+          // later, is a correction to apply (see budget.lua). The predicate is the bare column, as in the partial index
+          // spend_ledger_estimated_idx: a bound `estimated = $3` would lose the index under a generic (prepared) plan.
           const estimated = await tx
             .select({ id: spendLedger.requestId, cost: spendLedger.costMicros })
             .from(spendLedger)
-            .where(and(eq(spendLedger.tenantId, tenantId), eq(spendLedger.period, period), eq(spendLedger.estimated, true)));
+            .where(and(eq(spendLedger.tenantId, tenantId), eq(spendLedger.period, period), sql`${spendLedger.estimated}`));
           // Every row, lapsed or not: a row exists exactly until its charge is in the ledger, so a lapsed one is
           // a settle still queued (or a hold waiting for the sweeper) and must count against the cap.
           return {

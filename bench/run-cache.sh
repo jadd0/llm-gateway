@@ -10,6 +10,8 @@
 # bench/cache-summary.ts then writes summary.md from the k6 JSON alone.
 # Run it behind `bash bench/quiet.sh <OUT>`; a build running alongside invalidates the latency numbers.
 set -euo pipefail
+# Every client is 127.0.0.1, so the per-address failed-auth limiter would throttle the load; it is not what is measured.
+export AUTH_FAIL_LIMIT_PER_MIN="${AUTH_FAIL_LIMIT_PER_MIN:-0}"
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PR="${PR:-8}"
@@ -69,6 +71,11 @@ env GATEWAY_PORT="$GATEWAY_PORT" OPENAI_BASE_URL="http://127.0.0.1:$MOCK_PORT/v1
 GW_PID=$!; PIDS+=("$GW_PID")
 GW="http://127.0.0.1:$GATEWAY_PORT"
 wait_up "$GW/v1/chat/completions" 401 "$GW_PID"
+# The log worker applies the spend stream: without it no settle reaches Postgres, every hold lapses, and each budget
+# rebuild drags all of them along. A gateway is never deployed without one.
+env REDIS_KEY_PREFIX="$PREFIX" LOG_LEVEL=warn node --env-file-if-exists="$ROOT/.env.local" "$ROOT/packages/log-worker/src/worker.ts" >/dev/null &
+WORKER_PID=$!; PIDS+=("$WORKER_PID")
+sleep 1; kill -0 "$WORKER_PID" 2>/dev/null || { echo "the log worker exited at start" >&2; exit 1; }
 
 npm --prefix "$ROOT" run --silent keys -- create-tenant bench >/dev/null 2>&1 || true # exists on re-runs
 npm --prefix "$ROOT" run --silent keys -- set-budget bench --monthly-usd "$HIGH_CAP_USD" >/dev/null 2>&1 \

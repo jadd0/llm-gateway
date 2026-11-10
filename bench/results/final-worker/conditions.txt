@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T08:06:44Z
+loadavg: { 1.98 2.57 2.76 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   18.7 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    2.6 /usr/libexec/locationd
+    0.9 /bin/zsh
+    0.8 /bin/zsh
+    0.7 claude

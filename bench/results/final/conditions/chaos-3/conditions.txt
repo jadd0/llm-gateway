@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T03:30:17Z
+loadavg: { 1.98 4.19 4.60 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   40.0 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    4.9 /System/Library/PrivateFrameworks/BackgroundTaskManagement.framework/Resources/backgroundtaskmanagementd
+    4.3 (psql)
+    3.3 /Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)
+    3.2 /usr/libexec/trustd

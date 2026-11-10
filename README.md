@@ -58,19 +58,20 @@ Design notes and diagrams per part live in [`docs/`](docs/README.md).
 ## Benchmarks
 
 All load tests use [k6](https://k6.io) against the mock provider. Gateway-added overhead is
-reported separately from total latency. Results, hardware, versions, concurrency and payload
-sizes will live in `BENCHMARKS.md`, with the raw k6 output committed alongside.
+reported separately from total latency. Results, hardware, method and the raw k6 output are in
+[BENCHMARKS.md](BENCHMARKS.md) and `bench/results/final*/`; one script (`bash bench/run-all.sh`) runs them all.
+Everything ran on one laptop (Apple M5, 10 cores), load generator included: the ceilings are this machine's.
 
 | Area | What is measured | Result |
 |---|---|---|
-| Throughput | Sustained load against the mock provider | 10000 req/s through one gateway process, zero errors. One run per step, 15 s steps, "good" judged by a p95 criterion, k6, gateway and mock on one laptop; see [BENCHMARKS.md](BENCHMARKS.md) |
-| Overhead | Gateway-added latency, p50 / p95 | 0.23 ms / 0.98 ms non-streamed at 1000 req/s; 0.24 ms / 0.25 ms to first streamed byte at 200 req/s |
-| Correctness | Over-limit requests across 3+ instances under concurrent load | _not yet measured_ |
-| Resilience | Client success rate while a provider is down | _not yet measured_ |
-| Caching | Hit rate and spend saved on a realistic prompt set | _not yet measured_ |
-
-Planned scenarios: steady load, spike, 1 vs 3 instances, cache cold vs warm, and a provider
-outage mid-test.
+| Overhead | Gateway-added latency, p50 / p95 | 1.4 ms / 2.1 ms non-streamed (instant mock); inside the noise against a 200 ms provider |
+| Throughput | Ceiling and breaking point, every feature on, through nginx | 2000 req/s ceiling; breaks at 4000 req/s with one instance (CPU-bound on budget rebuilds) and 5000 to 6000 with three |
+| Steady load | 60 s at 60% of the ceiling | 0 failures in 216003 requests, p95 8.6 ms (1 instance) and 9.1 ms (3) |
+| Correctness | Over-limit and over-cap requests, 3 instances, 10 runs each | 0 over the rate limit, 0 over the budget cap, also with Redis restarted mid-run |
+| Resilience | Success while the primary provider is down | 100% non-streamed and 99.33% streamed with a fallback chain; fails fast without one |
+| Caching | Exact-match hit rate on a Zipf prompt draw | 96.7%, hits in 1.1 ms p50 against 403 ms for a miss; 50 identical requests make 1 upstream call |
+| Semantic cache | Wrong answers served, held-out QQP and PAWS pairs | no threshold stays under 1% wrong with the local embedder (best 55.89%), so it stays off by default |
+| Dashboard | Overview query at 5M log rows | 23.5 ms on the rollups against 2708 ms from the raw log, same answers |
 
 ## Getting started
 

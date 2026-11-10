@@ -75,5 +75,6 @@ was seen with no error event.
 
 ## Numbers
 
-Pending quiet run (`bench/run-cache.sh`: cold, warm and stampede). See [../../BENCHMARKS.md](../../BENCHMARKS.md); no
-figure is quoted here until `bench/results/pr-8/` is committed (R3).
+From the final suite ([../../BENCHMARKS.md](../../BENCHMARKS.md), `bench/results/final-worker/`), realistic mock at 100 req/s: a Zipf draw from 200
+prompts hits 96.7% of the time, hits answer in 1.1 ms p50 / 1.3 ms p95 against 403 ms for a miss, and 50 identical
+requests at once make 1 upstream call.

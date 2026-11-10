@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T01:36:58Z
+loadavg: { 1.59 4.61 6.04 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   27.7 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    9.4 /Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)
+    1.3 /opt/homebrew/bin/limactl
+    1.2 /usr/sbin/coreaudiod
+    1.1 ssh: /Users/jaddal-khabbaz/.colima/_lima/colima/ssh.sock [mux]

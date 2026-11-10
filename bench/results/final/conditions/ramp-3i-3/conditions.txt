@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T01:25:12Z
+loadavg: { 1.56 4.99 6.11 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   27.6 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    1.2 /Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/Applications/Karabiner-VirtualHIDDevice-Daemon.app/Contents/MacOS/Karabiner-VirtualHIDDevice-Daemon
+    1.1 /opt/homebrew/bin/limactl
+    1.0 ssh: /Users/jaddal-khabbaz/.colima/_lima/colima/ssh.sock [mux]
+    0.8 /Applications/Notion.app/Contents/MacOS/Notion

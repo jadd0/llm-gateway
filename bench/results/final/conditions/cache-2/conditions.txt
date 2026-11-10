@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T02:45:34Z
+loadavg: { 1.54 2.56 2.82 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   39.3 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    4.2 /System/Library/PrivateFrameworks/BackgroundTaskManagement.framework/Resources/backgroundtaskmanagementd
+    2.8 /usr/libexec/trustd
+    2.8 /usr/libexec/smd
+    0.7 /usr/sbin/coreaudiod

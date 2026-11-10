@@ -83,8 +83,8 @@ revoke writes its tombstone where the gateway never looks, and a cached key keep
 
 ## Measured (from [BENCHMARKS.md](../../BENCHMARKS.md), "Auth overhead")
 
-Provisional: measured on a busy shared laptop; PR 12 re-runs it on a quiet machine (residual R8).
-
-With auth and the Redis cache: 0.617 ms p50 / 0.372 ms p95 over a direct run at 1000 req/s non-streamed, and
+Superseded (residual R8, closed): these per-PR figures came from a busy shared laptop. The final suite's overhead,
+with auth and its Redis cache on, is 1.4 ms p50 / 2.1 ms p95 ([BENCHMARKS.md](../../BENCHMARKS.md)). The PR 3 figures, for
+the record: with auth and the Redis cache: 0.617 ms p50 / 0.372 ms p95 over a direct run at 1000 req/s non-streamed, and
 1.054 ms p50 / 1.447 ms p95 to first streamed byte at 200 req/s. Without the cache: 0.774 ms / 0.482 ms and
 1.358 ms / 1.766 ms. These come from one run each in a session whose direct baseline was noisier than in PR 1.

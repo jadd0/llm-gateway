@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T06:23:04Z
+loadavg: { 1.78 2.57 3.21 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   15.5 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    1.0 /usr/sbin/coreaudiod
+    0.6 /usr/sbin/bluetoothd
+    0.6 /System/Library/PrivateFrameworks/BackgroundTaskManagement.framework/Resources/backgroundtaskmanagementd
+    0.5 /opt/homebrew/bin/limactl

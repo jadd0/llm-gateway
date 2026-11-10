@@ -76,6 +76,7 @@ local state is dropped.
 
 ## Numbers
 
-Figures are pending. The chaos run (`bench/run-chaos.sh`) kills one mock mid-load and records client success and latency
-per phase, with and without the fallback chain; it is run by the orchestrator, and its output will be committed under
-`bench/results/pr-7/`. See [../../BENCHMARKS.md](../../BENCHMARKS.md).
+The chaos run (`bench/run-chaos.sh`) kills the primary mock at 20 s of 80 s and restarts it at 50 s, through nginx.
+With the fallback chain, success during the outage is 100% non-streamed and 99.33% streamed, at 1082 ms p95 (about
+half the requests try the dead primary first). Without one, requests fail fast once the breaker opens (1.7 ms
+p50), and 80% succeed in the window after the restart ([../../BENCHMARKS.md](../../BENCHMARKS.md), `bench/results/final-worker/`).

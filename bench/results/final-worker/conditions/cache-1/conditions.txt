@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T08:06:45Z
+loadavg: { 1.98 2.57 2.76 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+    8.7 /System/Library/CoreServices/launchservicesd
+    7.3 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    2.2 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow
+    1.0 /System/Library/PrivateFrameworks/WorkflowKit.framework/XPCServices/ShortcutsViewService.xpc/Contents/MacOS/ShortcutsViewService
+    0.9 /usr/libexec/runningboardd
