@@ -194,6 +194,6 @@ gateway), but its token estimate is handed back in full, because no provider tok
 
 ## Measured
 
-Pending quiet run: overhead of the check (limiter off vs on, same rate) and the 1 000-request burst against a
-100-per-minute key come from `bench/run-ratelimit.sh`, results in `bench/results/pr-4/`. No figure is quoted here
-until that run is committed.
+From the final suite ([../../BENCHMARKS.md](../../BENCHMARKS.md)): 3 instances behind nginx, 10 runs of the rate-limit flood
+(10000 requests in all): 0 admissions over the limit plus refill in every run. The overhead of the check (limiter off
+against on) was not run as a separate comparison; the ceiling and steady-load runs have the limiter on.

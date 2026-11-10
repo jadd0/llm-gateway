@@ -60,6 +60,15 @@ the cookie holds an HMAC, keyed with `DASHBOARD_SESSION_SECRET`, of its issue ti
 (Secure in production), and expires after 12 hours. Every route but the login checks it in the proxy and again in the page. Without a
 valid token and secret the server refuses to start. No prompts, responses or keys appear on any screen.
 
+## Known limits
+
+- The migrations that build indexes (`request_log_errors_recent`, `spend_ledger_estimated_idx`) use a plain `CREATE INDEX` inside the
+  migration transaction, which locks writes to the table while it builds. Fine at this project's sizes; on a large live log or ledger,
+  build the index `CONCURRENTLY` outside the migration and backfill in batches.
+- The fold holds a row lock on the fold mark that every batch takes shared, so batch commits wait while an hour folds. This was not
+  measured across a fold: the logging scenario runs 60 s and never spans an hour boundary. The worker's batch lag stayed flat in every run
+  that was measured.
+
 ## Versions
 
 Exact current-stable releases, checked against the npm registry on 2026-11-09: Next.js 16.4.6, React 19.3.1, Recharts 3.10.1 (plus

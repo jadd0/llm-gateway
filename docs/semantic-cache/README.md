@@ -125,8 +125,7 @@ answers are wrong) and reported on a test half. When no threshold meets 1% the r
 with the lowest wrong rate among those that still serve at least `--min-hit-rate` (default 5%) of the duplicates. 1% stays
 the target; the shipped `SEMANTIC_THRESHOLD` (0.95) and the opt-in default stand until the committed numbers say otherwise.
 
-Pending quiet run: `npm run bench:semantic-eval`. No figure is quoted here until `bench/results/pr-9/` is committed (R3); the
-report there is published whatever it shows.
+The evaluation was run in the final suite and its report is published whatever it showed; the result is at the end of this page.
 
 ## Choosing the index
 
