@@ -2,7 +2,7 @@
 
 One folder per part of the system. Each holds a `README.md` and a diagram drawn from the code as built.
 
-- [architecture/](architecture/README.md): the whole v1 system, built and planned parts marked.
+- [architecture/](architecture/README.md): the whole v1 system as built, with the diagram.
 - [gateway/](gateway/README.md): the Fastify proxy, streaming passthrough, upstream pool, error mapping.
 - [providers/](providers/README.md): Anthropic, OpenAI and Gemini adapters, model routing, stream translation, error mapping.
 - [mock-provider/](mock-provider/README.md): the OpenAI-compatible stand-in used for tests and benchmarks.
@@ -15,5 +15,6 @@ One folder per part of the system. Each holds a `README.md` and a diagram drawn 
 - [request-log/](request-log/README.md): one row per request through a Redis stream and a log worker, spend carried by the same queue, nothing lost on shutdown.
 - [dashboard/](dashboard/README.md): a read-only admin page over pre-aggregated rollups the log worker writes with each batch; percentiles from histograms.
 - [benchmarks/](benchmarks/README.md): how overhead is measured, and why the rig runs natively.
+- [demo/](demo/SCRIPT.md): the 60 second demo script and shot list.
 
 Flow registry for the diagram check: [diagrams/flows.md](diagrams/flows.md). Numbers live in [../BENCHMARKS.md](../BENCHMARKS.md).

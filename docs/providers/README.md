@@ -98,6 +98,6 @@ the placeholder key.
 
 ## Measured
 
-Translation overhead figures are pending: the full benchmark (`bash bench/run-providers.sh`, the realistic
-streamed scenario through each mock format) is run behind `bench/quiet.sh` by the orchestrator after the build.
-Until then no figure is committed; a short smoke run only proved the script works.
+Translation overhead was not run in the final suite. The script exists (`bash bench/run-providers.sh`, the realistic streamed
+scenario through each mock format) but it was not run, so no translation figure is quoted.
+Gateway overhead against the mock is in [../../BENCHMARKS.md](../../BENCHMARKS.md). The fixtures caveat above stands.

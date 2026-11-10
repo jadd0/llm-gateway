@@ -3,7 +3,7 @@
 Diagram: [api-key-check.html](api-key-check.html). Code: `packages/gateway/src/auth/`, `src/cli/keys.ts`, `src/db/`.
 
 Every request needs `Authorization: Bearer gw_...`. A key belongs to a tenant; the hook answers 401 or sets
-`request.tenant`. Rate limits ([../rate-limiter/README.md](../rate-limiter/README.md)) hang off the key; budgets (PR 5) will hang off the tenant. This is machine-to-machine auth
+`request.tenant`. Rate limits ([../rate-limiter/README.md](../rate-limiter/README.md)) hang off the key; budgets hang off the tenant ([../budgets/README.md](../budgets/README.md)). This is machine-to-machine auth
 only; there is no user login and no admin UI.
 
 | File | Job |

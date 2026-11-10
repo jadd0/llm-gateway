@@ -50,8 +50,9 @@ so the balance is exactly what it was. A hit found by meaning has the same row w
 Money is integer micro-USD (1 USD = 1,000,000), never a float; the CLI refuses a budget that isn't a plain USD amount.
 `keys set-budget <tenant> --monthly-usd 0.01` and `keys show-spend <tenant> [--period YYYY-MM]`.
 
-**The cost:** one extra Postgres write on every request (the mirrored hold) plus the settle transaction. Its effect on
-latency is measured in the pending quiet benchmark (`gateway-*-budget-{off,on}`).
+**The cost:** one extra Postgres write on every request (the mirrored hold) plus the settle transaction. The hold
+write's own cost is not measured separately: the final suite measured overhead with budgets off, and the throughput
+and steady-load runs have them on (see [../../BENCHMARKS.md](../../BENCHMARKS.md)).
 
 ## When Redis is down
 
@@ -124,7 +125,8 @@ gateway that crashes mid-request holds the money until then and then pays for it
   Redis-only holds; 0.96x for a partial outage with Postgres holds (5 s refresh); and in 13 steady-flood runs that
   killed and restarted Redis, 11 stayed within the cap and 2 went over by 3101 and 6102 micro-USD (101 and 102 requests
   admitted where 99 fit), with the accounting exact every time. The overshoot comes from the window above, which the
-  250 ms refresh and the rebuild bump shrink; PR 12 measures the bound properly with 3 instances.
+  250 ms refresh and the rebuild bump shrink. The final suite then ran 10 budget floods on 3 instances with Redis restarted
+  mid-run: 0 tenants over the cap, largest overshoot 0 micro-USD. The mechanism remains, bounded and not seen there.
 - **R7, settled-spend writes are in-process.** The Postgres transaction that removes the hold and records the charge
   runs after the response, with 3 retries. If it still fails, or the process dies before it runs, nothing is written:
   the hold stays in Redis and Postgres until its TTL and then the whole charge is lost (the tenant is under-billed,
@@ -139,7 +141,14 @@ gateway that crashes mid-request holds the money until then and then pays for it
   refused and its hold dropped, although the first attempt would have fitted. That errs towards refusing.
 - A call that outlives its reservation TTL still has its real cost added when it settles, but the money it held may
   have been given to another request meanwhile.
-- Prices exist for `mock-*` models only (a fictitious $1 in / $3 out per million tokens); real prices arrive with the adapters.
+
+- **R24, a gateway killed between its two hold writes.** The hold is written to Postgres, then reserved in Redis. A gateway
+  killed between the two leaves a Postgres hold Redis never counted; the sweeper charges its estimate, so `tenant_spend` can
+  pass the cap by one estimate per request killed in that window (seen once: 10008 against a cap of 10000) until the next
+  Redis rebuild. The chaos runs kill a provider, not a gateway, so this window was not exercised.
+- **R25, no Postgres pool connection timeout.** The main pool has none: exhausted connections would surface as
+  `503 budget_unavailable` on the hold write instead of queuing. No such 503 appeared in any final-suite run (0 failures in
+  216003 steady requests and in every correctness run); accepted as is.
 
 ## Numbers
 

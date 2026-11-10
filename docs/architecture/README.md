@@ -1,12 +1,12 @@
 # Architecture
 
-Diagram: [architecture.html](architecture.html).
+Diagram: [architecture.html](architecture.html) (explorable; [architecture.png](architecture.png) is the static export).
 
 An LLM gateway is one HTTP endpoint that apps call instead of calling model providers directly.
-It forwards each request to the provider its model name selects and relays the answer, translated to OpenAI's format where the provider has its own, and later PRs add the policy around that
-hop (auth, limits, budgets, resilience, caching, logging).
+It forwards each request to the provider its model name selects and relays the answer, translated to OpenAI's format where the provider has its own, and wraps the policy around that
+hop: auth, limits, budgets, resilience, caching and logging.
 
-## Built
+## Parts
 
 - **Gateway** (`packages/gateway`): Fastify. `POST /v1/chat/completions` is routed by model name to OpenAI, Anthropic or Gemini (or the mock), translated where needed,
   streamed or not. See [../providers/README.md](../providers/README.md). See [../gateway/README.md](../gateway/README.md).
@@ -30,11 +30,7 @@ hop (auth, limits, budgets, resilience, caching, logging).
 - **Dashboard** (`packages/dashboard`): a Next.js admin page showing latency percentiles, spend by tenant, cache hit rate and error rate from rollups the log worker writes in each batch's transaction, read through a read-only Postgres role. See [../dashboard/README.md](../dashboard/README.md).
 - **Resilience** (`packages/gateway/src/resilience`): timeouts, retries, a Redis-shared circuit breaker and fallback chains. See [../resilience/README.md](../resilience/README.md).
 
-## Planned (marked dashed in the diagram)
-
-Nothing: every part in the diagram is built.
-
-## Request flow today
+## Request flow
 
 client, then the gateway's key check (Redis, or Postgres on a miss), then the rate limit (one Redis script), then the
 response cache (a hit, exact or by meaning, is answered here, at no cost), then the budget reservation, then the provider the model name selects (through its adapter), then back. A request over its limit is answered 429 before it reaches the mock.
@@ -42,14 +38,16 @@ response cache (a hit, exact or by meaning, is answered here, at no cost), then 
 ## Why this design
 
 The gateway is a stateless process in front of the providers, so more instances can be added behind a load
-balancer and shared state (limits, caches, logs) lives in Redis and Postgres rather than in the process.
-PR 1 built only the hop in the middle and measured it first, so every later feature has a baseline to be
-compared against rather than an impression. PR 3 added the key check and re-measured; the cost is in
-[../auth/README.md](../auth/README.md).
+balancer and shared state (limits, caches, balances, the log queue) lives in Redis and Postgres rather than in the process.
+The hop in the middle was built and measured first, so every feature added after it has a baseline to be
+compared against rather than an impression. The cost of the key check is in [../auth/README.md](../auth/README.md).
 
-## Measured today (from [BENCHMARKS.md](../../BENCHMARKS.md))
+## Measured (from [BENCHMARKS.md](../../BENCHMARKS.md))
+
+Everything ran on one laptop with the load generator on the same machine; conditions are on that page.
 
 - Overhead of the hop: 1.4 ms p50 / 2.1 ms p95 non-streamed with an instant mock; inside the noise against a
   200 ms provider.
 - Throughput through nginx with every feature on: ceiling 2000 req/s; breaking point 4000 req/s with one
-  instance (the gateway's CPU, spent on budget rebuilds), 5000 to 6000 with three. One laptop, k6 included.
+  instance (the gateway's CPU, spent on budget rebuilds), 6000 (5000 to 6000) with three before the index fix and
+  5000 (4000 to 5000) after it.
