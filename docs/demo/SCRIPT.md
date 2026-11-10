@@ -42,7 +42,7 @@ The gateway is the one process started on camera, with the fallback chain turned
 MOCK_ANTHROPIC_BASE_URL=http://127.0.0.1:9001 MODEL_FALLBACKS='mock-openai-1>mock-anthropic-1' npm run dev:gateway
 ```
 
-Send one warm-up request and clear the terminal before recording, so the first shot is not a cold start.
+Send one warm-up request with the main key (`$KEY`, never `$SLOW`, which would use up its 2 requests a minute) and clear the terminal before recording, so the first shot is not a cold start.
 
 ## Shots
 
@@ -50,10 +50,10 @@ Send one warm-up request and clear the terminal before recording, so the first s
 |---|---|---|---|
 | 0:00 to 0:05 | Title card or the README architecture image | none | "One OpenAI-compatible endpoint. Limits, budgets, failover, caching." |
 | 0:05 to 0:14 | A streamed answer | `curl -N localhost:8080/v1/chat/completions -H 'content-type: application/json' -H "authorization: Bearer $KEY" -d '{"model":"mock-openai-1","stream":true,"messages":[{"role":"user","content":"hi"}]}'` | The chunks arrive one by one and end with `data: [DONE]` |
-| 0:14 to 0:22 | The `x-gateway-*` headers and a cache hit | Run twice: `curl -si localhost:8080/v1/chat/completions -H 'content-type: application/json' -H "authorization: Bearer $KEY" -d '{"model":"mock-openai-1","temperature":0,"messages":[{"role":"user","content":"hello"}]}' \| grep -iE '^(HTTP\|x-gateway\|x-budget)'` | First run `x-gateway-cache: miss`, about 200 ms. Second run `x-gateway-cache: hit`, `x-gateway-attempts: 0`, instant |
+| 0:14 to 0:22 | The `x-gateway-*` headers and a cache hit | Run twice: `curl -si localhost:8080/v1/chat/completions -H 'content-type: application/json' -H "authorization: Bearer $KEY" -d '{"model":"mock-openai-1","temperature":0,"messages":[{"role":"user","content":"hello"}]}' \| grep -iE '^(HTTP\|x-gateway\|x-budget)'` | First run `x-gateway-cache: miss`, about 400 ms (200 ms provider latency plus 20 tokens at 10 ms each; 403.5 ms p50 in BENCHMARKS.md). Second run `x-gateway-cache: hit`, `x-gateway-attempts: 0`, instant |
 | 0:22 to 0:28 | A 429 | Three times: `curl -si localhost:8080/v1/chat/completions -H 'content-type: application/json' -H "authorization: Bearer $SLOW" -d '{"model":"mock-openai-1","messages":[{"role":"user","content":"hi"}]}' \| head -1` | `HTTP/1.1 200`, `200`, then `429` (the key's limit is 2 requests a minute) |
 | 0:28 to 0:34 | A 402 | `curl -s localhost:8080/v1/chat/completions -H 'content-type: application/json' -H "authorization: Bearer $TIGHT" -d '{"model":"mock-openai-1","messages":[{"role":"user","content":"hi"}]}'` | A 402 body: the tenant's budget (0.001 USD) cannot cover the worst case of the call |
-| 0:34 to 0:48 | Failover | Start a request loop in the right pane: `while true; do curl -s -o /dev/null -w '%{http_code} ' localhost:8080/v1/chat/completions -H 'content-type: application/json' -H "authorization: Bearer $KEY" -d '{"model":"mock-openai-1","messages":[{"role":"user","content":"hi '$RANDOM'"}]}'; done`. In the hidden terminal kill the primary: `lsof -ti :9000 \| xargs kill`. Stop the loop with Ctrl-C | A row of `200`s that never turns into errors while the primary dies; add `-D -` and `grep x-gateway-model` once to show `mock-anthropic-1` answering |
+| 0:34 to 0:48 | Failover | Start a request loop in the right pane: `while true; do curl -s -o /dev/null -w '%{http_code} ' localhost:8080/v1/chat/completions -H 'content-type: application/json' -H "authorization: Bearer $KEY" -d '{"model":"mock-openai-1","messages":[{"role":"user","content":"hi '$RANDOM'"}]}'; done`. In the hidden terminal kill the primary: `lsof -ti tcp:9000 -sTCP:LISTEN \| xargs kill`. Stop the loop with Ctrl-C | A row of `200`s that never turns into errors while the primary dies; add `-D -` and `grep x-gateway-model` once to show `mock-anthropic-1` answering |
 | 0:48 to 0:58 | The dashboard | Switch to the browser tab, refresh, pick "1 hour" | Latency, spend by tenant, cache hit rate and error rate, with the traffic just generated |
 | 0:58 to 1:00 | End card | none | The repo URL and "measured on one laptop: see BENCHMARKS.md" |
 

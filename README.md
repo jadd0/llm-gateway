@@ -41,13 +41,13 @@ provider failover and caching, and logs every request off the request path.
 
 Apple M5, 10 cores, 24 GB, Node v26.4.0, k6 v2.3.0, nginx in front, Postgres 17 and Redis 7.4 in Docker under Colima.
 k6, nginx, up to 3 gateways, the log worker and the mock all ran on that one machine, so every ceiling is this laptop's.
-Cells are medians of 3 repeats (10 for correctness). Method, conditions, ranges and the runs that were thrown out and why:
+Performance tables are medians of 3 repeats unless marked "repeat 1" (cache and provider outage are repeat 1 of `final-worker/`; the semantic accuracy is one evaluation); correctness uses 10. Method, conditions, ranges and the runs that were thrown out and why:
 [BENCHMARKS.md](BENCHMARKS.md).
 
 | Area | What is measured | Result |
 |---|---|---|
 | Overhead | Gateway-added latency, p50 / p95 | 1.4 ms / 2.1 ms non-streamed (instant mock); inside the noise against a 200 ms provider |
-| Throughput | Ceiling and breaking point, every feature on, through nginx | ceiling 2000 req/s; breaking point 4000 req/s with one instance, 6000 (5000 to 6000) with three; after one index fix 4000 and 5000 (4000 to 5000) |
+| Throughput | Ceiling and breaking point, every feature on, through nginx | before the index fix: ceiling 2000 req/s (1 and 3 instances), breaking point 4000 with one instance, 6000 (5000 to 6000) with three; after it: ceiling 2000 (1 instance) and 1000 (3 instances, range 1000 to 2000), breaking point 4000 and 5000 (4000 to 5000). The ceiling rule is relative to the first step, which was faster after the fix |
 | Steady load | 60 s at 60% of the ceiling (1200 req/s) | 0 failures in 216003 requests; p95 8.6 ms (1 instance) and 9.1 ms (3) |
 | Correctness | Over-limit and over-cap requests, 3 instances, 10 runs each | 0 over the rate limit, 0 over the budget cap, also with Redis restarted mid-run |
 | Resilience | Success while the primary provider is down | 100.00% non-streamed and 99.33% streamed with a fallback chain; fails fast without one |
@@ -60,7 +60,7 @@ balances from Postgres after Redis calls time out. The write-up is in [BENCHMARK
 
 ## Quick start
 
-Needs Node 24+ (26 recommended), npm and Docker. No provider key: requests go to the bundled mock.
+Needs Node 24+ (26 recommended), npm and Docker. Postgres needs the pgvector extension: the compose file runs a pinned pgvector image and migration 0007 creates the extension. No provider key: requests go to the bundled mock.
 
 ```
 npm ci
@@ -86,9 +86,9 @@ curl -N localhost:8080/v1/chat/completions \
 ```
 
 You get a streamed completion ending in `data: [DONE]`. Add `-i` to see the `x-gateway-*` and `x-budget-remaining-usd`
-headers. Run the worker whenever a gateway runs: spend reaches Postgres only through it. `npm run check` runs typecheck and tests;
-`npm run dashboard` starts the dashboard (set `DASHBOARD_TOKEN`, `DASHBOARD_SESSION_SECRET` and `DASHBOARD_DATABASE_URL` first, see
-[docs/dashboard](docs/dashboard/README.md)). To try a real provider, put its key in `.env.local` and use one of its model names.
+headers. Run the worker whenever a gateway runs: while Redis is up, spend and request logs reach Postgres only through it (with Redis down the gateway writes the settle to Postgres itself). `npm run check` runs typecheck and tests;
+For the dashboard, set `DASHBOARD_TOKEN`, `DASHBOARD_SESSION_SECRET` and `DASHBOARD_DATABASE_URL`, run `npm run db:migrate` again (it creates the read-only login only when `DASHBOARD_DATABASE_URL` is set), then `npm run dashboard`; see
+[docs/dashboard](docs/dashboard/README.md). To try a real provider, put its key in `.env.local` and use one of its model names.
 
 ## Reproduce the benchmarks
 
@@ -128,9 +128,8 @@ Stated here because they are part of the proof, not hidden from it.
 - **Partial Redis outages can overshoot a cap briefly.** Instances that did not see an outage keep using the old balance for a short, bounded window.
   Earlier runs on fewer instances saw a small overshoot (figures in the budgets doc); the final suite saw 0 of 10 runs over the cap with Redis restarted
   mid-run on 3 instances. The mechanism remains. [docs/budgets](docs/budgets/README.md#known-limits-documented-not-closed-here)
-- **A gateway killed between its two hold writes** can leave a hold Redis never counted; the sweeper charges its estimate, so spend can pass a cap by one
-  estimate per request killed in that window. The chaos runs kill a provider, not a gateway.
-- **No connection timeout on the main Postgres pool.** Exhausted connections would show as `503 budget_unavailable`; none appeared in any final run.
+- **A gateway killed between its two hold writes** can leave a hold Redis never counted (R24). [docs/budgets](docs/budgets/README.md#known-limits-documented-not-closed-here)
+- **No connection timeout on the main Postgres pool** (R25). [docs/budgets](docs/budgets/README.md#known-limits-documented-not-closed-here)
 - **Migrations build two indexes without `CONCURRENTLY`**, and the rollup fold's lock was not measured across an hour boundary.
   Fine at this size; see [docs/dashboard](docs/dashboard/README.md#known-limits).
 - **Benchmark harness gaps.** `run-semantic.sh` and `run-budget.sh` start gateways with budgets on and no log worker, and the worker launch is copied

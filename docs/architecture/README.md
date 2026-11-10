@@ -48,6 +48,7 @@ Everything ran on one laptop with the load generator on the same machine; condit
 
 - Overhead of the hop: 1.4 ms p50 / 2.1 ms p95 non-streamed with an instant mock; inside the noise against a
   200 ms provider.
-- Throughput through nginx with every feature on: ceiling 2000 req/s; breaking point 4000 req/s with one
-  instance (the gateway's CPU, spent on budget rebuilds), 6000 (5000 to 6000) with three before the index fix and
+- Throughput through nginx with every feature on: ceiling 2000 req/s before the index fix (1 and 3 instances), and
+  2000 (1 instance) and 1000 (3 instances, range 1000 to 2000) after it; breaking point 4000 req/s with one
+  instance (the gateway's CPU, spent on budget rebuilds), 6000 (5000 to 6000) with three before the fix and
   5000 (4000 to 5000) after it.

@@ -145,7 +145,6 @@ gateway that crashes mid-request holds the money until then and then pays for it
   refused and its hold dropped, although the first attempt would have fitted. That errs towards refusing.
 - A call that outlives its reservation TTL still has its real cost added when it settles, but the money it held may
   have been given to another request meanwhile.
-
 - **R24, a gateway killed between its two hold writes.** The hold is written to Postgres, then reserved in Redis. A gateway
   killed between the two leaves a Postgres hold Redis never counted; the sweeper charges its estimate, so `tenant_spend` can
   pass the cap by one estimate per request killed in that window (seen once: 10008 against a cap of 10000) until the next

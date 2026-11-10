@@ -3,13 +3,12 @@
 **How to read this page.**
 1. Method: k6 drives the gateway through nginx against a mock provider; gateway overhead is the gateway run minus the direct-to-mock run.
 2. Conditions: one laptop (Apple M5, 10 cores) running the load generator too, so every ceiling is this machine's; see Conditions below.
-3. Cells are the median of the repeats with the range in brackets: 3 repeats for performance, 10 for correctness.
+3. Cells are the median of the repeats with the range in brackets: 3 repeats for performance, 10 for correctness. Exceptions are marked: the cache and provider outage tables are "repeat 1" of `final-worker/`, and the semantic accuracy is one evaluation.
 4. Raw data: the k6 JSON, CPU samples and profiles are committed under `bench/results/final*/`; each table says which folder it comes from.
 5. Rerun: `bash bench/run-all.sh` (`--smoke` first to prove the wiring).
 
 Every figure on this page is copied from a `summary.md` that `node bench/final-summary.ts <folder>` generates from
-the committed k6 JSON, CPU samples and profiles in that folder, and from nothing else. Cells are the median of
-the repeats with the range in brackets. Method and the reasons behind it: [docs/benchmarks/README.md](docs/benchmarks/README.md);
+the committed k6 JSON, CPU samples and profiles in that folder, and from nothing else. Method and the reasons behind it: [docs/benchmarks/README.md](docs/benchmarks/README.md);
 the rig: [docs/benchmarks/cluster.html](docs/benchmarks/cluster.html).
 
 Three result folders, one script (`bash bench/run-all.sh`):
