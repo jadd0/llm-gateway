@@ -72,6 +72,9 @@ start_gateway() { # fallback chain ("" for none), run name
     node --env-file-if-exists="$ROOT/.env.local" "$ROOT/packages/gateway/src/server.ts" >/dev/null &
   GW_PID=$!; PIDS+=("$GW_PID")
   wait_up "http://127.0.0.1:$GATEWAY_PORT/v1/chat/completions" 401 "$GW_PID"
+  # The log worker applies the spend stream (settles); without it every hold lapses and budget rebuilds slow to a stall.
+  env REDIS_KEY_PREFIX="chaos-$RUN-$2:" LOG_LEVEL=warn node --env-file-if-exists="$ROOT/.env.local" "$ROOT/packages/log-worker/src/worker.ts" >/dev/null &
+  WORKER_PID=$!; PIDS+=("$WORKER_PID")
 }
 FRONT_PORT="${FRONT_PORT:-}"
 start_front() { # nginx in front of the gateway, when FRONT_PORT is set; waits until it answers
@@ -81,9 +84,9 @@ start_front() { # nginx in front of the gateway, when FRONT_PORT is set; waits u
   wait_up "http://127.0.0.1:$FRONT_PORT/v1/chat/completions" 401 "$FRONT_PID"
 }
 stop_all() {
-  kill "${FRONT_PID:-}" "${GW_PID:-}" "${MOCK_A_PID:-}" "${MOCK_B_PID:-}" 2>/dev/null || true
-  wait "${FRONT_PID:-}" "${GW_PID:-}" "${MOCK_A_PID:-}" "${MOCK_B_PID:-}" 2>/dev/null || true
-  FRONT_PID=""; GW_PID=""; MOCK_A_PID=""; MOCK_B_PID=""
+  kill "${FRONT_PID:-}" "${WORKER_PID:-}" "${GW_PID:-}" "${MOCK_A_PID:-}" "${MOCK_B_PID:-}" 2>/dev/null || true
+  wait "${FRONT_PID:-}" "${WORKER_PID:-}" "${GW_PID:-}" "${MOCK_A_PID:-}" "${MOCK_B_PID:-}" 2>/dev/null || true
+  FRONT_PID=""; WORKER_PID=""; GW_PID=""; MOCK_A_PID=""; MOCK_B_PID=""
 }
 
 run_once() { # name fallback-chain

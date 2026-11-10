@@ -71,6 +71,10 @@ env GATEWAY_PORT="$GATEWAY_PORT" OPENAI_BASE_URL="http://127.0.0.1:$MOCK_PORT/v1
 GW_PID=$!; PIDS+=("$GW_PID")
 GW="http://127.0.0.1:$GATEWAY_PORT"
 wait_up "$GW/v1/chat/completions" 401 "$GW_PID"
+# The log worker applies the spend stream: without it no settle reaches Postgres, every hold lapses, and each budget
+# rebuild drags all of them along. A gateway is never deployed without one.
+env REDIS_KEY_PREFIX="$PREFIX" LOG_LEVEL=warn node --env-file-if-exists="$ROOT/.env.local" "$ROOT/packages/log-worker/src/worker.ts" >/dev/null &
+PIDS+=("$!")
 
 npm --prefix "$ROOT" run --silent keys -- create-tenant bench >/dev/null 2>&1 || true # exists on re-runs
 npm --prefix "$ROOT" run --silent keys -- set-budget bench --monthly-usd "$HIGH_CAP_USD" >/dev/null 2>&1 \
