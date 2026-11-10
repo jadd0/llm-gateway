@@ -8,7 +8,7 @@ The project is built to be measured. Every claim below about throughput, overhea
 is backed by a benchmark you can re-run from this repo, and a number appears here only once a
 committed run produces it.
 
-> **Status:** early development. The scope below is the v1 plan; nothing is usable yet.
+> **Status:** v1 is built and benchmarked. The scope below is what it does; the Benchmarks table gives the measured results.
 
 ## v1 scope
 
@@ -81,7 +81,7 @@ Needs Node 24+ (26 recommended), npm, Docker (for Redis and Postgres) and [k6](h
 ```
 npm ci
 cp .env.example .env.local
-docker compose up -d --wait      # Redis and Postgres+pgvector (not yet used by gateway code)
+docker compose up -d --wait      # Redis and Postgres+pgvector
 npm run dev:mock                 # mock provider on :9000
 npm run dev:gateway              # gateway on :8080
 curl -N localhost:8080/v1/chat/completions -H 'content-type: application/json' \
