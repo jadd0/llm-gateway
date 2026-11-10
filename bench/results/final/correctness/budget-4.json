@@ -1,0 +1,14 @@
+{
+  "rounds": 40,
+  "requestsPerRound": 50,
+  "admitted": 1280,
+  "refused402": 720,
+  "other": 0,
+  "capMicros": 10000,
+  "maxSettledOverCap": 0.9984,
+  "maxOvershootMicros": 0,
+  "roundsOverCap": 0,
+  "minSettledMicros": 9984,
+  "ledgerRows": 1280,
+  "ledgerRowsEstimated": 0
+}

@@ -143,8 +143,10 @@ gateway that crashes mid-request holds the money until then and then pays for it
 
 ## Numbers
 
-Pending quiet run. See [../../BENCHMARKS.md](../../BENCHMARKS.md); no figure is quoted here until
-`bench/results/pr-5/` is committed (R3).
+From the final suite ([../../BENCHMARKS.md](../../BENCHMARKS.md), `bench/results/final/`): 3 instances behind nginx, 10 runs of a budget flood
+(20000 requests): 0 tenants whose settled spend passed the cap, a ledger row for every admitted request, largest
+overshoot 0 micro-USD; the same with Redis restarted mid-run. Under load past 4000 req/s on one instance, budget
+balance rebuilds are where the gateway's CPU goes (R29).
 
 - **Redis Cluster is not supported.** The settle script writes the spend stream and the tenant's keys in one call; on a
   cluster that fails with CROSSSLOT. The gateway and the worker refuse to start when `INFO cluster` says `cluster_enabled:1`.

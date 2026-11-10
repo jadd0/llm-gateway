@@ -71,5 +71,6 @@ deliberately the least clever code in the file: hijack and pipe, so there is not
 
 ## Measured (from [BENCHMARKS.md](../../BENCHMARKS.md))
 
-0.233 ms p50 / 0.982 ms p95 added, non-streamed at 1000 req/s; 0.238 ms p50 / 0.254 ms p95 added to first
-streamed byte at 200 req/s. The gateway's own `server-timing` figure, effectively its pre-dispatch time, was 0.008 ms p50 in the instant run; the rest of the 0.233 ms is the extra HTTP hop and reply write, which only the k6 difference captures.
+1.4 ms p50 / 2.1 ms p95 added non-streamed with an instant mock, inside the timer noise with a realistic one (final
+suite, budgets off). PR 1 measured 0.233 ms p50 for a gateway with none of the later features; the gateway's own
+`server-timing` figure misses the extra HTTP hop and reply write, which only the k6 difference captures.

@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T00:25:57Z
+loadavg: { 1.62 2.77 2.73 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   33.4 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    0.8 /Applications/Notion.app/Contents/MacOS/Notion
+    0.7 bash
+    0.6 /bin/zsh
+    0.6 /usr/sbin/notifyd

@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T07:26:22Z
+loadavg: { 1.55 3.52 3.89 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+    7.0 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    0.7 /Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)
+    0.5 /opt/homebrew/bin/limactl
+    0.5 /Applications/Notion.app/Contents/Frameworks/Notion Helper (Renderer).app/Contents/MacOS/Notion Helper (Renderer)
+    0.4 /usr/sbin/notifyd

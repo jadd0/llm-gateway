@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T05:12:05Z
+loadavg: { 1.58 2.24 3.37 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   33.9 /Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Renderer).app/Contents/MacOS/Code Helper (Renderer)
+    7.5 /System/Library/CoreServices/launchservicesd
+    7.1 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    1.8 /usr/libexec/trustd
+    1.6 /System/Library/PrivateFrameworks/BackgroundTaskManagement.framework/Resources/backgroundtaskmanagementd

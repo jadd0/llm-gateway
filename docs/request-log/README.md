@@ -62,7 +62,8 @@ on SIGTERM stops reading, writes and acknowledges the batch in hand, then exits.
 
 ## Measured
 
-Pending the orchestrator's quiet run (`bash bench/run-logging.sh`); see [../../BENCHMARKS.md](../../BENCHMARKS.md). No figure is quoted here before it is committed.
+At 200 req/s with a realistic mock, inline and stream modes both had 0 failures in 35905 requests and differ by
+under 1 ms at p95 (403.4 against 403.1 ms); the worker stayed at most 2 entries behind ([../../BENCHMARKS.md](../../BENCHMARKS.md)).
 
 ## Settings
 

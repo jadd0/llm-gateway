@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T05:20:14Z
+loadavg: { 1.69 3.34 3.79 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   26.0 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    0.9 claude
+    0.7 /bin/zsh
+    0.7 /bin/zsh
+    0.7 /usr/sbin/bluetoothd

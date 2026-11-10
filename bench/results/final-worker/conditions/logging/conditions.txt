@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T08:44:19Z
+loadavg: { 1.96 2.56 2.86 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   46.5 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    6.9 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+    6.8 /System/Library/ExtensionKit/Extensions/WallpaperAerialsExtension.appex/Contents/MacOS/WallpaperAerialsExtension
+    5.8 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow
+    1.8 /System/Library/Frameworks/VideoToolbox.framework/Versions/A/XPCServices/VTDecoderXPCService.xpc/Contents/MacOS/VTDecoderXPCService

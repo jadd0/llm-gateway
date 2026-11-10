@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T02:23:37Z
+loadavg: { 1.79 2.96 3.30 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   42.5 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+   33.9 /usr/libexec/airportd
+   12.3 claude
+   10.7 /System/Library/CoreServices/WiFiAgent.app/Contents/MacOS/WiFiAgent
+    2.3 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter

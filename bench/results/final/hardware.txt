@@ -1,0 +1,9 @@
+commit: e1657da
+cpu: Apple M5
+cores: 10
+memory_gb: 24
+os: macOS 26.6.2
+node: v26.4.0
+k6: k6 v2.3.0 (commit/devel, go1.27.1, darwin/arm64)
+nginx: nginx version: nginx/1.31.8
+mode: full

@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T06:47:59Z
+loadavg: { 1.43 1.98 2.48 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   16.1 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+   14.3 /Applications/Google Drive.app/Contents/MacOS/Google Drive
+    4.5 /System/Library/CoreServices/launchservicesd
+    4.2 /System/Library/PrivateFrameworks/SkyLight.framework/Resources/WindowServer
+    4.0 /System/Library/CoreServices/ControlCenter.app/Contents/MacOS/ControlCenter

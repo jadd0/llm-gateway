@@ -1,233 +1,226 @@
 # Benchmarks
 
-Method and the reasons behind it: [docs/benchmarks/README.md](docs/benchmarks/README.md). Raw k6 summaries
-for every figure below are committed in [bench/results/pr-1/](bench/results/pr-1/); re-run with
-`npm run bench:baseline`. Every number here is read from those JSON files (`http_req_duration`,
-`http_req_waiting` and the gateway's own timing, measured phase only, tag `phase:measure`).
+Every figure on this page is copied from a `summary.md` that `node bench/final-summary.ts <folder>` generates from
+the committed k6 JSON, CPU samples and profiles in that folder, and from nothing else. Cells are the median of
+the repeats with the range in brackets. Method and the reasons behind it: [docs/benchmarks/README.md](docs/benchmarks/README.md);
+the rig: [docs/benchmarks/cluster.html](docs/benchmarks/cluster.html).
 
-The gateway-timing metric is named `gw_server_timing_ms` in the committed JSON. It was read from the
-`server-timing` header as it was when these runs were recorded: for the non-streamed (instant) runs the `gw`
-field, computed as total minus upstream. In practice that is **pre-dispatch time** (request received to upstream
-request dispatched): the post-receipt span it also covered contained no work, because copying the upstream body
-into memory was counted under `upstream` and the reply was serialised and written after the measurement. For the
-streamed (realistic) runs the `gw-pre` field, which is **pre-dispatch only**. The gateway now reports `gw-pre` and `gw-post` separately on non-streamed responses, and
-the k6 script records them as `gw_pre_server_timing_ms` and `gw_post_server_timing_ms`. The committed
-results were not re-run.
+Three result folders, one script (`bash bench/run-all.sh`):
 
-## Environment
+| folder | what it holds | why it exists |
+|---|---|---|
+| [`bench/results/final/`](bench/results/final/summary.md) | the full suite, 264 min (2026-11-10, commit `e1657da`) | overhead, correctness, dashboard, semantic, and the breaking point *before* the fix |
+| [`bench/results/final-after/`](bench/results/final-after/summary.md) | ramp, steady, spike and profile again, 143 min (commit `59fc011`) | the breaking point *after* the one fix, on a fresh database |
+| [`bench/results/final-worker/`](bench/results/final-worker/summary.md) | cache, chaos and logging again, 47 min (commit `67f3d05`) | the first run's cache repeats 2-3, chaos and logging were invalid (below) |
+
+## Conditions
 
 | | |
 |---|---|
-| Machine | Apple M5, 10 cores, 24 GB, macOS 26.6.2 |
-| Runtime | Node v26.4.0, running `.ts` directly (type stripping) |
-| Load generator | k6 v2.3.0 (go1.27.1, darwin/arm64) |
-| Libraries | Fastify 5.12.8, undici 8.12.4, zod 4.6.7 |
-| Topology | k6, gateway and mock provider as native processes on the same laptop, loopback. Docker (Colima) runs Redis and Postgres only and is not on the path |
-| Gateway settings | `UPSTREAM_CONNECTIONS=256`, `LOG_LEVEL=warn`, one process |
-| Payload | request 124 bytes; response 363 bytes non-streamed (instant), 4683 bytes as 23 SSE events (realistic) |
-| Code under test | gateway and mock as of commit `34d9fbd` |
-| Method | k6 `constant-arrival-rate`, 30 s warm-up discarded, 60 s measured |
+| Machine | Apple M5, 10 cores, 24 GB, macOS 26.6.2, on mains power |
+| Software | Node v26.4.0 (`.ts` run directly), k6 v2.3.0, nginx 1.31.8 (native, Homebrew) |
+| Topology | k6, nginx, the gateways, the log worker and the mock provider are native processes on this laptop. Postgres 17 (pgvector) and Redis 7.4 (AOF on) run in Docker under Colima and are reached through Colima's port forwarding |
+| Quiet gate | before every scenario `bench/quiet.sh` waited for a 1-minute load average under 2.0 on mains power; each scenario's `conditions/<name>/conditions.txt` records the load and the busiest processes at its start |
+| Repeats | 3 per performance scenario, 10 per correctness check |
 
-The laptop was otherwise idle but this is a single machine running load generator and system under test
-together, so figures are relative evidence for this PR's baseline, not a capacity claim.
+**What these numbers are not.** The load generator shares the machine with what it measures: k6 alone used up to
+2.6 cores in the ramps, and nginx, up to 3 gateways, the worker, the mock and the Docker VM took the rest. A
+ceiling here is this laptop's, not a server's, and 3 instances compete for the same 10 cores. Every Redis and
+Postgres call also crosses Colima's SSH port forward: during the first run the Redis forward reconnected for
+two minutes (02:36 to 02:38) and at 05:06 every forward dropped while the containers stayed healthy, which
+ended one run (it was restarted from the beginning, `colima restart`).
 
-## Gateway overhead
+## Overhead of one gateway
 
-Overhead is the gateway run minus the direct-to-mock run, at the same arrival rate.
+`final/`. The gateway run minus the direct-to-mock run, per repeat, over successful responses. Instant: no mock
+latency, non-streamed. Realistic: 200 ms to first token, streamed. Budgets off (`BUDGET_ENABLED=false`),
+auth with its Redis cache, everything else at the `.env.local` settings.
 
-| Scenario | Rate | Direct p50 ms | Gateway p50 ms | Overhead p50 ms | Direct p95 ms | Gateway p95 ms | Overhead p95 ms | Errors |
-|---|---|---|---|---|---|---|---|---|
-| Instant, non-streamed, total duration | 1000 req/s | 1.190 | 1.423 | 0.233 | 1.278 | 2.260 | 0.982 | 0 |
-| Realistic, streamed, time to first byte | 200 req/s | 200.202 | 200.440 | 0.238 | 201.274 | 201.528 | 0.254 | 0 |
+| profile | repeats | added p50 | added p95 | added p99 | result |
+|---|---:|---|---|---|---|
+| instant | 3 | 1.4 ms (1.3 to 1.4) | 2.1 ms (1.2 to 2.1) | 2.8 ms (2.0 to 2.9) | ok |
+| realistic | 3 | 0.4 ms (-0.7 to 1.8) | 0.9 ms (-2.0 to 0.9) | -0.7 ms (-2.3 to 1.1) | ok |
 
-Realistic mock: 200 ms to first token, 20 tokens at 10 ms. Instant mock: no latency, no token delay.
+Against a provider that takes hundreds of milliseconds, the realistic figures are inside the mock's own timer
+noise (a negative difference is noise, not a speed-up).
 
-Streamed total duration (request start to last byte) was 395.487 ms p50 / 400.745 ms p95 direct and
-393.185 ms / 398.527 ms through the gateway. The gateway figure is lower, a difference of about 2 ms in the
-wrong direction for an overhead, so it sits inside the noise of the mock's per-token timers and is not used
-as an overhead figure. Time to first byte is the streamed measure.
+## Ceiling and breaking point (1 vs 3 instances)
 
-### Cross-check against the gateway's own timing
+Ramp through nginx with an instant mock; budgets, rate limits, auth and the stream request log with its worker
+all on; 15 steps from 1000 to 32000 req/s, 15 s measured per step. **Ceiling:** the last step with errors at
+most 1%, p95 at most 2x the first step's p95 and under 1% dropped iterations. **Breaking point:** the first step
+with p95 over 10x the first step's or errors over 1%.
 
-The gateway reports `server-timing`. As recorded, that is its in-process time: 0.008 ms p50 / 0.010 ms p95
-for the instant run (effectively pre-dispatch) and 0.010 ms p50 / 0.018 ms p95 for the realistic run
-(pre-dispatch only). It is not the overhead figure. k6's direct-versus-gateway difference, about 0.23 ms at p50, is
-the real overhead, because it includes the extra HTTP hop (parsing the request, an extra socket round trip,
-writing the response) that the header cannot see. The plan's check was that the two must not differ by more
-than 1 ms at p50; they differ by about 0.22 ms, and the difference is explained by that hop.
+| | instances | ceiling (req/s) | breaking point (req/s) |
+|---|---:|---|---|
+| before the fix (`final/`) | 1 | 2000 (2000 to 2000) | 4000 (4000 to 4000) |
+| before the fix (`final/`) | 3 | 2000 (2000 to 2000) | 6000 (5000 to 6000) |
+| after the fix (`final-after/`) | 1 | 2000 (1000 to 2000) | 4000 (4000 to 4000) |
+| after the fix (`final-after/`) | 3 | 1000 (1000 to 2000) | 5000 (4000 to 5000) |
 
-## Throughput
+The ceiling rule is relative to the first step: the after runs started faster (p95 5.0 ms against 7.5 ms at
+1000 req/s, one instance), so the same latency later in the ramp counts against them sooner. Read the steps:
 
-Arrival rate stepped up against the instant mock, non-streamed, 5 s warm-up and 15 s measured per step
-(shorter than the overhead runs to keep the sweep to a few minutes). A step counts as good when errors are
-under 1% and p95 is under twice the first step's gateway p95 (1.296 ms, so under 2.592 ms). "Delivered" is
-requests completed in the measured window divided by 15 s.
+| offered req/s | 1 instance before: p95 | 1 instance after: p95 | 3 instances before: p95 | 3 instances after: p95 |
+|---:|---|---|---|---|
+| 1000 | 7.5 ms | 5.0 ms | 8.1 ms | 5.4 ms |
+| 2000 | 11.2 ms | 9.3 ms | 12.4 ms | 10.6 ms |
+| 3000 | 21.2 ms | 36.9 ms | 18.9 ms | 21.3 ms |
+| 4000 | 220.8 ms (3790 achieved) | 255.4 ms (3613 achieved) | 27.4 ms | 49.1 ms |
+| 5000 | 286.1 ms (3748 achieved) | 349.5 ms (3383 achieved) | 61.9 ms | 1597.7 ms (2644 achieved) |
 
-| Target rate (req/s) | Gateway delivered | Gateway p50 ms | Gateway p95 ms | Gateway errors | Direct delivered | Direct p50 ms | Direct p95 ms | Direct errors |
-|---|---|---|---|---|---|---|---|---|
-| 2000 | 2000 | 1.048 | 1.296 | 0 | 2000 | 1.039 | 1.212 | 0 |
-| 4000 | 4000 | 0.686 | 1.184 | 0 | 4000 | 0.806 | 1.095 | 0 |
-| 6000 | 6000 | 0.684 | 1.106 | 0 | 6000 | 0.600 | 1.063 | 0 |
-| 8000 | 8000 | 0.734 | 1.099 | 0 | 8000 | 0.670 | 1.055 | 0 |
-| 10000 | 10000 | 0.683 | 1.106 | 0 | 10000 | 0.666 | 1.057 | 0 |
-| 12000 | 11878 | 0.797 | 99.091 | 0 | 12000 | 0.659 | 1.067 | 0 |
-| 14000 | 14000 | 0.796 | 2.785 | 0 | 14000 | 0.656 | 1.058 | 0 |
-| 16000 | 16000 | 0.788 | 3.094 | 0 | 16000 | 0.665 | 1.060 | 0 |
-| 18000 | 17998 | 0.868 | 25.948 | 0 | 17902 | 0.685 | 1.437 | 0 |
-| 20000 | 20000 | 0.849 | 14.863 | 0 | 19995 | 0.683 | 1.265 | 0 |
+**What breaks it.** At 4000 req/s one gateway process tops out at about 3600 to 3800 achieved req/s, its CPU
+pinned at 125 to 140% (the main thread plus the garbage collector, `cluster/cpu-ramp-1i-*.csv`). The CPU profile
+of a gateway at that point (`profile/`) is not spent on HTTP or JSON: about two thirds of its busy time is
+budget balance rebuilds, materialising Postgres rows into objects (drizzle `mapResultRow` and entity code
+16%, `utf8Slice` 13%, garbage collection 15%, under `redis-ledger.ts` `reserve`). Under that load Redis calls
+pass the budget's 50 ms timeout, the gateway treats the misses as a Redis outage and moves the epoch, and every
+in-flight request then rebuilds its balance from Postgres on its own (residual R29).
 
-**Result: 10000 req/s** is the last good step through the gateway, one Node process. Every step up to
-20000 req/s completed with zero errors, but from 12000 req/s the gateway's p95 left the band (99.091 ms at
-12000, then 2.785, 3.094, 25.948 and 14.863 ms), while the mock called directly stayed at or below 1.437 ms
-across the same range. The tail growth is consistent with the gateway process, sharing CPU with k6 and the
-mock, being the first thing to saturate; the 12000 req/s step also delivered 11878 req/s, showing that one
-step stalled briefly. Steps were run once each, so the single 99 ms p95 is one observation, not a trend.
-Whether it is the single event loop, the pool size or CPU contention is not established here.
+**The one fix** (`59fc011`): the rebuild's read of the month's estimated charges filtered every ledger row of
+the tenant's month. A partial index `spend_ledger_estimated_idx (tenant_id, period) WHERE estimated` took that
+query from 64.5 ms (parallel seq scan, 450 MB read) to 4.9 ms on the same 3.2M-row data. It removed the
+Postgres saturation that stalled later scenarios; it did not move the ramp's breaking point, which is bound by
+the gateway's CPU on the JavaScript side of the same rebuilds. The before and after runs also differ in
+database state (the after runs started from an empty database), so the table above compares the two runs, not
+the fix alone.
 
-Direct-to-mock reference: the mock alone sustained every step with p95 at most 1.437 ms.
+## Steady load at 60% of the ceiling
 
-## Auth overhead (PR 3)
+Same stack as the ramp, 60 s measured.
 
-> **Provisional.** These runs shared the laptop with other builds and other projects' test suites (load
-> around 11 on 10 cores was observed the same day), so the overhead figures are noisy and not comparable with
-> PR 1's. They are kept as recorded; the quiet re-run in PR 12 (residual R8) replaces them.
+| run | instances | req/s | requests | failed | p50 | p95 | p99 |
+|---|---:|---:|---:|---:|---|---|---|
+| `final/` | 1 | 1200 | 216003 | 0 | 5.4 ms (5.4 to 5.8) | 8.6 ms (8.6 to 8.9) | 11.2 ms (11.1 to 12.1) |
+| `final/` | 3 | 1200 | 216003 | 0 | 5.9 ms (5.9 to 6.0) | 9.1 ms (9.0 to 9.3) | 11.4 ms (11.3 to 12.5) |
+| `final-after/` | 1 | 600 | 108003 | 0 | 3.0 ms (2.9 to 3.0) | 4.5 ms (4.4 to 4.5) | 5.5 ms (5.5 to 5.7) |
+| `final-after/` | 3 | 600 | 108002 | 0 | 3.3 ms (3.2 to 3.4) | 4.9 ms (4.8 to 5.0) | 6.1 ms (6.0 to 6.1) |
 
-Raw k6 summaries: [bench/results/pr-3/](bench/results/pr-3/), produced by `bash bench/run-baseline.sh` with
-`STEP_RATES=""` (the throughput sweep was not re-run for auth). Same machine, method and rates as the PR 1 runs
-above, with every gateway request sending `Authorization: Bearer gw_...`. "Redis" is `AUTH_CACHE=redis`, one
-Redis GET per request once the key is cached; "none" is `AUTH_CACHE=none`, a Postgres query on every request.
-Overhead is the gateway run minus the direct-to-mock run **of the same PR 3 session**. The direct-to-mock instant
-run was slower and noisier in this session than in PR 1 (p50 1.145 ms, p95 2.208 ms against 1.19 ms and
-1.278 ms), so the PR 1 overhead figures above and the figures here are not strictly like for like.
+The after rate is 600 because the after ceiling for 3 instances came out at 1000.
 
-| Scenario | Rate | Direct p50 ms | Gateway p50 ms | Overhead p50 ms | Direct p95 ms | Gateway p95 ms | Overhead p95 ms | Errors |
-|---|---|---|---|---|---|---|---|---|
-| Instant, total duration, auth + Redis | 1000 req/s | 1.145 | 1.762 | 0.617 | 2.208 | 2.580 | 0.372 | 0 |
-| Instant, total duration, auth, no cache | 1000 req/s | 1.145 | 1.919 | 0.774 | 2.208 | 2.690 | 0.482 | 0 |
-| Realistic, time to first byte, auth + Redis | 200 req/s | 200.197 | 201.251 | 1.054 | 201.275 | 202.722 | 1.447 | 0 |
-| Realistic, time to first byte, auth, no cache | 200 req/s | 200.197 | 201.555 | 1.358 | 201.275 | 203.041 | 1.766 | 0 |
+## Spike
 
-PR 1 gateway without auth, same scenarios, for reference: instant 0.233 ms p50 / 0.982 ms p95 over direct;
-realistic 0.238 ms p50 / 0.254 ms p95 over direct.
+`final-after/`. 200 req/s base with a realistic mock, 10x for 20 s. Recovery: seconds after the spike until a 5 s
+window has p95 within 1.5x the base p95 and no errors.
 
-What the figures say, and what they do not:
+| instances | base p95 | spike p95 | failed in spike | dropped in spike | recovery (s) |
+|---:|---|---|---:|---:|---|
+| 1 | 403.1 ms (403.1 to 403.2) | 5511.5 ms (5505.8 to 5514.8) | 0 | 0 | 10 (10 to 10) |
+| 3 | 403.5 ms (403.3 to 403.6) | 1032.6 ms (1031.8 to 1033.3) | 0 | 0 | 10 (10 to 10) |
 
-- Against PR 1, the instant p50 overhead went from 0.233 ms to 0.617 ms, which puts the auth hook (HMAC, one
-  Redis round trip, a JSON parse) at roughly 0.4 ms at p50 at this rate. This is the difference of two sessions, not an isolated measurement.
-- The cache buys 0.157 ms at p50 and 0.110 ms at p95 in the instant run (1.762 against 1.919 ms; 2.580 against
-  2.690 ms), and 0.304 ms / 0.319 ms to first byte in the realistic run. At 1000 req/s the Postgres lookup on
-  a local pool is only modestly slower than a Redis lookup; the cache's larger benefit (Postgres load, tail latency under concurrent load) was not measured here.
-- The realistic first-byte overhead rose from 0.238 ms to 1.054 ms p50. The Redis hook accounts for a small part of
-  that; the rest is not explained by these runs and may be machine noise, since the streamed first-byte
-  figure moves with timer jitter. It was measured once per scenario.
-- The gateway's own `server-timing` `gw-pre` does not include the key check, because the hook runs before the route starts its clock.
+`final/` measured the same within 2 ms. Nothing fails; one instance queues the spike (5.5 s p95), three absorb it.
 
-## Rate limiting (PR 4)
+## Correctness under concurrency
 
-Pending quiet run. `bash bench/run-ratelimit.sh`, started behind `bash bench/quiet.sh bench/results/pr-4`, writes the
-k6 summaries to `bench/results/pr-4/`; no figure is quoted here until that run is committed (R3).
+`final/`. 3 instances behind nginx, 10 runs of each check.
 
-What the run measures:
+| check | runs | requests | over-limit or over-cap | result |
+|---|---:|---:|---:|---|
+| rate limit flood: admissions within rpm plus refill | 10 | 10000 | 0 | pass |
+| budget flood: tenants whose settled spend passed the cap | 10 | 20000 | 0 | pass |
+| budget flood with Redis restarted mid-run | 10 | 20000 | 0 | pass |
 
-- **Overhead of the check:** the same arrival rate through the gateway with `RATE_LIMIT_ENABLED=false` and `true`,
-  using a key whose limits are never reached, instant non-streamed and realistic streamed. Files:
-  `gateway-{instant,realistic}-ratelimit-{off,on}.json`.
-- **Burst:** 1,000 requests at once at a key limited to 100 per minute, counting 200 versus 429
-  (`burst.json`, with `status_200`, `status_429`, `status_429_with_retry_after`). A 100-per-minute bucket gains a token
-  every 0.6 s, so a burst that takes longer than that admits one more; the run script checks the count against that bound.
-- **Estimate error:** the token estimate against the mock's reported usage.
+The request log and the client agreed on the admitted count in 10 of 10 runs; the ledger held a row for every
+admitted request in 20 of 20 budget runs; the largest overshoot of a cap was 0 micro-USD.
 
-## Budgets (PR 5)
+## Exact-match cache
 
-Pending quiet run. `bash bench/run-budget.sh`, started behind `bash bench/quiet.sh bench/results/pr-5`, writes the
-results to `bench/results/pr-5/`; no figure is quoted here until that run is committed (R3).
+`final-worker/`, repeat 1 (repeats 2 and 3 are within 0.1 ms and 0.9 points). Realistic mock, `temperature: 0`,
+100 req/s.
 
-What the run measures:
+| run | requests | hit rate | upstream calls | hit p50 / p95 | miss p50 / p95 |
+|---|---:|---:|---:|---|---|
+| cold: every prompt new | 6001 | 0.00% | 6001 | n/a | 403.0 / 404.3 ms |
+| warm: Zipf draw from 200 prompts | 6001 | 96.70% | 198 | 1.1 / 1.3 ms | 403.5 / 405.3 ms |
+| warm, streamed | 6001 | 96.08% | 235 | 1.1 / 1.3 ms | 400.7 / 405.0 ms |
+| stampede: 50 identical requests at once | 50 | 98.00% | 1 | 408.8 / 409.1 ms | 406.7 ms |
 
-- **Overhead of the budget:** the same arrival rate through the gateway with `BUDGET_ENABLED=false` and `true` (rate
-  limiter on in both), for a tenant whose cap is never reached, instant non-streamed and realistic streamed. Files:
-  `gateway-{instant,realistic}-budget-{off,on}.json`.
-- **Flood:** 100 rounds; each round a fresh tenant with a $0.01 cap is hit by 50 requests at once. `flood.json` records
-  admitted and refused (402) counts, the largest settled spend as a share of the cap, and the largest overshoot in
-  micro-USD, read from Postgres. A round's worst case is 312 micro-USD, so a round admits 32 when every decision is made while
-  the first calls are still in flight.
-- **What the Postgres mirror costs:** the same overhead pair also covers it, since every request now writes its hold to
-  Postgres as well as Redis.
-- **Redis down:** the same flood (`flood-redis-down.json`) and the instant profile with budgets off and on
-  (`gateway-instant-redis-down-budget-{off,on}.json`) against a gateway whose Redis is unreachable, so every decision is
-  made on the Postgres path.
+A stampede of 50 identical requests makes one upstream call; the other 49 wait for it.
 
-## Translation overhead (PR 6)
+## Semantic cache
 
-Pending quiet run. `bash bench/run-providers.sh`, started behind `bash bench/quiet.sh bench/results/pr-6`, writes the
-results to `bench/results/pr-6/`; no figure is quoted here until that run is committed (R3).
+`final/`. Latency, local embedder (voyage-4-nano in Ollama):
 
-What the run measures: the realistic streamed scenario (200 req/s, 200 ms first byte, 10 ms per token, 20 tokens) through
-the gateway to the mock's three formats, `mock-openai-1` (pass-through) against `mock-anthropic-1` and `mock-gemini-1`
-(translated). The difference between the first and the other two is the cost of translating the request, the stream and the
-usage. Files: `gateway-mock-{openai,anthropic,gemini}-1.json`. A short run on the build machine only proved the script
-works; it is not a result.
+| run | requests | exact hits | semantic hits | misses | semantic-hit p50 / p95 | miss p50 / p95 |
+|---|---:|---:|---:|---:|---|---|
+| paraphrase of a seeded prompt | 301 | 80 | 143 | 78 | 37.6 / 69.0 ms | 443.3 / 471.1 ms |
+| a system prompt nobody has used | 301 | 0 | 0 | 301 | n/a | 431.1 / 449.8 ms |
 
+Accuracy, on 5000 held-out QQP and PAWS pairs (threshold chosen on a separate 5000), the gateway's own lookup
+(nearest neighbour) with its guards: **no threshold keeps wrong answers under the 1% budget.** The best is 0.88:
+41.88% of duplicates served right, 55.89% of served answers wrong (QQP 29.68%, PAWS 64.67%). At the default 0.95:
+34.40% hit, 57.18% wrong. PAWS pairs are built to look alike and mean different things, which is the case a
+semantic cache must refuse.
 
-## Resilience under outage (PR 7)
+So the semantic cache stays **off by default, per-tenant opt-in** (D-061), and with this embedder no tenant
+should opt in. `SEMANTIC_THRESHOLD` stays 0.95, `SEMANTIC_CROSS_MODEL=false`, `SEMANTIC_INPUT_TYPE=none`: only
+the local model with bare input was evaluated; the Voyage API embedder and the cross-model case need an API key
+and are not measured.
 
-Pending quiet run. `bash bench/quiet.sh bench/results/pr-7 && bash bench/run-chaos.sh` writes `chaos-fallback-on.json`,
-`chaos-fallback-off.json` and `summary.md` to `bench/results/pr-7/`; no figure is quoted here until that run is committed (R3).
+## Provider outage
 
-What the run measures: 200 req/s non-streamed plus 50 req/s streamed for 80 s against two mocks with realistic latency. The mock
-behind `mock-openai-1` is killed with SIGKILL at 20 s and a fresh one is started at 50 s. The run is done once with the chain
-`mock-openai-1>mock-anthropic-1` and once with no chain. `summary.md` gives, per phase (before, outage, after) and kind, the
-client success rate, p50 and p95, upstream calls per request and how many requests the fallback served. A short run on the build
-machine only proved the scripts work; it is not a result.
+`final-worker/`, repeat 1 (repeats 2 and 3 within a point). Through nginx, realistic mock; the primary mock is
+killed at 20 s and restarted at 50 s of 80 s. Success: HTTP 200 and, for a stream, the `[DONE]` terminator.
 
-## Exact-match cache (PR 8)
+| chain | phase | non-streamed success | streamed success | p95 (non-streamed) | upstream calls per request | served by fallback |
+|---|---|---:|---:|---|---:|---:|
+| `mock-openai-1>mock-anthropic-1` | before | 100.00% | 100.00% | 403.5 ms | 1.00 | 0 |
+| | outage | 100.00% | 99.33% | 1082.2 ms | 1.48 | 5899 |
+| | after | 100.00% | 100.00% | 403.4 ms | 1.00 | 1165 |
+| none | before | 98.75% | 98.78% | 403.4 ms | 1.02 | 0 |
+| | outage | 0.00% | 0.00% | 646.1 ms | 0.47 | 0 |
+| | after | 80.10% | 80.10% | 403.0 ms | 0.80 | 0 |
 
-Pending quiet run. `bash bench/quiet.sh bench/results/pr-8 && bash bench/run-cache.sh` writes `cache-cold.json`, `cache-warm.json`,
-`cache-warm-stream.json`, `cache-stampede.json` and `summary.md` to `bench/results/pr-8/`; no figure is quoted here until that run is
-committed (R3).
+With a fallback the outage costs latency, not answers: about half the requests try the dead primary first (1.48
+calls each) and the breaker sends the rest straight to the fallback. Without one, requests fail fast (1.7 ms p50)
+once the breaker is open, and 80% succeed in the window after the restart while the breaker probes its way
+closed again.
 
-What the run measures: all with `temperature: 0` against a mock with realistic latency. Cold sends only prompts the cache has never
-seen. Warm draws from 200 of 2 000 distinct prompts with a Zipf skew (s = 1.1), so the hit rate is measured, not assumed, both
-non-streamed and streamed. Stampede sends 50 identical non-streamed requests at once and counts upstream calls. `summary.md` gives
-hit rate, p50 and p95 for hits and misses, and upstream calls. A short run on the build machine only proved the scripts work; it is
-not a result.
+## Request logging off the request path
 
-## Semantic cache (PR 9)
+`final-worker/`. 200 req/s, realistic mock, 60 s, 3 repeats per mode.
 
-Pending quiet run. Three runs, one at a time, each after `bash bench/quiet.sh bench/results/pr-9`; no figure is quoted here until
-`bench/results/pr-9/` is committed (R3).
+| mode | requests | failed | p50 | p95 | p99 |
+|---|---:|---:|---|---|---|
+| inline (one awaited insert per request) | 35905 | 0 | 402.3 ms (402.2 to 402.4) | 403.4 ms (403.4 to 403.7) | 404.4 ms (404.1 to 404.8) |
+| stream (XADD; the worker writes batches) | 35905 | 0 | 401.8 ms (401.8 to 401.9) | 403.1 ms (403.0 to 403.2) | 403.9 ms (403.9 to 404.1) |
 
-- `npm run bench:semantic-eval`: hit rate and wrong-answer rate at thresholds 0.80 to 0.99 for Quora Question Pairs and PAWS-Wiki
-  pairs, per embedding model, input type and across models, pairwise and store-wide nearest neighbour, each with and without the
-  guards; threshold chosen on a dev half (nearest neighbour with guards) and reported on a test half, with a recommendation when
-  none meets 1%. Writes `eval.json` and `summary.md`.
-- `npm run bench:vector-index`: HNSW, IVFFlat and an exact scan at 10 000 and 100 000 vectors: recall@1, p50 and p95 query time,
-  build time and index size, with and without the scope-and-context filter. Writes `index-bench.json` and `index-bench.md`.
-- `npm run bench:semantic`: request latency of a semantic hit against an exact hit and a miss, through the gateway with a mock
-  provider. Writes `semantic-*.json` and `latency.md`.
+The worker stayed at most 2 entries behind (3 pending) and wrote 195 rows a second. At 200 req/s the two modes
+differ by under 1 ms; the stream mode's gain is that a slow or absent Postgres no longer sits on the request path.
 
-A tiny run on the build machine only proved the scripts work; it is not a result.
+## Dashboard query time vs log size
 
-## Request logging off the hot path (PR 10)
+`final/`, median (p95) ms after one warm-up, Postgres 17.
 
-Pending quiet run. `bash bench/quiet.sh bench/results/pr-10 && bash bench/run-logging.sh` writes `logging-inline-<n>.json`,
-`logging-stream-<n>.json`, `worker-stream-<n>.csv` and `summary.md` to `bench/results/pr-10/`; no figure is quoted here until that run
-is committed (R3).
+| query | 10,000 rows | 100,000 rows | 1,000,000 rows | 5,000,000 rows |
+|---|---:|---:|---:|---:|
+| overview 24h, on the rollups | 4.62 (5.35) | 18.4 (19.6) | 23.5 (26.1) | 27.9 (31.4) |
+| overview 30d, on the rollups | 13.5 (15.5) | 17.8 (20.0) | 20.9 (23.4) | 23.5 (29.1) |
+| overview 30d, from the raw log | 8.73 (9.36) | 64.8 (66.8) | 486.7 (493.1) | 2708 (2715) |
+| last 50 errors (partial index) | 1.28 (1.45) | 1.19 (1.35) | 1.29 (1.45) | 1.22 (1.46) |
 
-What the run measures: the same constant request rate (default 200 req/s, 60 s after a 10 s warm-up, cache off, budgets and rate limit
-on, mock provider with realistic latency) with `LOG_MODE=inline` (one awaited Postgres insert per request, on the request path) and
-`LOG_MODE=stream` (one `XADD`, the log worker writes batches), three repeats each. `summary.md` gives p50, p95 and p99 as median with
-range over the repeats, and for the worker the maximum stream lag, the maximum pending entries and rows written per second. A short run
-on the build machine only proved the scripts work; it is not a result.
+Rollups and raw log agree exactly on requests, errors and spend at every size and range; the rollups' p95 is read
+from a histogram and comes out up to 4% above the raw p95 (3135 against 3113 ms at 5M rows, 30 days).
 
-## Dashboard query time vs log size (PR 11)
+## Invalid runs, and what was wrong
 
-Pending quiet run. `bash bench/quiet.sh bench/results/pr-11 && npm run bench:dashboard -- --sizes 10000,100000,1000000,5000000 --out bench/results/pr-11`
-writes `results.json` and `summary.md` to `bench/results/pr-11/`; no figure is quoted here until that run is committed (R3).
+The first run's cache repeats 2 and 3, all three chaos repeats and the logging run are kept in `final/` but not
+used: requests timed out at 60 s and up to 88% failed. Two causes, both found from the evidence before anything
+was changed:
 
-What the run measures: a synthetic log (20 tenants, 6 models, a day and night traffic shape, 2% errors, 30% cache hits, log-normal
-latencies, fixed seed) grown to each size through the log worker's own rollup code. At each size every dashboard range (1 h, 24 h, 7 d,
-30 d) is timed on the rollups (the queries the page runs) and the same answer is computed from the raw request log, median and p95 of
-the timed runs after one warm-up, and the two answers are compared. The last-failures query is timed on its own, with its plan checked for the
-partial index. A short run on the build machine only proved the scripts work; it is not a result.
+1. **No log worker.** `run-cache.sh`, `run-chaos.sh` and `run-logging.sh`'s inline mode started a gateway without
+   the worker. Budget settles reach Postgres only through the worker, so every request's hold stayed (69k on the
+   bench tenant), each budget rebuild carried all of them, Redis calls timed out and the epoch moved (191 times
+   in one run). A gateway is never deployed without a worker; the scripts now start one (`67f3d05`).
+2. **One tenant for the whole suite.** By the end of the first run the bench tenant had 3.2M ledger rows, and the
+   rebuild's seq scan saturated Postgres. That is the index above.
 
+`final-worker/` repeated those three scenarios with both fixes; every one of its runs is valid.
+
+## Superseded figures
+
+The per-PR figures published before this run (PR 1's 10000 req/s through one process and 0.23 ms p50 overhead,
+and the per-PR sections of PRs 3 to 11) were taken one run each on a busy laptop (load up to 11 on 10 cores,
+R8). Their raw data stays in `bench/results/pr-*`; this page replaces them. PR 1's higher throughput was a
+gateway with no auth, rate limit, budget or request log; the ceiling above has all of them on. The PR 2
+framework comparison was not re-run: its harness is not on this base.

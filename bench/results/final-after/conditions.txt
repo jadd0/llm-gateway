@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T05:12:04Z
+loadavg: { 1.58 2.24 3.37 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   32.6 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    1.4 /usr/sbin/bluetoothd
+    1.0 /Applications/Visual Studio Code.app/Contents/Frameworks/Code Helper (Plugin).app/Contents/MacOS/Code Helper (Plugin)
+    1.0 /usr/libexec/searchpartyd
+    0.7 /bin/zsh

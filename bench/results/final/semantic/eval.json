@@ -1,0 +1,3003 @@
+{
+  "info": {
+    "qqp": 6000,
+    "paws": 4000,
+    "seed": 42,
+    "dev": 5000,
+    "test": 5000,
+    "devDuplicates": 1962,
+    "testDuplicates": 1994,
+    "embedders": [
+      "local"
+    ],
+    "inputTypes": [
+      "none"
+    ],
+    "maxWrongRate": 0.01,
+    "minHitRate": 0.05,
+    "guard": {
+      "tokenSet": true,
+      "maxDiff": 2
+    },
+    "conditions": "not recorded"
+  },
+  "results": [
+    {
+      "inputType": "none",
+      "query": "local",
+      "entry": "local",
+      "kind": "same-model",
+      "dev": {
+        "pairwise": [
+          {
+            "threshold": 80,
+            "served": 3348,
+            "hits": 1773,
+            "wrong": 1575,
+            "duplicates": 1962,
+            "hitRate": 0.9036697247706422,
+            "wrongRate": 0.47043010752688175
+          },
+          {
+            "threshold": 81,
+            "served": 3278,
+            "hits": 1745,
+            "wrong": 1533,
+            "duplicates": 1962,
+            "hitRate": 0.8893985728848114,
+            "wrongRate": 0.46766320927394756
+          },
+          {
+            "threshold": 82,
+            "served": 3203,
+            "hits": 1709,
+            "wrong": 1494,
+            "duplicates": 1962,
+            "hitRate": 0.8710499490316004,
+            "wrongRate": 0.46643771464252265
+          },
+          {
+            "threshold": 83,
+            "served": 3128,
+            "hits": 1668,
+            "wrong": 1460,
+            "duplicates": 1962,
+            "hitRate": 0.8501529051987767,
+            "wrongRate": 0.46675191815856776
+          },
+          {
+            "threshold": 84,
+            "served": 3038,
+            "hits": 1630,
+            "wrong": 1408,
+            "duplicates": 1962,
+            "hitRate": 0.8307849133537207,
+            "wrongRate": 0.46346280447662935
+          },
+          {
+            "threshold": 85,
+            "served": 2956,
+            "hits": 1592,
+            "wrong": 1364,
+            "duplicates": 1962,
+            "hitRate": 0.8114169215086646,
+            "wrongRate": 0.4614343707713126
+          },
+          {
+            "threshold": 86,
+            "served": 2886,
+            "hits": 1561,
+            "wrong": 1325,
+            "duplicates": 1962,
+            "hitRate": 0.7956167176350663,
+            "wrongRate": 0.45911295911295913
+          },
+          {
+            "threshold": 87,
+            "served": 2785,
+            "hits": 1509,
+            "wrong": 1276,
+            "duplicates": 1962,
+            "hitRate": 0.7691131498470948,
+            "wrongRate": 0.45816876122082584
+          },
+          {
+            "threshold": 88,
+            "served": 2690,
+            "hits": 1461,
+            "wrong": 1229,
+            "duplicates": 1962,
+            "hitRate": 0.7446483180428135,
+            "wrongRate": 0.45687732342007437
+          },
+          {
+            "threshold": 89,
+            "served": 2606,
+            "hits": 1417,
+            "wrong": 1189,
+            "duplicates": 1962,
+            "hitRate": 0.7222222222222222,
+            "wrongRate": 0.4562547966231773
+          },
+          {
+            "threshold": 90,
+            "served": 2499,
+            "hits": 1360,
+            "wrong": 1139,
+            "duplicates": 1962,
+            "hitRate": 0.6931702344546381,
+            "wrongRate": 0.4557823129251701
+          },
+          {
+            "threshold": 91,
+            "served": 2388,
+            "hits": 1288,
+            "wrong": 1100,
+            "duplicates": 1962,
+            "hitRate": 0.6564729867482161,
+            "wrongRate": 0.46063651591289784
+          },
+          {
+            "threshold": 92,
+            "served": 2278,
+            "hits": 1231,
+            "wrong": 1047,
+            "duplicates": 1962,
+            "hitRate": 0.627420998980632,
+            "wrongRate": 0.45961369622475856
+          },
+          {
+            "threshold": 93,
+            "served": 2145,
+            "hits": 1156,
+            "wrong": 989,
+            "duplicates": 1962,
+            "hitRate": 0.5891946992864424,
+            "wrongRate": 0.46107226107226107
+          },
+          {
+            "threshold": 94,
+            "served": 2033,
+            "hits": 1097,
+            "wrong": 936,
+            "duplicates": 1962,
+            "hitRate": 0.5591233435270132,
+            "wrongRate": 0.46040334481062467
+          },
+          {
+            "threshold": 95,
+            "served": 1900,
+            "hits": 1031,
+            "wrong": 869,
+            "duplicates": 1962,
+            "hitRate": 0.5254841997961264,
+            "wrongRate": 0.4573684210526316
+          },
+          {
+            "threshold": 96,
+            "served": 1739,
+            "hits": 951,
+            "wrong": 788,
+            "duplicates": 1962,
+            "hitRate": 0.4847094801223242,
+            "wrongRate": 0.45313398504887864
+          },
+          {
+            "threshold": 97,
+            "served": 1521,
+            "hits": 837,
+            "wrong": 684,
+            "duplicates": 1962,
+            "hitRate": 0.42660550458715596,
+            "wrongRate": 0.44970414201183434
+          },
+          {
+            "threshold": 98,
+            "served": 1198,
+            "hits": 686,
+            "wrong": 512,
+            "duplicates": 1962,
+            "hitRate": 0.34964322120285424,
+            "wrongRate": 0.4273789649415693
+          },
+          {
+            "threshold": 99,
+            "served": 701,
+            "hits": 440,
+            "wrong": 261,
+            "duplicates": 1962,
+            "hitRate": 0.22426095820591233,
+            "wrongRate": 0.3723252496433666
+          }
+        ],
+        "pairwise+guards": [
+          {
+            "threshold": 80,
+            "served": 1597,
+            "hits": 846,
+            "wrong": 751,
+            "duplicates": 1962,
+            "hitRate": 0.43119266055045874,
+            "wrongRate": 0.47025673137132123
+          },
+          {
+            "threshold": 81,
+            "served": 1584,
+            "hits": 842,
+            "wrong": 742,
+            "duplicates": 1962,
+            "hitRate": 0.4291539245667686,
+            "wrongRate": 0.4684343434343434
+          },
+          {
+            "threshold": 82,
+            "served": 1570,
+            "hits": 838,
+            "wrong": 732,
+            "duplicates": 1962,
+            "hitRate": 0.4271151885830785,
+            "wrongRate": 0.4662420382165605
+          },
+          {
+            "threshold": 83,
+            "served": 1551,
+            "hits": 828,
+            "wrong": 723,
+            "duplicates": 1962,
+            "hitRate": 0.42201834862385323,
+            "wrongRate": 0.4661508704061896
+          },
+          {
+            "threshold": 84,
+            "served": 1528,
+            "hits": 820,
+            "wrong": 708,
+            "duplicates": 1962,
+            "hitRate": 0.417940876656473,
+            "wrongRate": 0.46335078534031415
+          },
+          {
+            "threshold": 85,
+            "served": 1512,
+            "hits": 816,
+            "wrong": 696,
+            "duplicates": 1962,
+            "hitRate": 0.41590214067278286,
+            "wrongRate": 0.4603174603174603
+          },
+          {
+            "threshold": 86,
+            "served": 1495,
+            "hits": 812,
+            "wrong": 683,
+            "duplicates": 1962,
+            "hitRate": 0.4138634046890928,
+            "wrongRate": 0.4568561872909699
+          },
+          {
+            "threshold": 87,
+            "served": 1469,
+            "hits": 799,
+            "wrong": 670,
+            "duplicates": 1962,
+            "hitRate": 0.4072375127420999,
+            "wrongRate": 0.4560925799863853
+          },
+          {
+            "threshold": 88,
+            "served": 1443,
+            "hits": 792,
+            "wrong": 651,
+            "duplicates": 1962,
+            "hitRate": 0.4036697247706422,
+            "wrongRate": 0.45114345114345117
+          },
+          {
+            "threshold": 89,
+            "served": 1417,
+            "hits": 777,
+            "wrong": 640,
+            "duplicates": 1962,
+            "hitRate": 0.39602446483180426,
+            "wrongRate": 0.4516584333098095
+          },
+          {
+            "threshold": 90,
+            "served": 1385,
+            "hits": 759,
+            "wrong": 626,
+            "duplicates": 1962,
+            "hitRate": 0.38685015290519875,
+            "wrongRate": 0.451985559566787
+          },
+          {
+            "threshold": 91,
+            "served": 1347,
+            "hits": 734,
+            "wrong": 613,
+            "duplicates": 1962,
+            "hitRate": 0.37410805300713557,
+            "wrongRate": 0.4550853749072012
+          },
+          {
+            "threshold": 92,
+            "served": 1305,
+            "hits": 714,
+            "wrong": 591,
+            "duplicates": 1962,
+            "hitRate": 0.363914373088685,
+            "wrongRate": 0.4528735632183908
+          },
+          {
+            "threshold": 93,
+            "served": 1244,
+            "hits": 679,
+            "wrong": 565,
+            "duplicates": 1962,
+            "hitRate": 0.34607543323139656,
+            "wrongRate": 0.4541800643086817
+          },
+          {
+            "threshold": 94,
+            "served": 1201,
+            "hits": 655,
+            "wrong": 546,
+            "duplicates": 1962,
+            "hitRate": 0.33384301732925586,
+            "wrongRate": 0.4546211490424646
+          },
+          {
+            "threshold": 95,
+            "served": 1150,
+            "hits": 627,
+            "wrong": 523,
+            "duplicates": 1962,
+            "hitRate": 0.3195718654434251,
+            "wrongRate": 0.4547826086956522
+          },
+          {
+            "threshold": 96,
+            "served": 1071,
+            "hits": 588,
+            "wrong": 483,
+            "duplicates": 1962,
+            "hitRate": 0.2996941896024465,
+            "wrongRate": 0.45098039215686275
+          },
+          {
+            "threshold": 97,
+            "served": 966,
+            "hits": 531,
+            "wrong": 435,
+            "duplicates": 1962,
+            "hitRate": 0.2706422018348624,
+            "wrongRate": 0.4503105590062112
+          },
+          {
+            "threshold": 98,
+            "served": 806,
+            "hits": 459,
+            "wrong": 347,
+            "duplicates": 1962,
+            "hitRate": 0.23394495412844038,
+            "wrongRate": 0.4305210918114144
+          },
+          {
+            "threshold": 99,
+            "served": 511,
+            "hits": 319,
+            "wrong": 192,
+            "duplicates": 1962,
+            "hitRate": 0.16258919469928645,
+            "wrongRate": 0.37573385518590996
+          }
+        ],
+        "nn": [
+          {
+            "threshold": 80,
+            "served": 3441,
+            "hits": 1533,
+            "wrong": 1908,
+            "duplicates": 1962,
+            "hitRate": 0.7813455657492355,
+            "wrongRate": 0.5544899738448126
+          },
+          {
+            "threshold": 81,
+            "served": 3373,
+            "hits": 1513,
+            "wrong": 1860,
+            "duplicates": 1962,
+            "hitRate": 0.7711518858307849,
+            "wrongRate": 0.5514378891194782
+          },
+          {
+            "threshold": 82,
+            "served": 3305,
+            "hits": 1485,
+            "wrong": 1820,
+            "duplicates": 1962,
+            "hitRate": 0.7568807339449541,
+            "wrongRate": 0.5506807866868382
+          },
+          {
+            "threshold": 83,
+            "served": 3235,
+            "hits": 1455,
+            "wrong": 1780,
+            "duplicates": 1962,
+            "hitRate": 0.7415902140672783,
+            "wrongRate": 0.5502318392581144
+          },
+          {
+            "threshold": 84,
+            "served": 3144,
+            "hits": 1428,
+            "wrong": 1716,
+            "duplicates": 1962,
+            "hitRate": 0.72782874617737,
+            "wrongRate": 0.5458015267175572
+          },
+          {
+            "threshold": 85,
+            "served": 3056,
+            "hits": 1394,
+            "wrong": 1662,
+            "duplicates": 1962,
+            "hitRate": 0.7104994903160041,
+            "wrongRate": 0.543848167539267
+          },
+          {
+            "threshold": 86,
+            "served": 2986,
+            "hits": 1369,
+            "wrong": 1617,
+            "duplicates": 1962,
+            "hitRate": 0.6977573904179408,
+            "wrongRate": 0.5415271265907569
+          },
+          {
+            "threshold": 87,
+            "served": 2887,
+            "hits": 1327,
+            "wrong": 1560,
+            "duplicates": 1962,
+            "hitRate": 0.6763506625891947,
+            "wrongRate": 0.5403533079321095
+          },
+          {
+            "threshold": 88,
+            "served": 2802,
+            "hits": 1287,
+            "wrong": 1515,
+            "duplicates": 1962,
+            "hitRate": 0.6559633027522935,
+            "wrongRate": 0.5406852248394004
+          },
+          {
+            "threshold": 89,
+            "served": 2715,
+            "hits": 1247,
+            "wrong": 1468,
+            "duplicates": 1962,
+            "hitRate": 0.6355759429153924,
+            "wrongRate": 0.5406998158379374
+          },
+          {
+            "threshold": 90,
+            "served": 2631,
+            "hits": 1199,
+            "wrong": 1432,
+            "duplicates": 1962,
+            "hitRate": 0.6111111111111112,
+            "wrongRate": 0.5442797415431395
+          },
+          {
+            "threshold": 91,
+            "served": 2531,
+            "hits": 1140,
+            "wrong": 1391,
+            "duplicates": 1962,
+            "hitRate": 0.581039755351682,
+            "wrongRate": 0.549585144211774
+          },
+          {
+            "threshold": 92,
+            "served": 2436,
+            "hits": 1089,
+            "wrong": 1347,
+            "duplicates": 1962,
+            "hitRate": 0.555045871559633,
+            "wrongRate": 0.5529556650246306
+          },
+          {
+            "threshold": 93,
+            "served": 2319,
+            "hits": 1030,
+            "wrong": 1289,
+            "duplicates": 1962,
+            "hitRate": 0.5249745158002038,
+            "wrongRate": 0.5558430357912894
+          },
+          {
+            "threshold": 94,
+            "served": 2217,
+            "hits": 977,
+            "wrong": 1240,
+            "duplicates": 1962,
+            "hitRate": 0.4979612640163099,
+            "wrongRate": 0.5593143888137122
+          },
+          {
+            "threshold": 95,
+            "served": 2117,
+            "hits": 925,
+            "wrong": 1192,
+            "duplicates": 1962,
+            "hitRate": 0.47145769622833844,
+            "wrongRate": 0.5630609352857817
+          },
+          {
+            "threshold": 96,
+            "served": 1992,
+            "hits": 855,
+            "wrong": 1137,
+            "duplicates": 1962,
+            "hitRate": 0.43577981651376146,
+            "wrongRate": 0.5707831325301205
+          },
+          {
+            "threshold": 97,
+            "served": 1835,
+            "hits": 764,
+            "wrong": 1071,
+            "duplicates": 1962,
+            "hitRate": 0.3893985728848114,
+            "wrongRate": 0.5836512261580381
+          },
+          {
+            "threshold": 98,
+            "served": 1627,
+            "hits": 659,
+            "wrong": 968,
+            "duplicates": 1962,
+            "hitRate": 0.33588175331294595,
+            "wrongRate": 0.594960049170252
+          },
+          {
+            "threshold": 99,
+            "served": 1229,
+            "hits": 495,
+            "wrong": 734,
+            "duplicates": 1962,
+            "hitRate": 0.25229357798165136,
+            "wrongRate": 0.597233523189585
+          }
+        ],
+        "nn+guards": [
+          {
+            "threshold": 80,
+            "served": 1950,
+            "hits": 840,
+            "wrong": 1110,
+            "duplicates": 1962,
+            "hitRate": 0.42813455657492355,
+            "wrongRate": 0.5692307692307692
+          },
+          {
+            "threshold": 81,
+            "served": 1939,
+            "hits": 837,
+            "wrong": 1102,
+            "duplicates": 1962,
+            "hitRate": 0.42660550458715596,
+            "wrongRate": 0.5683341928829293
+          },
+          {
+            "threshold": 82,
+            "served": 1927,
+            "hits": 834,
+            "wrong": 1093,
+            "duplicates": 1962,
+            "hitRate": 0.42507645259938837,
+            "wrongRate": 0.5672029060716139
+          },
+          {
+            "threshold": 83,
+            "served": 1909,
+            "hits": 825,
+            "wrong": 1084,
+            "duplicates": 1962,
+            "hitRate": 0.42048929663608564,
+            "wrongRate": 0.5678365636458879
+          },
+          {
+            "threshold": 84,
+            "served": 1886,
+            "hits": 819,
+            "wrong": 1067,
+            "duplicates": 1962,
+            "hitRate": 0.41743119266055045,
+            "wrongRate": 0.5657476139978791
+          },
+          {
+            "threshold": 85,
+            "served": 1872,
+            "hits": 816,
+            "wrong": 1056,
+            "duplicates": 1962,
+            "hitRate": 0.41590214067278286,
+            "wrongRate": 0.5641025641025641
+          },
+          {
+            "threshold": 86,
+            "served": 1850,
+            "hits": 812,
+            "wrong": 1038,
+            "duplicates": 1962,
+            "hitRate": 0.4138634046890928,
+            "wrongRate": 0.5610810810810811
+          },
+          {
+            "threshold": 87,
+            "served": 1822,
+            "hits": 801,
+            "wrong": 1021,
+            "duplicates": 1962,
+            "hitRate": 0.40825688073394495,
+            "wrongRate": 0.5603732162458837
+          },
+          {
+            "threshold": 88,
+            "served": 1802,
+            "hits": 796,
+            "wrong": 1006,
+            "duplicates": 1962,
+            "hitRate": 0.4057084607543323,
+            "wrongRate": 0.55826859045505
+          },
+          {
+            "threshold": 89,
+            "served": 1776,
+            "hits": 781,
+            "wrong": 995,
+            "duplicates": 1962,
+            "hitRate": 0.3980632008154944,
+            "wrongRate": 0.5602477477477478
+          },
+          {
+            "threshold": 90,
+            "served": 1752,
+            "hits": 765,
+            "wrong": 987,
+            "duplicates": 1962,
+            "hitRate": 0.38990825688073394,
+            "wrongRate": 0.5633561643835616
+          },
+          {
+            "threshold": 91,
+            "served": 1715,
+            "hits": 743,
+            "wrong": 972,
+            "duplicates": 1962,
+            "hitRate": 0.37869520897043835,
+            "wrongRate": 0.5667638483965015
+          },
+          {
+            "threshold": 92,
+            "served": 1682,
+            "hits": 725,
+            "wrong": 957,
+            "duplicates": 1962,
+            "hitRate": 0.36952089704383284,
+            "wrongRate": 0.5689655172413793
+          },
+          {
+            "threshold": 93,
+            "served": 1628,
+            "hits": 694,
+            "wrong": 934,
+            "duplicates": 1962,
+            "hitRate": 0.35372069317023447,
+            "wrongRate": 0.5737100737100738
+          },
+          {
+            "threshold": 94,
+            "served": 1587,
+            "hits": 673,
+            "wrong": 914,
+            "duplicates": 1962,
+            "hitRate": 0.34301732925586137,
+            "wrongRate": 0.5759294265910523
+          },
+          {
+            "threshold": 95,
+            "served": 1547,
+            "hits": 652,
+            "wrong": 895,
+            "duplicates": 1962,
+            "hitRate": 0.33231396534148827,
+            "wrongRate": 0.5785391079508727
+          },
+          {
+            "threshold": 96,
+            "served": 1480,
+            "hits": 616,
+            "wrong": 864,
+            "duplicates": 1962,
+            "hitRate": 0.31396534148827726,
+            "wrongRate": 0.5837837837837838
+          },
+          {
+            "threshold": 97,
+            "served": 1400,
+            "hits": 567,
+            "wrong": 833,
+            "duplicates": 1962,
+            "hitRate": 0.2889908256880734,
+            "wrongRate": 0.595
+          },
+          {
+            "threshold": 98,
+            "served": 1295,
+            "hits": 517,
+            "wrong": 778,
+            "duplicates": 1962,
+            "hitRate": 0.263506625891947,
+            "wrongRate": 0.6007722007722007
+          },
+          {
+            "threshold": 99,
+            "served": 1062,
+            "hits": 424,
+            "wrong": 638,
+            "duplicates": 1962,
+            "hitRate": 0.2161060142711519,
+            "wrongRate": 0.60075329566855
+          }
+        ]
+      },
+      "test": {
+        "pairwise": [
+          {
+            "threshold": 80,
+            "served": 3363,
+            "hits": 1807,
+            "wrong": 1556,
+            "duplicates": 1994,
+            "hitRate": 0.9062186559679037,
+            "wrongRate": 0.4626821290514422
+          },
+          {
+            "threshold": 81,
+            "served": 3290,
+            "hits": 1771,
+            "wrong": 1519,
+            "duplicates": 1994,
+            "hitRate": 0.8881644934804414,
+            "wrongRate": 0.46170212765957447
+          },
+          {
+            "threshold": 82,
+            "served": 3215,
+            "hits": 1738,
+            "wrong": 1477,
+            "duplicates": 1994,
+            "hitRate": 0.8716148445336008,
+            "wrongRate": 0.4594090202177294
+          },
+          {
+            "threshold": 83,
+            "served": 3134,
+            "hits": 1700,
+            "wrong": 1434,
+            "duplicates": 1994,
+            "hitRate": 0.8525576730190572,
+            "wrongRate": 0.45756222080408426
+          },
+          {
+            "threshold": 84,
+            "served": 3059,
+            "hits": 1662,
+            "wrong": 1397,
+            "duplicates": 1994,
+            "hitRate": 0.8335005015045135,
+            "wrongRate": 0.456685191238967
+          },
+          {
+            "threshold": 85,
+            "served": 2976,
+            "hits": 1625,
+            "wrong": 1351,
+            "duplicates": 1994,
+            "hitRate": 0.8149448345035105,
+            "wrongRate": 0.4539650537634409
+          },
+          {
+            "threshold": 86,
+            "served": 2896,
+            "hits": 1579,
+            "wrong": 1317,
+            "duplicates": 1994,
+            "hitRate": 0.791875626880642,
+            "wrongRate": 0.45476519337016574
+          },
+          {
+            "threshold": 87,
+            "served": 2806,
+            "hits": 1529,
+            "wrong": 1277,
+            "duplicates": 1994,
+            "hitRate": 0.7668004012036108,
+            "wrongRate": 0.455096222380613
+          },
+          {
+            "threshold": 88,
+            "served": 2697,
+            "hits": 1476,
+            "wrong": 1221,
+            "duplicates": 1994,
+            "hitRate": 0.7402206619859579,
+            "wrongRate": 0.45272525027808674
+          },
+          {
+            "threshold": 89,
+            "served": 2615,
+            "hits": 1427,
+            "wrong": 1188,
+            "duplicates": 1994,
+            "hitRate": 0.7156469408224674,
+            "wrongRate": 0.454302103250478
+          },
+          {
+            "threshold": 90,
+            "served": 2522,
+            "hits": 1380,
+            "wrong": 1142,
+            "duplicates": 1994,
+            "hitRate": 0.6920762286860582,
+            "wrongRate": 0.4528152260111023
+          },
+          {
+            "threshold": 91,
+            "served": 2411,
+            "hits": 1325,
+            "wrong": 1086,
+            "duplicates": 1994,
+            "hitRate": 0.664493480441324,
+            "wrongRate": 0.45043550394027376
+          },
+          {
+            "threshold": 92,
+            "served": 2311,
+            "hits": 1268,
+            "wrong": 1043,
+            "duplicates": 1994,
+            "hitRate": 0.6359077231695085,
+            "wrongRate": 0.4513197749891822
+          },
+          {
+            "threshold": 93,
+            "served": 2156,
+            "hits": 1180,
+            "wrong": 976,
+            "duplicates": 1994,
+            "hitRate": 0.5917753259779338,
+            "wrongRate": 0.45269016697588127
+          },
+          {
+            "threshold": 94,
+            "served": 2025,
+            "hits": 1115,
+            "wrong": 910,
+            "duplicates": 1994,
+            "hitRate": 0.5591775325977933,
+            "wrongRate": 0.44938271604938274
+          },
+          {
+            "threshold": 95,
+            "served": 1889,
+            "hits": 1050,
+            "wrong": 839,
+            "duplicates": 1994,
+            "hitRate": 0.526579739217653,
+            "wrongRate": 0.44415034409740606
+          },
+          {
+            "threshold": 96,
+            "served": 1715,
+            "hits": 951,
+            "wrong": 764,
+            "duplicates": 1994,
+            "hitRate": 0.4769307923771314,
+            "wrongRate": 0.4454810495626822
+          },
+          {
+            "threshold": 97,
+            "served": 1523,
+            "hits": 871,
+            "wrong": 652,
+            "duplicates": 1994,
+            "hitRate": 0.43681043129388164,
+            "wrongRate": 0.42810242941562704
+          },
+          {
+            "threshold": 98,
+            "served": 1211,
+            "hits": 714,
+            "wrong": 497,
+            "duplicates": 1994,
+            "hitRate": 0.35807422266800404,
+            "wrongRate": 0.41040462427745666
+          },
+          {
+            "threshold": 99,
+            "served": 677,
+            "hits": 431,
+            "wrong": 246,
+            "duplicates": 1994,
+            "hitRate": 0.21614844533600802,
+            "wrongRate": 0.36336779911373707
+          }
+        ],
+        "pairwise+guards": [
+          {
+            "threshold": 80,
+            "served": 1665,
+            "hits": 905,
+            "wrong": 760,
+            "duplicates": 1994,
+            "hitRate": 0.4538615847542628,
+            "wrongRate": 0.45645645645645644
+          },
+          {
+            "threshold": 81,
+            "served": 1653,
+            "hits": 902,
+            "wrong": 751,
+            "duplicates": 1994,
+            "hitRate": 0.45235707121364094,
+            "wrongRate": 0.4543254688445251
+          },
+          {
+            "threshold": 82,
+            "served": 1644,
+            "hits": 901,
+            "wrong": 743,
+            "duplicates": 1994,
+            "hitRate": 0.4518555667001003,
+            "wrongRate": 0.4519464720194647
+          },
+          {
+            "threshold": 83,
+            "served": 1629,
+            "hits": 895,
+            "wrong": 734,
+            "duplicates": 1994,
+            "hitRate": 0.44884653961885657,
+            "wrongRate": 0.45058317986494784
+          },
+          {
+            "threshold": 84,
+            "served": 1612,
+            "hits": 887,
+            "wrong": 725,
+            "duplicates": 1994,
+            "hitRate": 0.4448345035105316,
+            "wrongRate": 0.4497518610421836
+          },
+          {
+            "threshold": 85,
+            "served": 1598,
+            "hits": 881,
+            "wrong": 717,
+            "duplicates": 1994,
+            "hitRate": 0.4418254764292879,
+            "wrongRate": 0.44868585732165206
+          },
+          {
+            "threshold": 86,
+            "served": 1583,
+            "hits": 873,
+            "wrong": 710,
+            "duplicates": 1994,
+            "hitRate": 0.43781344032096287,
+            "wrongRate": 0.4485154769425142
+          },
+          {
+            "threshold": 87,
+            "served": 1558,
+            "hits": 865,
+            "wrong": 693,
+            "duplicates": 1994,
+            "hitRate": 0.4338014042126379,
+            "wrongRate": 0.444801026957638
+          },
+          {
+            "threshold": 88,
+            "served": 1534,
+            "hits": 852,
+            "wrong": 682,
+            "duplicates": 1994,
+            "hitRate": 0.4272818455366098,
+            "wrongRate": 0.4445893089960887
+          },
+          {
+            "threshold": 89,
+            "served": 1506,
+            "hits": 835,
+            "wrong": 671,
+            "duplicates": 1994,
+            "hitRate": 0.41875626880641925,
+            "wrongRate": 0.4455511288180611
+          },
+          {
+            "threshold": 90,
+            "served": 1461,
+            "hits": 817,
+            "wrong": 644,
+            "duplicates": 1994,
+            "hitRate": 0.40972918756268806,
+            "wrongRate": 0.4407939767282683
+          },
+          {
+            "threshold": 91,
+            "served": 1415,
+            "hits": 794,
+            "wrong": 621,
+            "duplicates": 1994,
+            "hitRate": 0.3981945837512538,
+            "wrongRate": 0.43886925795053006
+          },
+          {
+            "threshold": 92,
+            "served": 1374,
+            "hits": 769,
+            "wrong": 605,
+            "duplicates": 1994,
+            "hitRate": 0.3856569709127382,
+            "wrongRate": 0.4403202328966521
+          },
+          {
+            "threshold": 93,
+            "served": 1307,
+            "hits": 732,
+            "wrong": 575,
+            "duplicates": 1994,
+            "hitRate": 0.36710130391173523,
+            "wrongRate": 0.43993879112471307
+          },
+          {
+            "threshold": 94,
+            "served": 1252,
+            "hits": 704,
+            "wrong": 548,
+            "duplicates": 1994,
+            "hitRate": 0.3530591775325978,
+            "wrongRate": 0.43769968051118213
+          },
+          {
+            "threshold": 95,
+            "served": 1190,
+            "hits": 674,
+            "wrong": 516,
+            "duplicates": 1994,
+            "hitRate": 0.33801404212637914,
+            "wrongRate": 0.4336134453781513
+          },
+          {
+            "threshold": 96,
+            "served": 1110,
+            "hits": 628,
+            "wrong": 482,
+            "duplicates": 1994,
+            "hitRate": 0.3149448345035105,
+            "wrongRate": 0.43423423423423424
+          },
+          {
+            "threshold": 97,
+            "served": 1007,
+            "hits": 578,
+            "wrong": 429,
+            "duplicates": 1994,
+            "hitRate": 0.28986960882647944,
+            "wrongRate": 0.4260178748758689
+          },
+          {
+            "threshold": 98,
+            "served": 830,
+            "hits": 490,
+            "wrong": 340,
+            "duplicates": 1994,
+            "hitRate": 0.24573721163490472,
+            "wrongRate": 0.40963855421686746
+          },
+          {
+            "threshold": 99,
+            "served": 515,
+            "hits": 324,
+            "wrong": 191,
+            "duplicates": 1994,
+            "hitRate": 0.1624874623871615,
+            "wrongRate": 0.37087378640776697
+          }
+        ],
+        "nn": [
+          {
+            "threshold": 80,
+            "served": 3487,
+            "hits": 1550,
+            "wrong": 1937,
+            "duplicates": 1994,
+            "hitRate": 0.7773319959879639,
+            "wrongRate": 0.5554918267852021
+          },
+          {
+            "threshold": 81,
+            "served": 3420,
+            "hits": 1529,
+            "wrong": 1891,
+            "duplicates": 1994,
+            "hitRate": 0.7668004012036108,
+            "wrongRate": 0.5529239766081872
+          },
+          {
+            "threshold": 82,
+            "served": 3349,
+            "hits": 1504,
+            "wrong": 1845,
+            "duplicates": 1994,
+            "hitRate": 0.7542627883650953,
+            "wrongRate": 0.5509107196177964
+          },
+          {
+            "threshold": 83,
+            "served": 3270,
+            "hits": 1478,
+            "wrong": 1792,
+            "duplicates": 1994,
+            "hitRate": 0.7412236710130391,
+            "wrongRate": 0.5480122324159021
+          },
+          {
+            "threshold": 84,
+            "served": 3192,
+            "hits": 1447,
+            "wrong": 1745,
+            "duplicates": 1994,
+            "hitRate": 0.7256770310932799,
+            "wrongRate": 0.5466791979949874
+          },
+          {
+            "threshold": 85,
+            "served": 3107,
+            "hits": 1421,
+            "wrong": 1686,
+            "duplicates": 1994,
+            "hitRate": 0.7126379137412236,
+            "wrongRate": 0.5426456388799485
+          },
+          {
+            "threshold": 86,
+            "served": 3027,
+            "hits": 1385,
+            "wrong": 1642,
+            "duplicates": 1994,
+            "hitRate": 0.6945837512537613,
+            "wrongRate": 0.5424512718863561
+          },
+          {
+            "threshold": 87,
+            "served": 2931,
+            "hits": 1340,
+            "wrong": 1591,
+            "duplicates": 1994,
+            "hitRate": 0.6720160481444333,
+            "wrongRate": 0.5428181508017741
+          },
+          {
+            "threshold": 88,
+            "served": 2826,
+            "hits": 1293,
+            "wrong": 1533,
+            "duplicates": 1994,
+            "hitRate": 0.6484453360080241,
+            "wrongRate": 0.5424628450106157
+          },
+          {
+            "threshold": 89,
+            "served": 2747,
+            "hits": 1253,
+            "wrong": 1494,
+            "duplicates": 1994,
+            "hitRate": 0.6283851554663992,
+            "wrongRate": 0.5438660356752821
+          },
+          {
+            "threshold": 90,
+            "served": 2655,
+            "hits": 1211,
+            "wrong": 1444,
+            "duplicates": 1994,
+            "hitRate": 0.607321965897693,
+            "wrongRate": 0.543879472693032
+          },
+          {
+            "threshold": 91,
+            "served": 2549,
+            "hits": 1164,
+            "wrong": 1385,
+            "duplicates": 1994,
+            "hitRate": 0.5837512537612839,
+            "wrongRate": 0.5433503334641036
+          },
+          {
+            "threshold": 92,
+            "served": 2464,
+            "hits": 1114,
+            "wrong": 1350,
+            "duplicates": 1994,
+            "hitRate": 0.5586760280842528,
+            "wrongRate": 0.5478896103896104
+          },
+          {
+            "threshold": 93,
+            "served": 2341,
+            "hits": 1041,
+            "wrong": 1300,
+            "duplicates": 1994,
+            "hitRate": 0.5220661985957874,
+            "wrongRate": 0.5553182400683468
+          },
+          {
+            "threshold": 94,
+            "served": 2235,
+            "hits": 987,
+            "wrong": 1248,
+            "duplicates": 1994,
+            "hitRate": 0.49498495486459376,
+            "wrongRate": 0.5583892617449664
+          },
+          {
+            "threshold": 95,
+            "served": 2135,
+            "hits": 937,
+            "wrong": 1198,
+            "duplicates": 1994,
+            "hitRate": 0.4699097291875627,
+            "wrongRate": 0.5611241217798595
+          },
+          {
+            "threshold": 96,
+            "served": 2011,
+            "hits": 863,
+            "wrong": 1148,
+            "duplicates": 1994,
+            "hitRate": 0.4327983951855567,
+            "wrongRate": 0.5708602685231228
+          },
+          {
+            "threshold": 97,
+            "served": 1876,
+            "hits": 797,
+            "wrong": 1079,
+            "duplicates": 1994,
+            "hitRate": 0.39969909729187564,
+            "wrongRate": 0.5751599147121536
+          },
+          {
+            "threshold": 98,
+            "served": 1661,
+            "hits": 700,
+            "wrong": 961,
+            "duplicates": 1994,
+            "hitRate": 0.3510531594784353,
+            "wrongRate": 0.5785671282360024
+          },
+          {
+            "threshold": 99,
+            "served": 1250,
+            "hits": 513,
+            "wrong": 737,
+            "duplicates": 1994,
+            "hitRate": 0.25727181544633904,
+            "wrongRate": 0.5896
+          }
+        ],
+        "nn+guards": [
+          {
+            "threshold": 80,
+            "served": 2023,
+            "hits": 878,
+            "wrong": 1145,
+            "duplicates": 1994,
+            "hitRate": 0.440320962888666,
+            "wrongRate": 0.5659911023232822
+          },
+          {
+            "threshold": 81,
+            "served": 2015,
+            "hits": 876,
+            "wrong": 1139,
+            "duplicates": 1994,
+            "hitRate": 0.43931795386158473,
+            "wrongRate": 0.5652605459057072
+          },
+          {
+            "threshold": 82,
+            "served": 2005,
+            "hits": 876,
+            "wrong": 1129,
+            "duplicates": 1994,
+            "hitRate": 0.43931795386158473,
+            "wrongRate": 0.5630922693266833
+          },
+          {
+            "threshold": 83,
+            "served": 1991,
+            "hits": 872,
+            "wrong": 1119,
+            "duplicates": 1994,
+            "hitRate": 0.4373119358074223,
+            "wrongRate": 0.5620291310899046
+          },
+          {
+            "threshold": 84,
+            "served": 1973,
+            "hits": 865,
+            "wrong": 1108,
+            "duplicates": 1994,
+            "hitRate": 0.4338014042126379,
+            "wrongRate": 0.5615813482007096
+          },
+          {
+            "threshold": 85,
+            "served": 1960,
+            "hits": 862,
+            "wrong": 1098,
+            "duplicates": 1994,
+            "hitRate": 0.43229689067201604,
+            "wrongRate": 0.560204081632653
+          },
+          {
+            "threshold": 86,
+            "served": 1942,
+            "hits": 854,
+            "wrong": 1088,
+            "duplicates": 1994,
+            "hitRate": 0.4282848545636911,
+            "wrongRate": 0.5602471678681772
+          },
+          {
+            "threshold": 87,
+            "served": 1918,
+            "hits": 847,
+            "wrong": 1071,
+            "duplicates": 1994,
+            "hitRate": 0.4247743229689067,
+            "wrongRate": 0.5583941605839416
+          },
+          {
+            "threshold": 88,
+            "served": 1893,
+            "hits": 835,
+            "wrong": 1058,
+            "duplicates": 1994,
+            "hitRate": 0.41875626880641925,
+            "wrongRate": 0.5589012150026413
+          },
+          {
+            "threshold": 89,
+            "served": 1866,
+            "hits": 820,
+            "wrong": 1046,
+            "duplicates": 1994,
+            "hitRate": 0.4112337011033099,
+            "wrongRate": 0.5605573419078242
+          },
+          {
+            "threshold": 90,
+            "served": 1825,
+            "hits": 804,
+            "wrong": 1021,
+            "duplicates": 1994,
+            "hitRate": 0.40320962888665995,
+            "wrongRate": 0.5594520547945205
+          },
+          {
+            "threshold": 91,
+            "served": 1782,
+            "hits": 785,
+            "wrong": 997,
+            "duplicates": 1994,
+            "hitRate": 0.3936810431293882,
+            "wrongRate": 0.5594837261503928
+          },
+          {
+            "threshold": 92,
+            "served": 1746,
+            "hits": 764,
+            "wrong": 982,
+            "duplicates": 1994,
+            "hitRate": 0.3831494483450351,
+            "wrongRate": 0.5624284077892325
+          },
+          {
+            "threshold": 93,
+            "served": 1694,
+            "hits": 734,
+            "wrong": 960,
+            "duplicates": 1994,
+            "hitRate": 0.36810431293881646,
+            "wrongRate": 0.5667060212514758
+          },
+          {
+            "threshold": 94,
+            "served": 1649,
+            "hits": 710,
+            "wrong": 939,
+            "duplicates": 1994,
+            "hitRate": 0.35606820461384153,
+            "wrongRate": 0.569436021831413
+          },
+          {
+            "threshold": 95,
+            "served": 1602,
+            "hits": 686,
+            "wrong": 916,
+            "duplicates": 1994,
+            "hitRate": 0.3440320962888666,
+            "wrongRate": 0.5717852684144819
+          },
+          {
+            "threshold": 96,
+            "served": 1547,
+            "hits": 650,
+            "wrong": 897,
+            "duplicates": 1994,
+            "hitRate": 0.3259779338014042,
+            "wrongRate": 0.5798319327731093
+          },
+          {
+            "threshold": 97,
+            "served": 1476,
+            "hits": 609,
+            "wrong": 867,
+            "duplicates": 1994,
+            "hitRate": 0.30541624874623874,
+            "wrongRate": 0.5873983739837398
+          },
+          {
+            "threshold": 98,
+            "served": 1356,
+            "hits": 553,
+            "wrong": 803,
+            "duplicates": 1994,
+            "hitRate": 0.2773319959879639,
+            "wrongRate": 0.5921828908554573
+          },
+          {
+            "threshold": 99,
+            "served": 1102,
+            "hits": 441,
+            "wrong": 661,
+            "duplicates": 1994,
+            "hitRate": 0.22116349047141423,
+            "wrongRate": 0.5998185117967332
+          }
+        ]
+      },
+      "testBySource": {
+        "qqp": {
+          "pairwise": [
+            {
+              "threshold": 80,
+              "served": 1387,
+              "hits": 917,
+              "wrong": 470,
+              "duplicates": 1090,
+              "hitRate": 0.8412844036697248,
+              "wrongRate": 0.33886085075702954
+            },
+            {
+              "threshold": 81,
+              "served": 1320,
+              "hits": 884,
+              "wrong": 436,
+              "duplicates": 1090,
+              "hitRate": 0.8110091743119267,
+              "wrongRate": 0.3303030303030303
+            },
+            {
+              "threshold": 82,
+              "served": 1246,
+              "hits": 851,
+              "wrong": 395,
+              "duplicates": 1090,
+              "hitRate": 0.7807339449541284,
+              "wrongRate": 0.31701444622792935
+            },
+            {
+              "threshold": 83,
+              "served": 1170,
+              "hits": 814,
+              "wrong": 356,
+              "duplicates": 1090,
+              "hitRate": 0.7467889908256881,
+              "wrongRate": 0.30427350427350425
+            },
+            {
+              "threshold": 84,
+              "served": 1098,
+              "hits": 776,
+              "wrong": 322,
+              "duplicates": 1090,
+              "hitRate": 0.7119266055045872,
+              "wrongRate": 0.29326047358834245
+            },
+            {
+              "threshold": 85,
+              "served": 1023,
+              "hits": 742,
+              "wrong": 281,
+              "duplicates": 1090,
+              "hitRate": 0.6807339449541284,
+              "wrongRate": 0.27468230694037143
+            },
+            {
+              "threshold": 86,
+              "served": 952,
+              "hits": 697,
+              "wrong": 255,
+              "duplicates": 1090,
+              "hitRate": 0.6394495412844037,
+              "wrongRate": 0.26785714285714285
+            },
+            {
+              "threshold": 87,
+              "served": 873,
+              "hits": 650,
+              "wrong": 223,
+              "duplicates": 1090,
+              "hitRate": 0.5963302752293578,
+              "wrongRate": 0.2554410080183276
+            },
+            {
+              "threshold": 88,
+              "served": 782,
+              "hits": 599,
+              "wrong": 183,
+              "duplicates": 1090,
+              "hitRate": 0.5495412844036697,
+              "wrongRate": 0.2340153452685422
+            },
+            {
+              "threshold": 89,
+              "served": 717,
+              "hits": 552,
+              "wrong": 165,
+              "duplicates": 1090,
+              "hitRate": 0.5064220183486239,
+              "wrongRate": 0.2301255230125523
+            },
+            {
+              "threshold": 90,
+              "served": 638,
+              "hits": 509,
+              "wrong": 129,
+              "duplicates": 1090,
+              "hitRate": 0.4669724770642202,
+              "wrongRate": 0.20219435736677116
+            },
+            {
+              "threshold": 91,
+              "served": 551,
+              "hits": 458,
+              "wrong": 93,
+              "duplicates": 1090,
+              "hitRate": 0.42018348623853213,
+              "wrongRate": 0.16878402903811252
+            },
+            {
+              "threshold": 92,
+              "served": 482,
+              "hits": 405,
+              "wrong": 77,
+              "duplicates": 1090,
+              "hitRate": 0.37155963302752293,
+              "wrongRate": 0.15975103734439833
+            },
+            {
+              "threshold": 93,
+              "served": 391,
+              "hits": 336,
+              "wrong": 55,
+              "duplicates": 1090,
+              "hitRate": 0.30825688073394497,
+              "wrongRate": 0.14066496163682865
+            },
+            {
+              "threshold": 94,
+              "served": 316,
+              "hits": 281,
+              "wrong": 35,
+              "duplicates": 1090,
+              "hitRate": 0.25779816513761467,
+              "wrongRate": 0.11075949367088607
+            },
+            {
+              "threshold": 95,
+              "served": 262,
+              "hits": 241,
+              "wrong": 21,
+              "duplicates": 1090,
+              "hitRate": 0.22110091743119267,
+              "wrongRate": 0.08015267175572519
+            },
+            {
+              "threshold": 96,
+              "served": 207,
+              "hits": 190,
+              "wrong": 17,
+              "duplicates": 1090,
+              "hitRate": 0.1743119266055046,
+              "wrongRate": 0.0821256038647343
+            },
+            {
+              "threshold": 97,
+              "served": 160,
+              "hits": 149,
+              "wrong": 11,
+              "duplicates": 1090,
+              "hitRate": 0.13669724770642203,
+              "wrongRate": 0.06875
+            },
+            {
+              "threshold": 98,
+              "served": 106,
+              "hits": 100,
+              "wrong": 6,
+              "duplicates": 1090,
+              "hitRate": 0.09174311926605505,
+              "wrongRate": 0.05660377358490566
+            },
+            {
+              "threshold": 99,
+              "served": 48,
+              "hits": 47,
+              "wrong": 1,
+              "duplicates": 1090,
+              "hitRate": 0.043119266055045874,
+              "wrongRate": 0.020833333333333332
+            }
+          ],
+          "pairwise+guards": [
+            {
+              "threshold": 80,
+              "served": 540,
+              "hits": 374,
+              "wrong": 166,
+              "duplicates": 1090,
+              "hitRate": 0.3431192660550459,
+              "wrongRate": 0.3074074074074074
+            },
+            {
+              "threshold": 81,
+              "served": 530,
+              "hits": 372,
+              "wrong": 158,
+              "duplicates": 1090,
+              "hitRate": 0.3412844036697248,
+              "wrongRate": 0.2981132075471698
+            },
+            {
+              "threshold": 82,
+              "served": 521,
+              "hits": 371,
+              "wrong": 150,
+              "duplicates": 1090,
+              "hitRate": 0.3403669724770642,
+              "wrongRate": 0.28790786948176583
+            },
+            {
+              "threshold": 83,
+              "served": 508,
+              "hits": 366,
+              "wrong": 142,
+              "duplicates": 1090,
+              "hitRate": 0.3357798165137615,
+              "wrongRate": 0.2795275590551181
+            },
+            {
+              "threshold": 84,
+              "served": 491,
+              "hits": 358,
+              "wrong": 133,
+              "duplicates": 1090,
+              "hitRate": 0.3284403669724771,
+              "wrongRate": 0.2708757637474542
+            },
+            {
+              "threshold": 85,
+              "served": 479,
+              "hits": 353,
+              "wrong": 126,
+              "duplicates": 1090,
+              "hitRate": 0.3238532110091743,
+              "wrongRate": 0.2630480167014614
+            },
+            {
+              "threshold": 86,
+              "served": 465,
+              "hits": 345,
+              "wrong": 120,
+              "duplicates": 1090,
+              "hitRate": 0.3165137614678899,
+              "wrongRate": 0.25806451612903225
+            },
+            {
+              "threshold": 87,
+              "served": 443,
+              "hits": 337,
+              "wrong": 106,
+              "duplicates": 1090,
+              "hitRate": 0.3091743119266055,
+              "wrongRate": 0.23927765237020315
+            },
+            {
+              "threshold": 88,
+              "served": 421,
+              "hits": 325,
+              "wrong": 96,
+              "duplicates": 1090,
+              "hitRate": 0.2981651376146789,
+              "wrongRate": 0.22802850356294538
+            },
+            {
+              "threshold": 89,
+              "served": 398,
+              "hits": 309,
+              "wrong": 89,
+              "duplicates": 1090,
+              "hitRate": 0.2834862385321101,
+              "wrongRate": 0.2236180904522613
+            },
+            {
+              "threshold": 90,
+              "served": 360,
+              "hits": 292,
+              "wrong": 68,
+              "duplicates": 1090,
+              "hitRate": 0.26788990825688075,
+              "wrongRate": 0.18888888888888888
+            },
+            {
+              "threshold": 91,
+              "served": 324,
+              "hits": 272,
+              "wrong": 52,
+              "duplicates": 1090,
+              "hitRate": 0.24954128440366974,
+              "wrongRate": 0.16049382716049382
+            },
+            {
+              "threshold": 92,
+              "served": 292,
+              "hits": 248,
+              "wrong": 44,
+              "duplicates": 1090,
+              "hitRate": 0.22752293577981653,
+              "wrongRate": 0.1506849315068493
+            },
+            {
+              "threshold": 93,
+              "served": 252,
+              "hits": 220,
+              "wrong": 32,
+              "duplicates": 1090,
+              "hitRate": 0.2018348623853211,
+              "wrongRate": 0.12698412698412698
+            },
+            {
+              "threshold": 94,
+              "served": 220,
+              "hits": 198,
+              "wrong": 22,
+              "duplicates": 1090,
+              "hitRate": 0.181651376146789,
+              "wrongRate": 0.1
+            },
+            {
+              "threshold": 95,
+              "served": 191,
+              "hits": 175,
+              "wrong": 16,
+              "duplicates": 1090,
+              "hitRate": 0.16055045871559634,
+              "wrongRate": 0.08376963350785341
+            },
+            {
+              "threshold": 96,
+              "served": 163,
+              "hits": 150,
+              "wrong": 13,
+              "duplicates": 1090,
+              "hitRate": 0.13761467889908258,
+              "wrongRate": 0.07975460122699386
+            },
+            {
+              "threshold": 97,
+              "served": 131,
+              "hits": 121,
+              "wrong": 10,
+              "duplicates": 1090,
+              "hitRate": 0.11100917431192661,
+              "wrongRate": 0.07633587786259542
+            },
+            {
+              "threshold": 98,
+              "served": 90,
+              "hits": 84,
+              "wrong": 6,
+              "duplicates": 1090,
+              "hitRate": 0.07706422018348624,
+              "wrongRate": 0.06666666666666667
+            },
+            {
+              "threshold": 99,
+              "served": 44,
+              "hits": 43,
+              "wrong": 1,
+              "duplicates": 1090,
+              "hitRate": 0.03944954128440367,
+              "wrongRate": 0.022727272727272728
+            }
+          ],
+          "nn": [
+            {
+              "threshold": 80,
+              "served": 1496,
+              "hits": 835,
+              "wrong": 661,
+              "duplicates": 1090,
+              "hitRate": 0.7660550458715596,
+              "wrongRate": 0.44184491978609625
+            },
+            {
+              "threshold": 81,
+              "served": 1430,
+              "hits": 815,
+              "wrong": 615,
+              "duplicates": 1090,
+              "hitRate": 0.7477064220183486,
+              "wrongRate": 0.43006993006993005
+            },
+            {
+              "threshold": 82,
+              "served": 1360,
+              "hits": 790,
+              "wrong": 570,
+              "duplicates": 1090,
+              "hitRate": 0.7247706422018348,
+              "wrongRate": 0.41911764705882354
+            },
+            {
+              "threshold": 83,
+              "served": 1283,
+              "hits": 765,
+              "wrong": 518,
+              "duplicates": 1090,
+              "hitRate": 0.7018348623853211,
+              "wrongRate": 0.40374123148869834
+            },
+            {
+              "threshold": 84,
+              "served": 1206,
+              "hits": 734,
+              "wrong": 472,
+              "duplicates": 1090,
+              "hitRate": 0.673394495412844,
+              "wrongRate": 0.3913764510779436
+            },
+            {
+              "threshold": 85,
+              "served": 1126,
+              "hits": 710,
+              "wrong": 416,
+              "duplicates": 1090,
+              "hitRate": 0.6513761467889908,
+              "wrongRate": 0.369449378330373
+            },
+            {
+              "threshold": 86,
+              "served": 1051,
+              "hits": 675,
+              "wrong": 376,
+              "duplicates": 1090,
+              "hitRate": 0.6192660550458715,
+              "wrongRate": 0.3577545195052331
+            },
+            {
+              "threshold": 87,
+              "served": 962,
+              "hits": 632,
+              "wrong": 330,
+              "duplicates": 1090,
+              "hitRate": 0.5798165137614679,
+              "wrongRate": 0.34303534303534305
+            },
+            {
+              "threshold": 88,
+              "served": 866,
+              "hits": 586,
+              "wrong": 280,
+              "duplicates": 1090,
+              "hitRate": 0.5376146788990825,
+              "wrongRate": 0.3233256351039261
+            },
+            {
+              "threshold": 89,
+              "served": 799,
+              "hits": 546,
+              "wrong": 253,
+              "duplicates": 1090,
+              "hitRate": 0.5009174311926605,
+              "wrongRate": 0.3166458072590738
+            },
+            {
+              "threshold": 90,
+              "served": 713,
+              "hits": 507,
+              "wrong": 206,
+              "duplicates": 1090,
+              "hitRate": 0.4651376146788991,
+              "wrongRate": 0.28892005610098176
+            },
+            {
+              "threshold": 91,
+              "served": 621,
+              "hits": 461,
+              "wrong": 160,
+              "duplicates": 1090,
+              "hitRate": 0.42293577981651376,
+              "wrongRate": 0.2576489533011272
+            },
+            {
+              "threshold": 92,
+              "served": 549,
+              "hits": 413,
+              "wrong": 136,
+              "duplicates": 1090,
+              "hitRate": 0.37889908256880733,
+              "wrongRate": 0.24772313296903462
+            },
+            {
+              "threshold": 93,
+              "served": 450,
+              "hits": 348,
+              "wrong": 102,
+              "duplicates": 1090,
+              "hitRate": 0.3192660550458716,
+              "wrongRate": 0.22666666666666666
+            },
+            {
+              "threshold": 94,
+              "served": 372,
+              "hits": 298,
+              "wrong": 74,
+              "duplicates": 1090,
+              "hitRate": 0.27339449541284405,
+              "wrongRate": 0.1989247311827957
+            },
+            {
+              "threshold": 95,
+              "served": 310,
+              "hits": 259,
+              "wrong": 51,
+              "duplicates": 1090,
+              "hitRate": 0.23761467889908258,
+              "wrongRate": 0.16451612903225807
+            },
+            {
+              "threshold": 96,
+              "served": 248,
+              "hits": 210,
+              "wrong": 38,
+              "duplicates": 1090,
+              "hitRate": 0.1926605504587156,
+              "wrongRate": 0.1532258064516129
+            },
+            {
+              "threshold": 97,
+              "served": 197,
+              "hits": 169,
+              "wrong": 28,
+              "duplicates": 1090,
+              "hitRate": 0.15504587155963304,
+              "wrongRate": 0.14213197969543148
+            },
+            {
+              "threshold": 98,
+              "served": 142,
+              "hits": 121,
+              "wrong": 21,
+              "duplicates": 1090,
+              "hitRate": 0.11100917431192661,
+              "wrongRate": 0.14788732394366197
+            },
+            {
+              "threshold": 99,
+              "served": 78,
+              "hits": 68,
+              "wrong": 10,
+              "duplicates": 1090,
+              "hitRate": 0.062385321100917435,
+              "wrongRate": 0.1282051282051282
+            }
+          ],
+          "nn+guards": [
+            {
+              "threshold": 80,
+              "served": 599,
+              "hits": 374,
+              "wrong": 225,
+              "duplicates": 1090,
+              "hitRate": 0.3431192660550459,
+              "wrongRate": 0.3756260434056761
+            },
+            {
+              "threshold": 81,
+              "served": 591,
+              "hits": 372,
+              "wrong": 219,
+              "duplicates": 1090,
+              "hitRate": 0.3412844036697248,
+              "wrongRate": 0.37055837563451777
+            },
+            {
+              "threshold": 82,
+              "served": 581,
+              "hits": 372,
+              "wrong": 209,
+              "duplicates": 1090,
+              "hitRate": 0.3412844036697248,
+              "wrongRate": 0.35972461273666095
+            },
+            {
+              "threshold": 83,
+              "served": 568,
+              "hits": 369,
+              "wrong": 199,
+              "duplicates": 1090,
+              "hitRate": 0.3385321100917431,
+              "wrongRate": 0.3503521126760563
+            },
+            {
+              "threshold": 84,
+              "served": 550,
+              "hits": 362,
+              "wrong": 188,
+              "duplicates": 1090,
+              "hitRate": 0.3321100917431193,
+              "wrongRate": 0.3418181818181818
+            },
+            {
+              "threshold": 85,
+              "served": 538,
+              "hits": 360,
+              "wrong": 178,
+              "duplicates": 1090,
+              "hitRate": 0.3302752293577982,
+              "wrongRate": 0.3308550185873606
+            },
+            {
+              "threshold": 86,
+              "served": 521,
+              "hits": 352,
+              "wrong": 169,
+              "duplicates": 1090,
+              "hitRate": 0.3229357798165138,
+              "wrongRate": 0.32437619961612285
+            },
+            {
+              "threshold": 87,
+              "served": 499,
+              "hits": 345,
+              "wrong": 154,
+              "duplicates": 1090,
+              "hitRate": 0.3165137614678899,
+              "wrongRate": 0.30861723446893785
+            },
+            {
+              "threshold": 88,
+              "served": 475,
+              "hits": 334,
+              "wrong": 141,
+              "duplicates": 1090,
+              "hitRate": 0.30642201834862387,
+              "wrongRate": 0.2968421052631579
+            },
+            {
+              "threshold": 89,
+              "served": 451,
+              "hits": 319,
+              "wrong": 132,
+              "duplicates": 1090,
+              "hitRate": 0.2926605504587156,
+              "wrongRate": 0.2926829268292683
+            },
+            {
+              "threshold": 90,
+              "served": 413,
+              "hits": 304,
+              "wrong": 109,
+              "duplicates": 1090,
+              "hitRate": 0.27889908256880735,
+              "wrongRate": 0.2639225181598063
+            },
+            {
+              "threshold": 91,
+              "served": 375,
+              "hits": 285,
+              "wrong": 90,
+              "duplicates": 1090,
+              "hitRate": 0.26146788990825687,
+              "wrongRate": 0.24
+            },
+            {
+              "threshold": 92,
+              "served": 343,
+              "hits": 264,
+              "wrong": 79,
+              "duplicates": 1090,
+              "hitRate": 0.24220183486238533,
+              "wrongRate": 0.2303206997084548
+            },
+            {
+              "threshold": 93,
+              "served": 300,
+              "hits": 238,
+              "wrong": 62,
+              "duplicates": 1090,
+              "hitRate": 0.21834862385321102,
+              "wrongRate": 0.20666666666666667
+            },
+            {
+              "threshold": 94,
+              "served": 267,
+              "hits": 217,
+              "wrong": 50,
+              "duplicates": 1090,
+              "hitRate": 0.19908256880733946,
+              "wrongRate": 0.18726591760299627
+            },
+            {
+              "threshold": 95,
+              "served": 233,
+              "hits": 195,
+              "wrong": 38,
+              "duplicates": 1090,
+              "hitRate": 0.17889908256880735,
+              "wrongRate": 0.1630901287553648
+            },
+            {
+              "threshold": 96,
+              "served": 203,
+              "hits": 171,
+              "wrong": 32,
+              "duplicates": 1090,
+              "hitRate": 0.15688073394495414,
+              "wrongRate": 0.15763546798029557
+            },
+            {
+              "threshold": 97,
+              "served": 168,
+              "hits": 142,
+              "wrong": 26,
+              "duplicates": 1090,
+              "hitRate": 0.13027522935779817,
+              "wrongRate": 0.15476190476190477
+            },
+            {
+              "threshold": 98,
+              "served": 125,
+              "hits": 105,
+              "wrong": 20,
+              "duplicates": 1090,
+              "hitRate": 0.0963302752293578,
+              "wrongRate": 0.16
+            },
+            {
+              "threshold": 99,
+              "served": 73,
+              "hits": 64,
+              "wrong": 9,
+              "duplicates": 1090,
+              "hitRate": 0.05871559633027523,
+              "wrongRate": 0.1232876712328767
+            }
+          ]
+        },
+        "paws": {
+          "pairwise": [
+            {
+              "threshold": 80,
+              "served": 1976,
+              "hits": 890,
+              "wrong": 1086,
+              "duplicates": 904,
+              "hitRate": 0.9845132743362832,
+              "wrongRate": 0.5495951417004049
+            },
+            {
+              "threshold": 81,
+              "served": 1970,
+              "hits": 887,
+              "wrong": 1083,
+              "duplicates": 904,
+              "hitRate": 0.9811946902654868,
+              "wrongRate": 0.549746192893401
+            },
+            {
+              "threshold": 82,
+              "served": 1969,
+              "hits": 887,
+              "wrong": 1082,
+              "duplicates": 904,
+              "hitRate": 0.9811946902654868,
+              "wrongRate": 0.5495175215845607
+            },
+            {
+              "threshold": 83,
+              "served": 1964,
+              "hits": 886,
+              "wrong": 1078,
+              "duplicates": 904,
+              "hitRate": 0.9800884955752213,
+              "wrongRate": 0.5488798370672098
+            },
+            {
+              "threshold": 84,
+              "served": 1961,
+              "hits": 886,
+              "wrong": 1075,
+              "duplicates": 904,
+              "hitRate": 0.9800884955752213,
+              "wrongRate": 0.5481896991330953
+            },
+            {
+              "threshold": 85,
+              "served": 1953,
+              "hits": 883,
+              "wrong": 1070,
+              "duplicates": 904,
+              "hitRate": 0.9767699115044248,
+              "wrongRate": 0.5478750640040962
+            },
+            {
+              "threshold": 86,
+              "served": 1944,
+              "hits": 882,
+              "wrong": 1062,
+              "duplicates": 904,
+              "hitRate": 0.9756637168141593,
+              "wrongRate": 0.5462962962962963
+            },
+            {
+              "threshold": 87,
+              "served": 1933,
+              "hits": 879,
+              "wrong": 1054,
+              "duplicates": 904,
+              "hitRate": 0.9723451327433629,
+              "wrongRate": 0.545266425245732
+            },
+            {
+              "threshold": 88,
+              "served": 1915,
+              "hits": 877,
+              "wrong": 1038,
+              "duplicates": 904,
+              "hitRate": 0.9701327433628318,
+              "wrongRate": 0.5420365535248042
+            },
+            {
+              "threshold": 89,
+              "served": 1898,
+              "hits": 875,
+              "wrong": 1023,
+              "duplicates": 904,
+              "hitRate": 0.9679203539823009,
+              "wrongRate": 0.5389884088514225
+            },
+            {
+              "threshold": 90,
+              "served": 1884,
+              "hits": 871,
+              "wrong": 1013,
+              "duplicates": 904,
+              "hitRate": 0.963495575221239,
+              "wrongRate": 0.5376857749469215
+            },
+            {
+              "threshold": 91,
+              "served": 1860,
+              "hits": 867,
+              "wrong": 993,
+              "duplicates": 904,
+              "hitRate": 0.959070796460177,
+              "wrongRate": 0.5338709677419354
+            },
+            {
+              "threshold": 92,
+              "served": 1829,
+              "hits": 863,
+              "wrong": 966,
+              "duplicates": 904,
+              "hitRate": 0.9546460176991151,
+              "wrongRate": 0.5281574630945872
+            },
+            {
+              "threshold": 93,
+              "served": 1765,
+              "hits": 844,
+              "wrong": 921,
+              "duplicates": 904,
+              "hitRate": 0.9336283185840708,
+              "wrongRate": 0.521813031161473
+            },
+            {
+              "threshold": 94,
+              "served": 1709,
+              "hits": 834,
+              "wrong": 875,
+              "duplicates": 904,
+              "hitRate": 0.922566371681416,
+              "wrongRate": 0.5119953188999414
+            },
+            {
+              "threshold": 95,
+              "served": 1627,
+              "hits": 809,
+              "wrong": 818,
+              "duplicates": 904,
+              "hitRate": 0.8949115044247787,
+              "wrongRate": 0.5027658266748617
+            },
+            {
+              "threshold": 96,
+              "served": 1508,
+              "hits": 761,
+              "wrong": 747,
+              "duplicates": 904,
+              "hitRate": 0.8418141592920354,
+              "wrongRate": 0.4953580901856764
+            },
+            {
+              "threshold": 97,
+              "served": 1363,
+              "hits": 722,
+              "wrong": 641,
+              "duplicates": 904,
+              "hitRate": 0.7986725663716814,
+              "wrongRate": 0.4702861335289802
+            },
+            {
+              "threshold": 98,
+              "served": 1105,
+              "hits": 614,
+              "wrong": 491,
+              "duplicates": 904,
+              "hitRate": 0.6792035398230089,
+              "wrongRate": 0.4443438914027149
+            },
+            {
+              "threshold": 99,
+              "served": 629,
+              "hits": 384,
+              "wrong": 245,
+              "duplicates": 904,
+              "hitRate": 0.4247787610619469,
+              "wrongRate": 0.38950715421303655
+            }
+          ],
+          "pairwise+guards": [
+            {
+              "threshold": 80,
+              "served": 1125,
+              "hits": 531,
+              "wrong": 594,
+              "duplicates": 904,
+              "hitRate": 0.5873893805309734,
+              "wrongRate": 0.528
+            },
+            {
+              "threshold": 81,
+              "served": 1123,
+              "hits": 530,
+              "wrong": 593,
+              "duplicates": 904,
+              "hitRate": 0.5862831858407079,
+              "wrongRate": 0.5280498664292075
+            },
+            {
+              "threshold": 82,
+              "served": 1123,
+              "hits": 530,
+              "wrong": 593,
+              "duplicates": 904,
+              "hitRate": 0.5862831858407079,
+              "wrongRate": 0.5280498664292075
+            },
+            {
+              "threshold": 83,
+              "served": 1121,
+              "hits": 529,
+              "wrong": 592,
+              "duplicates": 904,
+              "hitRate": 0.5851769911504425,
+              "wrongRate": 0.528099910793934
+            },
+            {
+              "threshold": 84,
+              "served": 1121,
+              "hits": 529,
+              "wrong": 592,
+              "duplicates": 904,
+              "hitRate": 0.5851769911504425,
+              "wrongRate": 0.528099910793934
+            },
+            {
+              "threshold": 85,
+              "served": 1119,
+              "hits": 528,
+              "wrong": 591,
+              "duplicates": 904,
+              "hitRate": 0.584070796460177,
+              "wrongRate": 0.5281501340482574
+            },
+            {
+              "threshold": 86,
+              "served": 1118,
+              "hits": 528,
+              "wrong": 590,
+              "duplicates": 904,
+              "hitRate": 0.584070796460177,
+              "wrongRate": 0.5277280858676208
+            },
+            {
+              "threshold": 87,
+              "served": 1115,
+              "hits": 528,
+              "wrong": 587,
+              "duplicates": 904,
+              "hitRate": 0.584070796460177,
+              "wrongRate": 0.526457399103139
+            },
+            {
+              "threshold": 88,
+              "served": 1113,
+              "hits": 527,
+              "wrong": 586,
+              "duplicates": 904,
+              "hitRate": 0.5829646017699115,
+              "wrongRate": 0.5265049415992812
+            },
+            {
+              "threshold": 89,
+              "served": 1108,
+              "hits": 526,
+              "wrong": 582,
+              "duplicates": 904,
+              "hitRate": 0.581858407079646,
+              "wrongRate": 0.5252707581227437
+            },
+            {
+              "threshold": 90,
+              "served": 1101,
+              "hits": 525,
+              "wrong": 576,
+              "duplicates": 904,
+              "hitRate": 0.5807522123893806,
+              "wrongRate": 0.5231607629427792
+            },
+            {
+              "threshold": 91,
+              "served": 1091,
+              "hits": 522,
+              "wrong": 569,
+              "duplicates": 904,
+              "hitRate": 0.577433628318584,
+              "wrongRate": 0.5215398716773603
+            },
+            {
+              "threshold": 92,
+              "served": 1082,
+              "hits": 521,
+              "wrong": 561,
+              "duplicates": 904,
+              "hitRate": 0.5763274336283186,
+              "wrongRate": 0.5184842883548983
+            },
+            {
+              "threshold": 93,
+              "served": 1055,
+              "hits": 512,
+              "wrong": 543,
+              "duplicates": 904,
+              "hitRate": 0.5663716814159292,
+              "wrongRate": 0.5146919431279621
+            },
+            {
+              "threshold": 94,
+              "served": 1032,
+              "hits": 506,
+              "wrong": 526,
+              "duplicates": 904,
+              "hitRate": 0.5597345132743363,
+              "wrongRate": 0.5096899224806202
+            },
+            {
+              "threshold": 95,
+              "served": 999,
+              "hits": 499,
+              "wrong": 500,
+              "duplicates": 904,
+              "hitRate": 0.5519911504424779,
+              "wrongRate": 0.5005005005005005
+            },
+            {
+              "threshold": 96,
+              "served": 947,
+              "hits": 478,
+              "wrong": 469,
+              "duplicates": 904,
+              "hitRate": 0.5287610619469026,
+              "wrongRate": 0.4952481520591341
+            },
+            {
+              "threshold": 97,
+              "served": 876,
+              "hits": 457,
+              "wrong": 419,
+              "duplicates": 904,
+              "hitRate": 0.5055309734513275,
+              "wrongRate": 0.478310502283105
+            },
+            {
+              "threshold": 98,
+              "served": 740,
+              "hits": 406,
+              "wrong": 334,
+              "duplicates": 904,
+              "hitRate": 0.4491150442477876,
+              "wrongRate": 0.45135135135135135
+            },
+            {
+              "threshold": 99,
+              "served": 471,
+              "hits": 281,
+              "wrong": 190,
+              "duplicates": 904,
+              "hitRate": 0.3108407079646018,
+              "wrongRate": 0.4033970276008493
+            }
+          ],
+          "nn": [
+            {
+              "threshold": 80,
+              "served": 1991,
+              "hits": 715,
+              "wrong": 1276,
+              "duplicates": 904,
+              "hitRate": 0.790929203539823,
+              "wrongRate": 0.6408839779005525
+            },
+            {
+              "threshold": 81,
+              "served": 1990,
+              "hits": 714,
+              "wrong": 1276,
+              "duplicates": 904,
+              "hitRate": 0.7898230088495575,
+              "wrongRate": 0.6412060301507537
+            },
+            {
+              "threshold": 82,
+              "served": 1989,
+              "hits": 714,
+              "wrong": 1275,
+              "duplicates": 904,
+              "hitRate": 0.7898230088495575,
+              "wrongRate": 0.6410256410256411
+            },
+            {
+              "threshold": 83,
+              "served": 1987,
+              "hits": 713,
+              "wrong": 1274,
+              "duplicates": 904,
+              "hitRate": 0.7887168141592921,
+              "wrongRate": 0.6411675893306492
+            },
+            {
+              "threshold": 84,
+              "served": 1986,
+              "hits": 713,
+              "wrong": 1273,
+              "duplicates": 904,
+              "hitRate": 0.7887168141592921,
+              "wrongRate": 0.6409869083585096
+            },
+            {
+              "threshold": 85,
+              "served": 1981,
+              "hits": 711,
+              "wrong": 1270,
+              "duplicates": 904,
+              "hitRate": 0.786504424778761,
+              "wrongRate": 0.6410903584048461
+            },
+            {
+              "threshold": 86,
+              "served": 1976,
+              "hits": 710,
+              "wrong": 1266,
+              "duplicates": 904,
+              "hitRate": 0.7853982300884956,
+              "wrongRate": 0.6406882591093117
+            },
+            {
+              "threshold": 87,
+              "served": 1969,
+              "hits": 708,
+              "wrong": 1261,
+              "duplicates": 904,
+              "hitRate": 0.7831858407079646,
+              "wrongRate": 0.6404266124936516
+            },
+            {
+              "threshold": 88,
+              "served": 1960,
+              "hits": 707,
+              "wrong": 1253,
+              "duplicates": 904,
+              "hitRate": 0.7820796460176991,
+              "wrongRate": 0.6392857142857142
+            },
+            {
+              "threshold": 89,
+              "served": 1948,
+              "hits": 707,
+              "wrong": 1241,
+              "duplicates": 904,
+              "hitRate": 0.7820796460176991,
+              "wrongRate": 0.6370636550308009
+            },
+            {
+              "threshold": 90,
+              "served": 1942,
+              "hits": 704,
+              "wrong": 1238,
+              "duplicates": 904,
+              "hitRate": 0.7787610619469026,
+              "wrongRate": 0.6374871266735325
+            },
+            {
+              "threshold": 91,
+              "served": 1928,
+              "hits": 703,
+              "wrong": 1225,
+              "duplicates": 904,
+              "hitRate": 0.7776548672566371,
+              "wrongRate": 0.6353734439834025
+            },
+            {
+              "threshold": 92,
+              "served": 1915,
+              "hits": 701,
+              "wrong": 1214,
+              "duplicates": 904,
+              "hitRate": 0.7754424778761062,
+              "wrongRate": 0.6339425587467363
+            },
+            {
+              "threshold": 93,
+              "served": 1891,
+              "hits": 693,
+              "wrong": 1198,
+              "duplicates": 904,
+              "hitRate": 0.7665929203539823,
+              "wrongRate": 0.6335272342675833
+            },
+            {
+              "threshold": 94,
+              "served": 1863,
+              "hits": 689,
+              "wrong": 1174,
+              "duplicates": 904,
+              "hitRate": 0.7621681415929203,
+              "wrongRate": 0.6301663982823403
+            },
+            {
+              "threshold": 95,
+              "served": 1825,
+              "hits": 678,
+              "wrong": 1147,
+              "duplicates": 904,
+              "hitRate": 0.75,
+              "wrongRate": 0.6284931506849315
+            },
+            {
+              "threshold": 96,
+              "served": 1763,
+              "hits": 653,
+              "wrong": 1110,
+              "duplicates": 904,
+              "hitRate": 0.7223451327433629,
+              "wrongRate": 0.629608621667612
+            },
+            {
+              "threshold": 97,
+              "served": 1679,
+              "hits": 628,
+              "wrong": 1051,
+              "duplicates": 904,
+              "hitRate": 0.6946902654867256,
+              "wrongRate": 0.6259678379988088
+            },
+            {
+              "threshold": 98,
+              "served": 1519,
+              "hits": 579,
+              "wrong": 940,
+              "duplicates": 904,
+              "hitRate": 0.6404867256637168,
+              "wrongRate": 0.618828176431863
+            },
+            {
+              "threshold": 99,
+              "served": 1172,
+              "hits": 445,
+              "wrong": 727,
+              "duplicates": 904,
+              "hitRate": 0.4922566371681416,
+              "wrongRate": 0.6203071672354948
+            }
+          ],
+          "nn+guards": [
+            {
+              "threshold": 80,
+              "served": 1424,
+              "hits": 504,
+              "wrong": 920,
+              "duplicates": 904,
+              "hitRate": 0.5575221238938053,
+              "wrongRate": 0.6460674157303371
+            },
+            {
+              "threshold": 81,
+              "served": 1424,
+              "hits": 504,
+              "wrong": 920,
+              "duplicates": 904,
+              "hitRate": 0.5575221238938053,
+              "wrongRate": 0.6460674157303371
+            },
+            {
+              "threshold": 82,
+              "served": 1424,
+              "hits": 504,
+              "wrong": 920,
+              "duplicates": 904,
+              "hitRate": 0.5575221238938053,
+              "wrongRate": 0.6460674157303371
+            },
+            {
+              "threshold": 83,
+              "served": 1423,
+              "hits": 503,
+              "wrong": 920,
+              "duplicates": 904,
+              "hitRate": 0.5564159292035398,
+              "wrongRate": 0.6465214335910049
+            },
+            {
+              "threshold": 84,
+              "served": 1423,
+              "hits": 503,
+              "wrong": 920,
+              "duplicates": 904,
+              "hitRate": 0.5564159292035398,
+              "wrongRate": 0.6465214335910049
+            },
+            {
+              "threshold": 85,
+              "served": 1422,
+              "hits": 502,
+              "wrong": 920,
+              "duplicates": 904,
+              "hitRate": 0.5553097345132744,
+              "wrongRate": 0.6469760900140648
+            },
+            {
+              "threshold": 86,
+              "served": 1421,
+              "hits": 502,
+              "wrong": 919,
+              "duplicates": 904,
+              "hitRate": 0.5553097345132744,
+              "wrongRate": 0.6467276565798733
+            },
+            {
+              "threshold": 87,
+              "served": 1419,
+              "hits": 502,
+              "wrong": 917,
+              "duplicates": 904,
+              "hitRate": 0.5553097345132744,
+              "wrongRate": 0.6462297392529951
+            },
+            {
+              "threshold": 88,
+              "served": 1418,
+              "hits": 501,
+              "wrong": 917,
+              "duplicates": 904,
+              "hitRate": 0.5542035398230089,
+              "wrongRate": 0.6466854724964739
+            },
+            {
+              "threshold": 89,
+              "served": 1415,
+              "hits": 501,
+              "wrong": 914,
+              "duplicates": 904,
+              "hitRate": 0.5542035398230089,
+              "wrongRate": 0.6459363957597173
+            },
+            {
+              "threshold": 90,
+              "served": 1412,
+              "hits": 500,
+              "wrong": 912,
+              "duplicates": 904,
+              "hitRate": 0.5530973451327433,
+              "wrongRate": 0.6458923512747875
+            },
+            {
+              "threshold": 91,
+              "served": 1407,
+              "hits": 500,
+              "wrong": 907,
+              "duplicates": 904,
+              "hitRate": 0.5530973451327433,
+              "wrongRate": 0.644633972992182
+            },
+            {
+              "threshold": 92,
+              "served": 1403,
+              "hits": 500,
+              "wrong": 903,
+              "duplicates": 904,
+              "hitRate": 0.5530973451327433,
+              "wrongRate": 0.6436208125445474
+            },
+            {
+              "threshold": 93,
+              "served": 1394,
+              "hits": 496,
+              "wrong": 898,
+              "duplicates": 904,
+              "hitRate": 0.5486725663716814,
+              "wrongRate": 0.6441893830703013
+            },
+            {
+              "threshold": 94,
+              "served": 1382,
+              "hits": 493,
+              "wrong": 889,
+              "duplicates": 904,
+              "hitRate": 0.5453539823008849,
+              "wrongRate": 0.6432706222865412
+            },
+            {
+              "threshold": 95,
+              "served": 1369,
+              "hits": 491,
+              "wrong": 878,
+              "duplicates": 904,
+              "hitRate": 0.543141592920354,
+              "wrongRate": 0.6413440467494521
+            },
+            {
+              "threshold": 96,
+              "served": 1344,
+              "hits": 479,
+              "wrong": 865,
+              "duplicates": 904,
+              "hitRate": 0.5298672566371682,
+              "wrongRate": 0.6436011904761905
+            },
+            {
+              "threshold": 97,
+              "served": 1308,
+              "hits": 467,
+              "wrong": 841,
+              "duplicates": 904,
+              "hitRate": 0.5165929203539823,
+              "wrongRate": 0.6429663608562691
+            },
+            {
+              "threshold": 98,
+              "served": 1231,
+              "hits": 448,
+              "wrong": 783,
+              "duplicates": 904,
+              "hitRate": 0.49557522123893805,
+              "wrongRate": 0.636068237205524
+            },
+            {
+              "threshold": 99,
+              "served": 1029,
+              "hits": 377,
+              "wrong": 652,
+              "duplicates": 904,
+              "hitRate": 0.4170353982300885,
+              "wrongRate": 0.6336248785228377
+            }
+          ]
+        }
+      },
+      "recommended": {
+        "threshold": 88,
+        "dev": {
+          "threshold": 88,
+          "served": 1802,
+          "hits": 796,
+          "wrong": 1006,
+          "duplicates": 1962,
+          "hitRate": 0.4057084607543323,
+          "wrongRate": 0.55826859045505
+        },
+        "test": {
+          "threshold": 88,
+          "served": 1893,
+          "hits": 835,
+          "wrong": 1058,
+          "duplicates": 1994,
+          "hitRate": 0.41875626880641925,
+          "wrongRate": 0.5589012150026413
+        },
+        "testBySource": {
+          "qqp": {
+            "threshold": 88,
+            "served": 475,
+            "hits": 334,
+            "wrong": 141,
+            "duplicates": 1090,
+            "hitRate": 0.30642201834862387,
+            "wrongRate": 0.2968421052631579
+          },
+          "paws": {
+            "threshold": 88,
+            "served": 1418,
+            "hits": 501,
+            "wrong": 917,
+            "duplicates": 904,
+            "hitRate": 0.5542035398230089,
+            "wrongRate": 0.6466854724964739
+          }
+        },
+        "refusedBy": {
+          "signature": 0,
+          "numbers": 19,
+          "quotes": 48,
+          "names": 557,
+          "negation": 8,
+          "tokens": 301
+        }
+      }
+    }
+  ]
+}

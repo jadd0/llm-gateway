@@ -1,0 +1,11 @@
+{
+  "rpm": 100,
+  "windowS": 0.021,
+  "burst": 1000,
+  "admittedLog": 100,
+  "admittedK6": 100,
+  "rejected429": 900,
+  "other429": 0,
+  "other": 0,
+  "logCaughtUp": true
+}

@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T06:07:36Z
+loadavg: { 1.52 2.97 4.21 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   16.9 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    0.7 /opt/homebrew/bin/limactl
+    0.6 /bin/zsh
+    0.6 /bin/zsh
+    0.5 /usr/sbin/notifyd

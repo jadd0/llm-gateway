@@ -33,7 +33,8 @@ test can start one on port 0 and change its behaviour mid-test.
 
 ## Measured
 
-Called directly, the mock's own latency floor in the instant profile was 1.190 ms p50 / 1.278 ms p95 at 1000
+From PR 1's run (one run per step; the final suite measures the gateway against the mock, see
+[BENCHMARKS.md](../../BENCHMARKS.md)): called directly, the mock's own latency floor in the instant profile was 1.190 ms p50 / 1.278 ms p95 at 1000
 req/s, and in the realistic profile 200.202 ms p50 to first byte. It sustained every throughput step up to
 20000 req/s with p95 at most 1.437 ms ([BENCHMARKS.md](../../BENCHMARKS.md)), so it was not the limit in the
 gateway runs.

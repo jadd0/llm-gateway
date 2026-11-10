@@ -49,7 +49,7 @@ compared against rather than an impression. PR 3 added the key check and re-meas
 
 ## Measured today (from [BENCHMARKS.md](../../BENCHMARKS.md))
 
-- Overhead of the hop: 0.233 ms p50 / 0.982 ms p95 non-streamed at 1000 req/s; 0.238 ms p50 / 0.254 ms p95
-  to first streamed byte at 200 req/s.
-- Throughput: last good step 10000 req/s through one gateway process, zero errors up to 20000 req/s, with
-  p95 degrading from 12000 req/s. One run per step, laptop, k6 on the same machine.
+- Overhead of the hop: 1.4 ms p50 / 2.1 ms p95 non-streamed with an instant mock; inside the noise against a
+  200 ms provider.
+- Throughput through nginx with every feature on: ceiling 2000 req/s; breaking point 4000 req/s with one
+  instance (the gateway's CPU, spent on budget rebuilds), 5000 to 6000 with three. One laptop, k6 included.

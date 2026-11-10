@@ -37,8 +37,9 @@ and a native rig.
 
 ## Measured (from [BENCHMARKS.md](../../BENCHMARKS.md))
 
-Overhead 0.233 ms p50 / 0.982 ms p95 (instant, 1000 req/s); 0.238 ms p50 / 0.254 ms p95 to first byte
-(realistic, 200 req/s). Throughput: last good step 10000 req/s; p95 99.091 ms at the 12000 req/s step.
+Overhead 1.4 ms p50 / 2.1 ms p95 (instant mock); inside the timer noise with a realistic mock. Ceiling 2000
+req/s through nginx with every feature on; breaking point 4000 req/s with one instance, 5000 to 6000 with three.
+Full tables, the breaking point's cause and the fix: [BENCHMARKS.md](../../BENCHMARKS.md).
 
 ## The final suite: three instances behind nginx
 

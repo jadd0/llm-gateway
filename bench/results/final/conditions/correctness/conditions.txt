@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T02:32:45Z
+loadavg: { 1.45 2.67 3.12 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   31.2 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    1.5 /Library/Application Support/org.pqrs/Karabiner-DriverKit-VirtualHIDDevice/Applications/Karabiner-VirtualHIDDevice-Daemon.app/Contents/MacOS/Karabiner-VirtualHIDDevice-Daemon
+    0.9 /bin/zsh
+    0.9 /bin/zsh
+    0.8 ssh: /Users/jaddal-khabbaz/.colima/_lima/colima/ssh.sock [mux]

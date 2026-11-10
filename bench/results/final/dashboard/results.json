@@ -1,0 +1,732 @@
+{
+  "startedAt": "2026-11-10T04:01:36.076Z",
+  "node": "v26.4.0",
+  "postgres": "PostgreSQL 17.11 (Debian 17.11-1.pgdg12+2)",
+  "cpus": "Apple M5 x10",
+  "loadAvgAtStart": [
+    1.5673828125,
+    3.20849609375,
+    4.439453125
+  ],
+  "sizes": [
+    10000,
+    100000,
+    1000000,
+    5000000
+  ],
+  "rollupRows": [
+    {
+      "size": 10000,
+      "rollupMinuteRows": 345,
+      "rollupHourRows": 9221
+    },
+    {
+      "size": 100000,
+      "rollupMinuteRows": 3460,
+      "rollupHourRows": 53769
+    },
+    {
+      "size": 1000000,
+      "rollupMinuteRows": 30969,
+      "rollupHourRows": 85982
+    },
+    {
+      "size": 5000000,
+      "rollupMinuteRows": 103796,
+      "rollupHourRows": 86160
+    }
+  ],
+  "rows": [
+    {
+      "size": 10000,
+      "query": "overview 1h",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 1.1045000000001437,
+        "p95Ms": 1.2894999999998618,
+        "minMs": 1.0334159999999883,
+        "maxMs": 1.4601249999998345
+      }
+    },
+    {
+      "size": 10000,
+      "query": "overview 1h",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 3.0209169999998267,
+        "p95Ms": 3.1467499999998836,
+        "minMs": 3.011790999999903,
+        "maxMs": 3.1467499999998836
+      }
+    },
+    {
+      "size": 10000,
+      "query": "overview 24h",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 4.619832999999971,
+        "p95Ms": 5.353375000000142,
+        "minMs": 4.536666999999852,
+        "maxMs": 6.504833999999846
+      }
+    },
+    {
+      "size": 10000,
+      "query": "overview 24h",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 3.4056250000001,
+        "p95Ms": 3.528500000000122,
+        "minMs": 3.316124999999829,
+        "maxMs": 3.528500000000122
+      }
+    },
+    {
+      "size": 10000,
+      "query": "overview 7d",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 4.189290999999912,
+        "p95Ms": 4.590167000000065,
+        "minMs": 4.091542000000118,
+        "maxMs": 4.9576660000000174
+      }
+    },
+    {
+      "size": 10000,
+      "query": "overview 7d",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 4.495124999999916,
+        "p95Ms": 4.60245800000007,
+        "minMs": 4.443749999999909,
+        "maxMs": 4.60245800000007
+      }
+    },
+    {
+      "size": 10000,
+      "query": "overview 30d",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 13.524124999999913,
+        "p95Ms": 15.529583000000002,
+        "minMs": 12.205167000000074,
+        "maxMs": 16.374874999999975
+      }
+    },
+    {
+      "size": 10000,
+      "query": "overview 30d",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 8.73025000000007,
+        "p95Ms": 9.356917000000067,
+        "minMs": 8.708000000000084,
+        "maxMs": 9.356917000000067
+      }
+    },
+    {
+      "size": 10000,
+      "query": "last 50 errors",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 1.279207999999926,
+        "p95Ms": 1.4510000000000218,
+        "minMs": 0.9786669999998594,
+        "maxMs": 1.5038329999997586
+      }
+    },
+    {
+      "size": 100000,
+      "query": "overview 1h",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 1.6829579999994166,
+        "p95Ms": 2.185749999998734,
+        "minMs": 1.6248340000001917,
+        "maxMs": 2.589625000000524
+      }
+    },
+    {
+      "size": 100000,
+      "query": "overview 1h",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 8.53533299999981,
+        "p95Ms": 8.731042000001253,
+        "minMs": 8.431916999999885,
+        "maxMs": 8.731042000001253
+      }
+    },
+    {
+      "size": 100000,
+      "query": "overview 24h",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 18.388291999999637,
+        "p95Ms": 19.58758300000045,
+        "minMs": 18.01037499999984,
+        "maxMs": 19.595209000000978
+      }
+    },
+    {
+      "size": 100000,
+      "query": "overview 24h",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 11.27587499999936,
+        "p95Ms": 11.669459000000643,
+        "minMs": 10.621166000000812,
+        "maxMs": 11.669459000000643
+      }
+    },
+    {
+      "size": 100000,
+      "query": "overview 7d",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 6.16912499999853,
+        "p95Ms": 6.950917000000118,
+        "minMs": 5.877791999999317,
+        "maxMs": 7.150625000000218
+      }
+    },
+    {
+      "size": 100000,
+      "query": "overview 7d",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 21.98999999999978,
+        "p95Ms": 22.34783299999981,
+        "minMs": 21.79449999999997,
+        "maxMs": 22.34783299999981
+      }
+    },
+    {
+      "size": 100000,
+      "query": "overview 30d",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 17.79058299999997,
+        "p95Ms": 20.03150000000096,
+        "minMs": 14.993250000001353,
+        "maxMs": 27.671374999999898
+      }
+    },
+    {
+      "size": 100000,
+      "query": "overview 30d",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 64.7510000000002,
+        "p95Ms": 66.81391699999949,
+        "minMs": 64.19608399999925,
+        "maxMs": 66.81391699999949
+      }
+    },
+    {
+      "size": 100000,
+      "query": "last 50 errors",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 1.187167000000045,
+        "p95Ms": 1.3535830000000715,
+        "minMs": 0.9446669999997539,
+        "maxMs": 1.4807079999991402
+      }
+    },
+    {
+      "size": 1000000,
+      "query": "overview 1h",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 2.3498750000144355,
+        "p95Ms": 3.0176250000076834,
+        "minMs": 2.256083000014769,
+        "maxMs": 3.283625000010943
+      }
+    },
+    {
+      "size": 1000000,
+      "query": "overview 1h",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 45.75150000001304,
+        "p95Ms": 46.23583300001337,
+        "minMs": 44.10391599999275,
+        "maxMs": 46.23583300001337
+      }
+    },
+    {
+      "size": 1000000,
+      "query": "overview 24h",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 23.52720800001407,
+        "p95Ms": 26.078459000011208,
+        "minMs": 22.772541000013007,
+        "maxMs": 26.322749999992084
+      }
+    },
+    {
+      "size": 1000000,
+      "query": "overview 24h",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 56.488833000010345,
+        "p95Ms": 58.01516700000502,
+        "minMs": 54.55008299998008,
+        "maxMs": 58.01516700000502
+      }
+    },
+    {
+      "size": 1000000,
+      "query": "overview 7d",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 15.930459000024712,
+        "p95Ms": 24.727333999995608,
+        "minMs": 14.963458999991417,
+        "maxMs": 25.88087500000256
+      }
+    },
+    {
+      "size": 1000000,
+      "query": "overview 7d",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 158.90662500000326,
+        "p95Ms": 161.92895900001167,
+        "minMs": 157.49379200002295,
+        "maxMs": 161.92895900001167
+      }
+    },
+    {
+      "size": 1000000,
+      "query": "overview 30d",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 20.865709000005154,
+        "p95Ms": 23.401958999980707,
+        "minMs": 17.746125000005122,
+        "maxMs": 36.31841599999461
+      }
+    },
+    {
+      "size": 1000000,
+      "query": "overview 30d",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 486.7364579999994,
+        "p95Ms": 493.10104099998716,
+        "minMs": 483.81366700000945,
+        "maxMs": 493.10104099998716
+      }
+    },
+    {
+      "size": 1000000,
+      "query": "last 50 errors",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 1.290166999999201,
+        "p95Ms": 1.4504580000066198,
+        "minMs": 1.1099580000154674,
+        "maxMs": 1.5302089999895543
+      }
+    },
+    {
+      "size": 5000000,
+      "query": "overview 1h",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 2.456000000005588,
+        "p95Ms": 3.542958000092767,
+        "minMs": 2.0548340000677854,
+        "maxMs": 3.6062089999904856
+      }
+    },
+    {
+      "size": 5000000,
+      "query": "overview 1h",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 420.63241700001527,
+        "p95Ms": 444.9123749999562,
+        "minMs": 418.722291000071,
+        "maxMs": 444.9123749999562
+      }
+    },
+    {
+      "size": 5000000,
+      "query": "overview 24h",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 27.8507919999538,
+        "p95Ms": 31.449249999946915,
+        "minMs": 26.977707999991253,
+        "maxMs": 31.503583000041544
+      }
+    },
+    {
+      "size": 5000000,
+      "query": "overview 24h",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 291.27987500000745,
+        "p95Ms": 306.8347079999512,
+        "minMs": 286.82166600006167,
+        "maxMs": 306.8347079999512
+      }
+    },
+    {
+      "size": 5000000,
+      "query": "overview 7d",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 21.925458000041544,
+        "p95Ms": 25.67545900004916,
+        "minMs": 20.811833000043407,
+        "maxMs": 33.788874999969266
+      }
+    },
+    {
+      "size": 5000000,
+      "query": "overview 7d",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 918.5081249999348,
+        "p95Ms": 931.4264160000021,
+        "minMs": 891.1358330000658,
+        "maxMs": 931.4264160000021
+      }
+    },
+    {
+      "size": 5000000,
+      "query": "overview 30d",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 23.52529199991841,
+        "p95Ms": 29.148625000030734,
+        "minMs": 19.844125000061467,
+        "maxMs": 29.45420799998101
+      }
+    },
+    {
+      "size": 5000000,
+      "query": "overview 30d",
+      "source": "raw",
+      "timing": {
+        "reps": 5,
+        "p50Ms": 2707.5975000000326,
+        "p95Ms": 2715.0144590000855,
+        "minMs": 2696.4473330000183,
+        "maxMs": 2715.0144590000855
+      }
+    },
+    {
+      "size": 5000000,
+      "query": "last 50 errors",
+      "source": "rollups",
+      "timing": {
+        "reps": 30,
+        "p50Ms": 1.2235830000136048,
+        "p95Ms": 1.4551249999785796,
+        "minMs": 1.0014159999554977,
+        "maxMs": 1.5710419999668375
+      }
+    }
+  ],
+  "agreement": [
+    {
+      "size": 10000,
+      "range": "1h",
+      "rollup": {
+        "requests": 5,
+        "errors": 0,
+        "costMicros": 28755,
+        "p95": 2227.9695606549776
+      },
+      "raw": {
+        "requests": 5,
+        "errors": 0,
+        "costMicros": 28755,
+        "p95": 2208
+      }
+    },
+    {
+      "size": 10000,
+      "range": "24h",
+      "rollup": {
+        "requests": 318,
+        "errors": 4,
+        "costMicros": 1522317,
+        "p95": 3134.97691046288
+      },
+      "raw": {
+        "requests": 318,
+        "errors": 4,
+        "costMicros": 1522317,
+        "p95": 3101
+      }
+    },
+    {
+      "size": 10000,
+      "range": "7d",
+      "rollup": {
+        "requests": 2289,
+        "errors": 34,
+        "costMicros": 10986945,
+        "p95": 3134.97691046288
+      },
+      "raw": {
+        "requests": 2289,
+        "errors": 34,
+        "costMicros": 10986945,
+        "p95": 3077
+      }
+    },
+    {
+      "size": 10000,
+      "range": "30d",
+      "rollup": {
+        "requests": 9976,
+        "errors": 187,
+        "costMicros": 47291109,
+        "p95": 3134.97691046288
+      },
+      "raw": {
+        "requests": 9976,
+        "errors": 187,
+        "costMicros": 47291109,
+        "p95": 3077
+      }
+    },
+    {
+      "size": 100000,
+      "range": "1h",
+      "rollup": {
+        "requests": 96,
+        "errors": 0,
+        "costMicros": 457842,
+        "p95": 3629.127645974592
+      },
+      "raw": {
+        "requests": 96,
+        "errors": 0,
+        "costMicros": 457842,
+        "p95": 3545
+      }
+    },
+    {
+      "size": 100000,
+      "range": "24h",
+      "rollup": {
+        "requests": 3335,
+        "errors": 64,
+        "costMicros": 15962349,
+        "p95": 3291.725755986024
+      },
+      "raw": {
+        "requests": 3335,
+        "errors": 64,
+        "costMicros": 15962349,
+        "p95": 3201
+      }
+    },
+    {
+      "size": 100000,
+      "range": "7d",
+      "rollup": {
+        "requests": 23065,
+        "errors": 444,
+        "costMicros": 110401764,
+        "p95": 3291.725755986024
+      },
+      "raw": {
+        "requests": 23065,
+        "errors": 444,
+        "costMicros": 110401764,
+        "p95": 3201
+      }
+    },
+    {
+      "size": 100000,
+      "range": "30d",
+      "rollup": {
+        "requests": 99756,
+        "errors": 1929,
+        "costMicros": 474764775,
+        "p95": 3134.97691046288
+      },
+      "raw": {
+        "requests": 99756,
+        "errors": 1929,
+        "costMicros": 474764775,
+        "p95": 3121
+      }
+    },
+    {
+      "size": 1000000,
+      "range": "1h",
+      "rollup": {
+        "requests": 885,
+        "errors": 19,
+        "costMicros": 4133082,
+        "p95": 3134.97691046288
+      },
+      "raw": {
+        "requests": 885,
+        "errors": 19,
+        "costMicros": 4133082,
+        "p95": 3029
+      }
+    },
+    {
+      "size": 1000000,
+      "range": "24h",
+      "rollup": {
+        "requests": 33086,
+        "errors": 684,
+        "costMicros": 155920161,
+        "p95": 3134.97691046288
+      },
+      "raw": {
+        "requests": 33086,
+        "errors": 684,
+        "costMicros": 155920161,
+        "p95": 3121
+      }
+    },
+    {
+      "size": 1000000,
+      "range": "7d",
+      "rollup": {
+        "requests": 232688,
+        "errors": 4551,
+        "costMicros": 1108925460,
+        "p95": 3134.97691046288
+      },
+      "raw": {
+        "requests": 232688,
+        "errors": 4551,
+        "costMicros": 1108925460,
+        "p95": 3119
+      }
+    },
+    {
+      "size": 1000000,
+      "range": "30d",
+      "rollup": {
+        "requests": 997627,
+        "errors": 19773,
+        "costMicros": 4759625505,
+        "p95": 3134.97691046288
+      },
+      "raw": {
+        "requests": 997627,
+        "errors": 19773,
+        "costMicros": 4759625505,
+        "p95": 3107
+      }
+    },
+    {
+      "size": 5000000,
+      "range": "1h",
+      "rollup": {
+        "requests": 4522,
+        "errors": 85,
+        "costMicros": 21389214,
+        "p95": 3291.725755986024
+      },
+      "raw": {
+        "requests": 4522,
+        "errors": 85,
+        "costMicros": 21389214,
+        "p95": 3172
+      }
+    },
+    {
+      "size": 5000000,
+      "range": "24h",
+      "rollup": {
+        "requests": 164960,
+        "errors": 3305,
+        "costMicros": 785245662,
+        "p95": 3134.97691046288
+      },
+      "raw": {
+        "requests": 164960,
+        "errors": 3305,
+        "costMicros": 785245662,
+        "p95": 3120
+      }
+    },
+    {
+      "size": 5000000,
+      "range": "7d",
+      "rollup": {
+        "requests": 1160478,
+        "errors": 22962,
+        "costMicros": 5527199682,
+        "p95": 3134.97691046288
+      },
+      "raw": {
+        "requests": 1160478,
+        "errors": 22962,
+        "costMicros": 5527199682,
+        "p95": 3115
+      }
+    },
+    {
+      "size": 5000000,
+      "range": "30d",
+      "rollup": {
+        "requests": 4988076,
+        "errors": 99518,
+        "costMicros": 23779059132,
+        "p95": 3134.97691046288
+      },
+      "raw": {
+        "requests": 4988076,
+        "errors": 99518,
+        "costMicros": 23779059132,
+        "p95": 3113
+      }
+    }
+  ],
+  "errorsUseIndex": true
+}

@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T06:44:55Z
+loadavg: { 1.77 2.22 2.66 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   20.0 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+   14.0 /usr/libexec/PerfPowerServices
+    5.0 /System/Library/CoreServices/launchservicesd
+    3.5 /System/Library/PrivateFrameworks/UserActivity.framework/Agents/useractivityd
+    2.3 /System/Library/CoreServices/Dock.app/Contents/MacOS/Dock

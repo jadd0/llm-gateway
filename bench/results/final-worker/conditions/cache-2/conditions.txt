@@ -1,0 +1,10 @@
+recorded_at: 2026-11-10T08:10:49Z
+loadavg: { 1.81 2.28 2.58 }
+power: Now drawing from 'AC Power'
+top_cpu:
+   %CPU COMM
+   32.5 /System/Library/Frameworks/Virtualization.framework/Versions/A/XPCServices/com.apple.Virtualization.VirtualMachine.xpc/Contents/MacOS/com.apple.Virtualization.VirtualMachine
+    1.0 /usr/sbin/notifyd
+    0.8 /System/Library/CoreServices/Finder.app/Contents/MacOS/Finder
+    0.7 /sbin/launchd
+    0.6 /bin/zsh
