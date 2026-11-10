@@ -6,7 +6,7 @@ After recording, link the video from the "Demo video" line in the top-level [REA
 
 ## Before recording (not on camera)
 
-Redis and Postgres up and migrated (see the README quick start), then three mocks-and-workers started in a hidden terminal:
+Redis and Postgres up and migrated (see the README quick start), then two mocks and the log worker started in a hidden terminal:
 
 ```
 docker compose up -d --wait redis postgres
@@ -16,16 +16,17 @@ MOCK_PORT=9001 npm run dev:mock &           # fallback mock on :9001
 npm run worker &
 ```
 
-Three tenants and their keys (each `create-key` prints its key once; export them):
+Three tenants and their keys. `create-key` prints a line of text and then the key, once, so keep only the last line:
 
 ```
-npm run keys -- create-tenant demo     && export KEY=$(npm run --silent keys -- create-key demo main)
-npm run keys -- create-tenant tight    && npm run keys -- set-budget tight --monthly-usd 0.001 \
-                                       && export TIGHT=$(npm run --silent keys -- create-key tight)
-npm run keys -- create-tenant slow     && export SLOW=$(npm run --silent keys -- create-key slow limited --rpm 2)
+npm run keys -- create-tenant demo
+export KEY=$(npm run --silent keys -- create-key demo main | tail -1)
+npm run keys -- create-tenant tight
+npm run keys -- set-budget tight --monthly-usd 0.001
+export TIGHT=$(npm run --silent keys -- create-key tight | tail -1)
+npm run keys -- create-tenant slow
+export SLOW=$(npm run --silent keys -- create-key slow limited --rpm 2 | tail -1)
 ```
-
-If `create-key` prints more than the key on your machine, copy the `gw_...` value by hand.
 
 The dashboard, in its own terminal and a browser tab already logged in at `http://localhost:3200`
 (set `DASHBOARD_TOKEN` and `DASHBOARD_SESSION_SECRET`, each at least 32 characters, and `DASHBOARD_DATABASE_URL` in `.env.local` first;
