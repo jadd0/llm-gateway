@@ -125,8 +125,8 @@ Stated here because they are part of the proof, not hidden from it.
   instances compete for the same 10 cores.
 - **Budget rebuilds are not shared.** When Redis calls time out under load, each in-flight request rebuilds a tenant's balance from
   Postgres on its own. This sets the breaking point; single-flight rebuilds are future work.
-- **Partial Redis outages can overshoot a cap briefly.** Instances that did not see an outage keep using the old balance for up to 250 ms.
-  Earlier single-instance runs saw 2 of 13 outage runs go over by 1 to 2%; the final suite saw 0 of 10 over the cap with Redis restarted
+- **Partial Redis outages can overshoot a cap briefly.** Instances that did not see an outage keep using the old balance for a short, bounded window.
+  Earlier runs on fewer instances saw a small overshoot (figures in the budgets doc); the final suite saw 0 of 10 runs over the cap with Redis restarted
   mid-run on 3 instances. The mechanism remains. [docs/budgets](docs/budgets/README.md#known-limits-documented-not-closed-here)
 - **A gateway killed between its two hold writes** can leave a hold Redis never counted; the sweeper charges its estimate, so spend can pass a cap by one
   estimate per request killed in that window. The chaos runs kill a provider, not a gateway.
